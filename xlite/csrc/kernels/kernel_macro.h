@@ -258,8 +258,10 @@ __aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTen
         mode = NoQuant;
     } else if constexpr (std::is_same<Dtype, float16_t>::value) {
         mode = F322F16;
+#if !defined(XLITE_ARCH_310P)
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
+#endif
     }
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 0);
     DataCopy(dst, src, param);
@@ -275,8 +277,10 @@ inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
         mode = NoQuant;
     } else if constexpr (std::is_same<Dtype, float16_t>::value) {
         mode = F322F16;
+#if !defined(XLITE_ARCH_310P)
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
+#endif
     }
 #ifdef __DAV_C220_CUBE__
     set_nd_para(0x1);
@@ -296,8 +300,10 @@ __aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
         mode = NoQuant;
     } else if constexpr (std::is_same<Dtype, float16_t>::value) {
         mode = F322F16;
+#if !defined(XLITE_ARCH_310P)
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
+#endif
     }
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
     SetFixpipeNz2ndFlag(1, 1, 1);
@@ -314,7 +320,9 @@ __aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTe
         float quant = 1;
         uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t *>(&quant));
         SetFixpipePreQuantFlag(deqScalar);
+#if !defined(XLITE_ARCH_310P)
         PipeBarrier<PIPE_FIX>();
+#endif
     }
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
     SetFixpipeNz2ndFlag(1, 1, 1);
@@ -336,8 +344,10 @@ __aicore__ inline void CopyToGmWithDequant(const GlobalTensor<OutDtype> &dst,
     if constexpr (std::is_same<MatDtype, float>::value) {
         if constexpr (std::is_same<OutDtype, float16_t>::value) {
             mode = F322F16;
+#if !defined(XLITE_ARCH_310P)
         } else if constexpr (std::is_same<OutDtype, bfloat16_t>::value) {
             mode = F322BF16;
+#endif
         }
     } else if constexpr (std::is_same<MatDtype, int32_t>::value) {
         if constexpr (std::is_same<OutDtype, half>::value) {
