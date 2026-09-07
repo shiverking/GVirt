@@ -180,11 +180,11 @@ file(GLOB KERNEL_FILES_F16
 )
 
 if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
-    # Compile only the kernels that have an explicit 310P vector path with the
-    # project-owned architecture macro.  The compatibility target keeps the
-    # remaining launch symbols, but must not promote unrelated 910B kernels to
-    # the 310P implementation path merely because they include a shared header.
-    set(KERNEL_FILES_F16_310P
+    # Keep the original entries out of the compatibility target to avoid
+    # duplicate launch symbols.  Dedicated 310P translation units validate the
+    # real __NPU_ARCH__ and select the non-empty implementation before including
+    # the shared kernel headers.
+    set(KERNEL_FILES_F16_310P_COMPAT_ENTRIES
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/norm_float16_t.cpp
@@ -192,11 +192,19 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_float16_t.cpp
     )
+    set(KERNEL_FILES_F16_310P
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/add_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/embed_kernel_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/norm_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/qk_rms_norm_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/rope_and_cache_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/silu_and_mul_float16_t.cpp
+    )
     list(REMOVE_ITEM KERNEL_FILES_F16
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_attention_float16_t.cpp
-        ${KERNEL_FILES_F16_310P}
+        ${KERNEL_FILES_F16_310P_COMPAT_ENTRIES}
     )
 endif()
 

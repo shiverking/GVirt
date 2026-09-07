@@ -288,7 +288,10 @@ class CMakeBuild(build_ext):
             env_value = os.environ.get(env_name)
             if env_value:
                 configure_cmd.append(f"-D{env_name}={env_value}")
-        build_cmd = ["cmake", "--build", str(build_temp), "-j"]
+        build_cmd = ["cmake", "--build", str(build_temp)]
+        if os.environ.get("XLITE_KERNEL_SET") == "llm_fp16":
+            build_cmd.append("--verbose")
+        build_cmd.append("-j")
         install_cmd = ["cmake", "--install", str(build_temp)]
 
         # Wheel (non-editable) builds must never ship debug code. Debug is driven purely by the XLITE_DEBUG_ON env var.
