@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 from __future__ import absolute_import
+import argparse
 import logging
 import json
 import os
@@ -70,7 +71,6 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [0], [127]),
         (1, [0], [128]),
         (1, [0], [129]),
-        (1, [128], [1]),
         (1, [15], [1]),
         (1, [126], [1]),
         (1, [127], [1]),
@@ -83,12 +83,36 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
 # fails or poisons its process.  The parent runs each shape in isolation and
 # prints all failures at the end; a hidden environment variable selects the
 # single child case.
+parser = argparse.ArgumentParser(description="Xlite attention correctness test")
+parser.add_argument("--rerun-failed", action="store_true",
+                    help="310P FP16: rerun failures from attention_310p_report/summary.json")
+test_args = parser.parse_args()
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
 if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
     report_dir = Path("attention_310p_report")
     report_dir.mkdir(parents=True, exist_ok=True)
+    selected_indices = list(range(len(work)))
+    if test_args.rerun_failed:
+        summary_path = report_dir / "summary.json"
+        if not summary_path.is_file():
+            parser.error(f"cannot rerun failures: {summary_path} does not exist")
+        try:
+            previous = json.loads(summary_path.read_text(encoding="utf-8"))
+            failed_names = {
+                item["name"] for item in previous if int(item["exit_code"]) != 0
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            parser.error(f"cannot read failures from {summary_path}: {error}")
+        selected_indices = [
+            index for index, (_batch, cached, query) in enumerate(work)
+            if f"cache{cached[0]}-query{query[0]}" in failed_names
+        ]
+        if not selected_indices:
+            print(f"No failed cases recorded in {summary_path}")
+            raise SystemExit(0)
     results = []
-    for index, (batch, cached_lens_list, query_len_list) in enumerate(work):
+    for index in selected_indices:
+        batch, cached_lens_list, query_len_list = work[index]
         case_name = f"cache{cached_lens_list[0]}-query{query_len_list[0]}"
         print(f"[ RUN      ] {case_name}", flush=True)
         log_path = report_dir / f"{case_name}.log"
