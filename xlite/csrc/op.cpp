@@ -22,6 +22,25 @@ static inline bool IsDummyRuntime(const XRuntime &rt)
     return rt.IsDummyRuntime();
 }
 
+void XliteOpProbe310P(XRuntime &rt, XTensor &out, uint32_t value)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+#ifdef XLITE_ARCH_310P
+    if (out.dtype != INT32 || out.numel < 1) {
+        throw std::runtime_error("Ascend310P launch probe requires a non-empty INT32 output");
+    }
+    // Deliberately use one block so this probe is independent of runtime core
+    // discovery and tests only binary registration, launch, and a scalar GM write.
+    aclrtlaunch_xlite_probe_310p(1, rt.stream, out.ptr, value);
+#else
+    (void)out;
+    (void)value;
+    throw std::runtime_error("Ascend310P launch probe is unavailable in this build");
+#endif
+}
+
 // Pick how many AIV blocks to launch for a byte-wise copy kernel (concat/split)
 // based on the total bytes. Each block processes ~tilePerCore bytes in series,
 // so for small data we launch only a few blocks (avoids the multi-core launch +

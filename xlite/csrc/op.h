@@ -39,6 +39,7 @@ static inline uint32_t DeriveMaxNumBlocks(const XTensor &blockTables, uint32_t b
 }
 
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
+void XliteOpProbe310P(XRuntime &rt, XTensor &out, uint32_t value);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
                       uint32_t copySize = COPY_SIZE);

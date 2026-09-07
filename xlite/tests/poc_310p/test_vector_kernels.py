@@ -10,7 +10,18 @@ from collections.abc import Callable
 import torch
 import torch.nn.functional as F
 
-from xlite._C import Runtime, add, embed, qk_rmsnorm_310p, rmsnorm, silu_and_mul
+from xlite._C import (
+    Runtime,
+    add,
+    embed,
+    probe_310p,
+    qk_rmsnorm_310p,
+    rmsnorm,
+    silu_and_mul,
+)
+
+
+PROBE_MAGIC = 0x03102002
 
 
 def _assert_written(value: torch.Tensor, name: str) -> None:
@@ -23,6 +34,15 @@ def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tens
     return (x.float() * torch.rsqrt(variance + eps) * weight.float()).half()
 
 
+def _test_launch_probe(runtime: Runtime, device: str) -> None:
+    output = torch.zeros(1, dtype=torch.int32, device=device)
+    probe_310p(runtime, output, PROBE_MAGIC)
+    actual = int(output.cpu().item())
+    if actual != PROBE_MAGIC:
+        raise AssertionError(
+            f"310P launch probe wrote 0x{actual:08x}, expected 0x{PROBE_MAGIC:08x}")
+
+
 def _test_add(runtime: Runtime, device: str) -> None:
     left = torch.randn(8, 2048, dtype=torch.float16, device=device)
     right = torch.randn_like(left)
@@ -31,6 +51,15 @@ def _test_add(runtime: Runtime, device: str) -> None:
     torch.npu.synchronize()
     _assert_written(output, "add")
     torch.testing.assert_close(output, left + right, rtol=1e-2, atol=1e-2)
+
+
+def _test_add_single_block(_runtime: Runtime, device: str) -> None:
+    runtime = Runtime(0, 64)
+    runtime.update_core_num(1.0 / runtime.aic_num)
+    if runtime.aiv_num != 1:
+        raise AssertionError(
+            f"single-block runtime selected {runtime.aiv_num} launch blocks")
+    _test_add(runtime, device)
 
 
 def _test_embedding(runtime: Runtime, device: str) -> None:
@@ -113,7 +142,16 @@ def main() -> int:
     device = "npu:0"
     failures: list[tuple[str, str]] = []
 
+    print(
+        "Runtime cores: "
+        f"aic={runtime.aic_num}, reported_aiv={runtime.reported_aiv_num}, "
+        f"launch_aiv={runtime.aiv_num}",
+        flush=True,
+    )
+
     cases = (
+        ("launch-probe", _test_launch_probe),
+        ("add-single-block", _test_add_single_block),
         ("add", _test_add),
         ("embedding", _test_embedding),
         ("rmsnorm", _test_rmsnorm),

@@ -1250,6 +1250,14 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     rt.Synchronize();
 }
 
+void Probe310P(XRuntime &rt, at::Tensor &out, uint32_t value)
+{
+    XTensor _out;
+    InitXTensor(_out, out);
+    XliteOpProbe310P(rt, _out, value);
+    rt.Synchronize();
+}
+
 void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 {
     XTensor _x;
@@ -2381,6 +2389,9 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("notify", &XRuntime::notify)
         .def_readwrite("peer_notify", &XRuntime::peerNotify)
         .def_readwrite("multi_task_parallel", &XRuntime::multiTaskParallel)
+        .def_readonly("aic_num", &XRuntime::aicNum)
+        .def_readonly("aiv_num", &XRuntime::aivNum)
+        .def_readonly("reported_aiv_num", &XRuntime::reportedAivNum)
         .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
         .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
         .def("set_current_context", &XRuntime::SetCurrentContext)
@@ -2675,6 +2686,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
           py::arg("comm_type") = 0);
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
+    m.def("probe_310p", &Probe310P, py::arg("rt"), py::arg("out"),
+          py::arg("value") = 0x03102002U);
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
