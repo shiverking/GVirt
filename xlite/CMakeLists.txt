@@ -362,6 +362,12 @@ endif()
 target_compile_options(xlite PRIVATE
     -std=c++17 -O3 -Wall -Werror
 )
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    # CANN 9.1 emits unconditional #warning directives from the still-supported
+    # v1 Prompt/Incre FlashAttention headers.  Keep -Werror for project code,
+    # but do not turn third-party preprocessor notices into build failures.
+    target_compile_options(xlite PRIVATE -Wno-error=cpp)
+endif()
 
 target_link_libraries(xlite PRIVATE
     xlite_kernels_common_${RUN_MODE}
