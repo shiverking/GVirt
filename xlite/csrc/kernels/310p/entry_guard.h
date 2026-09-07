@@ -7,11 +7,10 @@
 
 // This header is included only by the dedicated Ascend310P kernel entry
 // translation units.  Select the project implementation branch from the real
-// compiler architecture, and fail the build instead of emitting a no-op kernel
-// when the device compiler target is missing or mismatched.
-#if !defined(__NPU_ARCH__)
-#error "Ascend310P kernel entry requires the device compiler to define __NPU_ARCH__"
-#elif __NPU_ARCH__ != 2002
+// compiler architecture.  CANN compiles the same translation unit once more
+// for its host stub, where __NPU_ARCH__ is intentionally absent; validate the
+// value whenever the device compiler provides it.
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ != 2002
 #error "Ascend310P kernel entry requires __NPU_ARCH__=2002"
 #endif
 

@@ -44,9 +44,7 @@ using namespace AscendC;
 #define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy
 #define UB_BUF_ALIGN_SIZE 32    // The align size of UB buffer address; i.e., BLOCK_SIZE
 #if defined(XLITE_ARCH_310P)
-#if !defined(__NPU_ARCH__)
-#error "XLITE_ARCH_310P requires the AscendC compiler to define __NPU_ARCH__"
-#elif __NPU_ARCH__ != 2002
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ != 2002
 #error "XLITE_ARCH_310P expected __NPU_ARCH__=2002; refusing a mismatched device target"
 #endif
 // Conservative 310P POC profile.  Do not reuse the 910B3 bank-conflict
