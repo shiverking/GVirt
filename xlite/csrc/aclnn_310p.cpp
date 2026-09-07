@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "acl/acl.h"
-#include "aclnnop/aclnn_incre_flash_attention.h"
 #include "aclnnop/aclnn_matmul.h"
 #include "aclnnop/aclnn_prompt_flash_attention.h"
 #include "ascend.h"
@@ -65,24 +64,6 @@ public:
 
 private:
     aclIntArray *array_;
-};
-
-class AclTensorListGuard {
-public:
-    explicit AclTensorListGuard(aclTensorList *list) : list_(list) {}
-    ~AclTensorListGuard()
-    {
-        if (list_ != nullptr) {
-            (void)aclDestroyTensorList(list_);
-        }
-    }
-    aclTensorList *get() const
-    {
-        return list_;
-    }
-
-private:
-    aclTensorList *list_;
 };
 
 static aclTensor *CreateTensor(const std::vector<int64_t> &dims, const std::vector<int64_t> &strides,
@@ -310,37 +291,10 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
     // Xlite's RoPE-and-Cache kernel already scales Q by 1/sqrt(head_dim).
     // ACLNN must therefore use identity scaling or attention would be scaled twice.
     const double scale = 1.0;
-    const int64_t actualLengthValue = totalLength;
-    AclIntArrayGuard actualLengths(aclCreateIntArray(&actualLengthValue, 1));
-    if (actualLengths.get() == nullptr) {
-        throw std::runtime_error("aclCreateIntArray returned nullptr");
-    }
-
     uint64_t workspaceSize = 0;
     aclOpExecutor *executor = nullptr;
     XTensor *workspace = nullptr;
-    if (isDecode) {
-        const aclTensor *keyItems[] = {aclKey.get()};
-        const aclTensor *valueItems[] = {aclValue.get()};
-        AclTensorListGuard keys(aclCreateTensorList(keyItems, 1));
-        if (keys.get() == nullptr) {
-            throw std::runtime_error("aclCreateTensorList returned nullptr");
-        }
-        aclKey.release();
-        AclTensorListGuard values(aclCreateTensorList(valueItems, 1));
-        if (values.get() == nullptr) {
-            throw std::runtime_error("aclCreateTensorList returned nullptr");
-        }
-        // aclDestroyTensorList also destroys its member aclTensor descriptors.
-        aclValue.release();
-        CHECK_ACL(aclnnIncreFlashAttentionGetWorkspaceSize(
-            aclQuery.get(), keys.get(), values.get(), nullptr, nullptr, actualLengths.get(), nHeads,
-            scale, const_cast<char *>("BSND"), nKvHeads, aclOut.get(), &workspaceSize, &executor));
-        workspace = GetWorkspace(rt, workspaceSize);
-        CHECK_ACL(aclnnIncreFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
-                                           workspaceSize, executor, rt.stream));
-        FinishAclnn(rt, workspace);
-    } else {
+    if (!isDecode) {
         // The cache contains all prompt K/V after RoPE-and-Cache.  On Atlas inference
         // products preTokens/nextTokens are ignored when attenMask is nullptr, so a
         // real BOOL upper-triangular mask is required for causal prefill.
@@ -348,22 +302,17 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
             throw std::runtime_error(
                 "Ascend310P PromptFlashAttention POC does not support chunked prefill");
         }
-        constexpr uint32_t BOOL_MASK_ALIGNMENT = 32;
-        const uint32_t maskKvLength =
-            (totalLength + BOOL_MASK_ALIGNMENT - 1) / BOOL_MASK_ALIGNMENT * BOOL_MASK_ALIGNMENT;
         const size_t maskElements =
-            static_cast<size_t>(queryLength) * static_cast<size_t>(maskKvLength);
-        // Padded columns must also be masked.  Clear only the causal prefix in
-        // each row, leaving the future and padding columns set to true.
-        std::vector<uint8_t> hostMask(maskElements, 1);
+            static_cast<size_t>(queryLength) * static_cast<size_t>(totalLength);
+        std::vector<uint8_t> hostMask(maskElements, 0);
         for (uint32_t row = 0; row < queryLength; ++row) {
-            for (uint32_t col = 0; col <= row; ++col) {
-                hostMask[static_cast<size_t>(row) * maskKvLength + col] = 0;
+            for (uint32_t col = row + 1; col < totalLength; ++col) {
+                hostMask[static_cast<size_t>(row) * totalLength + col] = 1;
             }
         }
-        XTensor &causalMask = rt.GetTensor({queryLength, maskKvLength}, INT8, DBG_LOC);
+        XTensor &causalMask = rt.GetTensor({queryLength, totalLength}, INT8, DBG_LOC);
         rt.MemcpyH2D(causalMask.ptr, hostMask.data(), maskElements);
-        const std::vector<int64_t> maskDims{queryLength, maskKvLength};
+        const std::vector<int64_t> maskDims{queryLength, totalLength};
         AclTensorGuard aclMask(CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL,
                                             causalMask.ptr));
         std::vector<int64_t> queryLengths{static_cast<int64_t>(queryLength)};
@@ -381,6 +330,24 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                                             workspaceSize, executor, rt.stream));
         FinishAclnn(rt, workspace);
         rt.PutTensor(causalMask);
+    } else {
+        // The legacy IncrementalFlashAttention tiler on 310P rejects Q16/KV8
+        // GQA (561002).  PromptFlashAttention has already accepted the same
+        // GQA configuration.  With a one-token query and an exact valid-cache
+        // view, unmasked prompt attention is mathematically identical to decode.
+        const int64_t queryLengthValue = queryLength;
+        AclIntArrayGuard actualQueryLengths(aclCreateIntArray(&queryLengthValue, 1));
+        if (actualQueryLengths.get() == nullptr) {
+            throw std::runtime_error("aclCreateIntArray returned nullptr");
+        }
+        CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
+            aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, nullptr,
+            actualQueryLengths.get(), nHeads, scale, 2147483647, 2147483647,
+            const_cast<char *>("BSND"), nKvHeads, aclOut.get(), &workspaceSize, &executor));
+        workspace = GetWorkspace(rt, workspaceSize);
+        CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
+                                            workspaceSize, executor, rt.stream));
+        FinishAclnn(rt, workspace);
     }
     rt.PutTensor(query);
 }
