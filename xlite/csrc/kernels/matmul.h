@@ -418,6 +418,216 @@ private:
         }
     }
 
+#if 0  // Superseded by the upstream TaskTilesInit/RunTileByIdx implementation.
+    __aicore__ inline void Run()
+    {
+        int kQtileBlockNum = kQtileSize / kBlockSize;
+        int kLoop = DIV_ROUND_UP(k, kQtileSize);
+        int nStride = ROUND_UP(n, nBlockSize);
+        int kStride = ROUND_UP(k, kBlockSize);
+
+        int pingpongL1A = 0;
+        int pingpongL1B = 0;
+
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+
+        for (int32_t loopIdx = firstCore; loopIdx < coreLoop; loopIdx += GetBlockNum()) {
+            int64_t midx = loopIdx / nLoop;
+            int64_t nidx = loopIdx % nLoop;
+            GetMNBlockIdx(loopIdx, mLoop, nLoop, swizzleDirection, swizzlCount, midx, nidx);
+            int nOffset = nidx * n0;
+            int mOffset = midx * m0;
+
+            int mActual = m0;
+            if (mOffset + m0 > m) {
+                mActual = m - mOffset;
+            }
+            int mActualBlockPad = ROUND_UP(mActual, mBlockSize);
+            int mActualBlockNum = DIV_ROUND_UP(mActual, mBlockSize);
+
+            int nActual = n0;
+            if (nOffset + n0 > n) {
+                nActual = n - nOffset;
+            }
+            int nActualBlockPad = ROUND_UP(nActual, nBlockSize);
+            int nActualBlockNum = DIV_ROUND_UP(nActual, nBlockSize);
+
+            GlobalTensor<OutDtype> outGm = cGmBuf[mOffset * dstDValue + nOffset];
+
+            if (hasBias) {
+                // Bias GM -> L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+                DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
+                // Bias L1 -> L0
+                // C2(Bias Table Buffer) Size is 1KB
+                // If dst is in C2(Bias Table Buffer), the size of DataBlock is 64B
+                DataCopy(
+                    l0BiasBuf, l1BiasBuf,
+                    {1,
+                     (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(MatDtype)), C2_DATABLOCK)),
+                     0, 0});
+
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
+            }
+            if (hasDeqScale) {
+                // DeqScale GM -> L1
+                WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+                DataCopy(l1DeqScaleBuf, deqScaleGmBuf[nOffset], nActualBlockPad);
+                SetFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+
+                // DeqScale L1 -> fbuf
+                WaitFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+                // If dst is in C2PIPE2GM(fixpipe Buffer), the size of DataBlock is 128B
+                // fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
+                // Notice: DataCopy from L1 to fbuf is belong to fixpipe barrier
+                DataCopy(fixpipeBuf, l1DeqScaleBuf,
+                         {1,
+                          (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)),
+                                                  FIXPIPE_DATABLOCK)),
+                          0, 0});
+#if !defined(XLITE_DEVICE_310P)
+                PipeBarrier<PIPE_FIX>();
+#endif
+            }
+
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+            int kOffset = 0;
+            for (int kIdx = 0; kIdx < kLoop; kIdx++) {
+                int kIdx8 = kIdx % 8;
+                int kIdx4 = kIdx % 4;
+                int kIdx2 = kIdx % 2;
+
+                /* A GM -> L1 */
+                if (kIdx8 == 0) {
+                    int kRemSize = kDtileSize;
+                    if (kOffset + kRemSize > k) {
+                        kRemSize = k - kOffset;
+                    }
+                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
+                    CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * srcDValue + kOffset],
+                                    mActual, kRemSize, srcDValue, mActualBlockPad);
+                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
+                }
+
+                /* B GM -> L1 */
+                int k0ActualBlockNum;
+                if (kIdx4 == 0) {
+                    int kRemSize = k0;
+                    if (kOffset + kRemSize > k) {
+                        kRemSize = k - kOffset;
+                    }
+                    k0ActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
+                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
+                    if (transpose == 0 && nz == 0) {
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual,
+                                        kRemSize, k, nActualBlockPad);
+                    } else if (transpose == 0 && nz == 1) {
+                        CopyGmToL1(l1bBuf[pingpongL1B],
+                                   bGmBuf[kOffset * nStride + nOffset * kBlockSize], nActual,
+                                   k0ActualBlockNum, nStride);
+                    } else if (transpose == 1 && nz == 0) {
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset],
+                                        kRemSize, nActual, n, ROUND_UP(kRemSize, kBlockSize));
+                    } else if (transpose == 1 && nz == 1) {
+                        CopyGmToL1(l1bBuf[pingpongL1B],
+                                   bGmBuf[nOffset * kStride + kOffset * nBlockSize], kRemSize,
+                                   DIV_ROUND_UP(nActual, nBlockSize), kStride);
+                    }
+                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
+                }
+
+                int kActual = kQtileSize;
+                if (kOffset + kActual > k) {
+                    kActual = k - kOffset;
+                }
+                int kActualBlockPad = ROUND_UP(kActual, kBlockSize);
+                int kActualBlockNum = DIV_ROUND_UP(kActual, kBlockSize);
+
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
+
+                /* A L1 -> L0A */
+                if (kIdx8 == 0) {
+                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
+                }
+                CopyToL0ACol(l0aBuf[kIdx2], l1aBuf[pingpongL1A], mActualBlockNum,
+                             kIdx8 * kQtileBlockNum, kActualBlockNum);
+                if (kIdx8 == 7 || kIdx == (kLoop - 1)) {
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
+                    pingpongL1A = 1 - pingpongL1A;
+                }
+
+                /* B L1 -> L0B */
+                if (kIdx4 == 0) {
+                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
+                }
+                if (transpose) {
+                    CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
+                                  kIdx4 * kQtileBlockNum, kActualBlockNum, k0ActualBlockNum);
+                } else {
+                    CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
+                                 kIdx4 * kQtileBlockNum, kActualBlockNum);
+                }
+                if (kIdx4 == 3 || kIdx == (kLoop - 1)) {
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
+                    pingpongL1B = 1 - pingpongL1B;
+                }
+
+                /* Mmad L0A L0B -> L0C */
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + kIdx2);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + kIdx2);
+
+                PipeBarrier<PIPE_M>();
+                if (hasBias && kIdx == 0) {
+                    WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                    CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf,
+                                    mActualBlockPad, nActualBlockPad, kActualBlockPad);
+                    SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
+                } else {
+                    CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], mActualBlockPad, nActualBlockPad,
+                            kActualBlockPad, kIdx == 0);
+                }
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
+                kOffset += kActual;
+            }
+
+            /* C L0C -> GM */
+            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+            CopyToGmWithDequant(outGm, l0cBuf, mActual, nActual, mActualBlockPad, dstDValue,
+                                hasDeqScale, fixpipeBuf);
+            if (hasDeqScale) {
+                SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+            }
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        }  // M * N
+
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+    }
+
+#endif
 private:
     GlobalTensor<Dtype> aGmBuf;
     GlobalTensor<Dtype> bGmBuf;
@@ -457,6 +667,15 @@ private:
     bool hasDeqScale = false;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define MATMUL_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                        \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,         \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias, \
+        GM_ADDR deqScale)                                                                         \
+    {                                                                                             \
+    }
+#else
 #define MATMUL_FUNC_DEFINE(dtype)                                                                  \
     extern "C" __global__ __aicore__ void matmul_##dtype(                                          \
         GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,          \
@@ -474,5 +693,6 @@ private:
             op.Run(x, y, z, bias, deqScale, m, n, k);                                              \
         }                                                                                          \
     }
+#endif
 
 #endif

@@ -48,7 +48,7 @@ __aicore__ void add(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t x_numel, uint32_t 
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);  // wait for x to be loaded
         if constexpr (std::is_same_v<Dtype, float16_t>) {
             vconv_f162f32(UBA(float) t1_float, UBA(Dtype) t1_dtype, vec_repeat_float, 1, 1, 8, 4);
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
             vconv_bf162f32(UBA(float) t1_float, UBA(Dtype) t1_dtype, vec_repeat_float, 1, 1, 8, 4);
 #endif
@@ -62,7 +62,7 @@ __aicore__ void add(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t x_numel, uint32_t 
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);  // wait for y to be loaded
         if constexpr (std::is_same_v<Dtype, float16_t>) {
             vconv_f162f32(UBA(float) t2_float, UBA(Dtype) t2_dtype, vec_repeat_float, 1, 1, 8, 4);
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
             vconv_bf162f32(UBA(float) t2_float, UBA(Dtype) t2_dtype, vec_repeat_float, 1, 1, 8, 4);
 #endif
@@ -78,7 +78,7 @@ __aicore__ void add(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t x_numel, uint32_t 
         // --- V pipeline: convert result back to dtype ---
         if constexpr (std::is_same_v<Dtype, float16_t>) {
             vconv_f322f16r(UBA(Dtype) t2_float, UBA(float) t1_float, vec_repeat_float, 1, 1, 4, 8);
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
             vconv_f322bf16r(UBA(Dtype) t2_float, UBA(float) t1_float, vec_repeat_float, 1, 1, 4, 8);
 #endif

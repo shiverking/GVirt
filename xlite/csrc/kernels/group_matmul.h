@@ -63,6 +63,15 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
     matmul_op.WaitFlags();
 }
 
+#if defined(XLITE_DEVICE_310P)
+#define GROUPMATMUL_FUNC_DEFINE(dtype)                                                            \
+    extern "C" __global__ __aicore__ void group_matmul_##dtype(                                  \
+        GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR deqScales, GM_ADDR counts, uint32_t n,          \
+        int64_t kN, int64_t kK, uint64_t m0, uint64_t n0, uint64_t k0, uint32_t startIdx,         \
+        uint32_t endIdx, bool weightNZ, bool transpose, uint64_t swizzle)                         \
+    {                                                                                             \
+    }
+#else
 #define GROUPMATMUL_FUNC_DEFINE(dtype)                                                             \
     extern "C" __global__ __aicore__ void group_matmul_##dtype(                                    \
         GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR deqScales, GM_ADDR counts, uint32_t n,           \
@@ -80,3 +89,4 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
                                                      transpose, swizzle);                          \
         }                                                                                          \
     }
+#endif

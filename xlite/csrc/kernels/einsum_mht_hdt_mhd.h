@@ -45,6 +45,14 @@ __aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32
     matmul_op.WaitFlags();
 }
 
+#if defined(XLITE_DEVICE_310P)
+#define EINSUM_MHT_HDT_MHD_FUNC_DEFINE(dtype)                                                   \
+    extern "C" __global__ __aicore__ void einsum_mht_hdt_mhd_##dtype(                          \
+        GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h, uint32_t t, uint32_t d,  \
+        uint64_t m0, uint64_t n0, uint64_t k0, bool weightNZ, uint64_t swizzle, int T, int D)   \
+    {                                                                                           \
+    }
+#else
 #define EINSUM_MHT_HDT_MHD_FUNC_DEFINE(dtype)                                                    \
     extern "C" __global__ __aicore__ void einsum_mht_hdt_mhd_##dtype(                            \
         GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h, uint32_t t, uint32_t d,   \
@@ -54,3 +62,4 @@ __aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32
         einsum_mht_hdt_mhd<dtype, float, dtype>(mht, hdt, mhd, m, h, t, d, m0, n0, k0, weightNZ, \
                                                 swizzle, T, D);                                  \
     }
+#endif
