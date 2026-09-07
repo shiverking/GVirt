@@ -13,6 +13,11 @@ TEXT_CONFIG = {
     "vocab_size": 151936,
     "rms_norm_eps": 1e-6,
     "rope_theta": 1_000_000,
+    "rope_parameters": {
+        "rope_type": "mrope",
+        "mrope_section": [24, 20, 20],
+        "mrope_interleaved": True,
+    },
 }
 
 
@@ -37,10 +42,26 @@ class TestQwen3AsrConfig(unittest.TestCase):
         self.assertEqual(args["dim"], 2048)
         self.assertEqual(args["head_dim"], 128)
         self.assertTrue(args["qk_norm"])
+        self.assertEqual(args["rope_type"], "mrope")
+        self.assertEqual(args["mrope_section"], [24, 20, 20])
+        self.assertTrue(args["mrope_interleaved"])
 
     def test_rejects_incomplete_text_config(self):
         with self.assertRaisesRegex(ValueError, "missing required fields"):
             extract_text_config({"text_config": {"hidden_size": 2048}})
+
+    def test_rejects_invalid_mrope_partition(self):
+        import tempfile
+        from pathlib import Path
+
+        invalid = dict(TEXT_CONFIG)
+        invalid["rope_parameters"] = {"mrope_section": [1, 2, 3]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint = Path(temp_dir)
+            (checkpoint / "config.json").write_text(
+                json.dumps({"thinker_config": {"text_config": invalid}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "head_dim / 2"):
+                load_qwen3_asr_llm_args(checkpoint)
 
 
 if __name__ == "__main__":

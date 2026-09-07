@@ -44,7 +44,7 @@ for test_dtype in dtype_list:
             x_standard = x.clone()
             weight = torch.randn(DIM, dtype=test_dtype)
             bias = torch.randn(DIM, dtype=test_dtype)
-            y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
+            y = torch.full((BATCH_SIZE, DIM), torch.nan, dtype=test_dtype)
             z = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
 
         # standard
@@ -59,6 +59,8 @@ for test_dtype in dtype_list:
         else:
             rmsnorm(rt, x, weight, y, NORMEPS)
         torch.npu.synchronize()
+        if torch.isnan(y).any():
+            raise AssertionError("rmsnorm output still contains the no-op sentinel")
         logging.info(f'rmsnorm({test_dtype}) {"with" if has_bias else "without"} bias executed!')
         try:
             torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
@@ -88,7 +90,7 @@ for test_dtype in dtype_list:
             weight = torch.randn(DIM, dtype=test_dtype)
             bias1 = torch.randn(DIM, dtype=test_dtype)
             bias2 = torch.randn(DIM, dtype=test_dtype)
-            y = x.clone()
+            y = torch.full_like(x, torch.nan)
 
         x_split1, x_split2, x_split3 = x_standard.split([CNT * DIM, DIM, DIM], dim = 1)
         x_split1 = x_split1.view(BATCH_SIZE, CNT, DIM)
@@ -112,6 +114,8 @@ for test_dtype in dtype_list:
             rmsnorm(rt, x, weight, y, NORMEPS, DIM, CNT)
             rmsnorm(rt, x, weight, y, NORMEPS, DIM, 1, DIM * CNT, DIM * CNT)
         torch.npu.synchronize()
+        if torch.isnan(y).any():
+            raise AssertionError("strided rmsnorm output still contains the no-op sentinel")
 
         logging.info(f'rmsnorm with stride ({test_dtype}) {"with" if has_bias else "without"} bias executed!')
 

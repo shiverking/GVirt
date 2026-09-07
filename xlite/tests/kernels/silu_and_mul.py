@@ -26,7 +26,7 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
 for dtype, atol, rtol in supported_dtype_list:
     for dim in [2304, 6400]:
         input = torch.randn(41, dim * 2, dtype=dtype, device="npu:0")
-        output = torch.empty(41, dim, dtype=dtype, device="npu:0")
+        output = torch.full((41, dim), torch.nan, dtype=dtype, device="npu:0")
 
         d = input.shape[-1] // 2
         standard = torch.nn.functional.silu(input[..., :d]) * input[..., d:]
@@ -34,6 +34,8 @@ for dtype, atol, rtol in supported_dtype_list:
         torch.npu.synchronize()
         silu_and_mul(rt, input, output)
         torch.npu.synchronize()
+        if torch.isnan(output).any():
+            raise AssertionError("silu-and-mul output still contains the no-op sentinel")
 
         print(f'silu and mul {dtype} executed!')
 

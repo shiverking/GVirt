@@ -22,45 +22,56 @@ test_dtypes = [torch.float16] if os.getenv("XLITE_TEST_FP16_ONLY") == "1" else [
 poc_fp16 = os.getenv("XLITE_TEST_FP16_ONLY") == "1"
 weight_nz_values = [False] if poc_fp16 else [False, True]
 transpose_values = [False] if poc_fp16 else [False, True]
-m_values = [1, 8, 129] if poc_fp16 else [1, 8]
+m_values = [1, 8, 127, 128, 129] if poc_fp16 else [1, 8]
 n_values = [2048, 6144] if poc_fp16 else [32, 64, 16128]
 k_values = [2048, 6144] if poc_fp16 else [32, 128, 7168, 7184, 7232, 7296, 7424, 7488, 7616]
+if poc_fp16:
+    projection_shapes = [
+        (4096, 2048),    # QKV
+        (2048, 2048),    # O
+        (12288, 2048),   # Gate + Up
+        (2048, 6144),    # Down
+        (151936, 2048),  # LM head
+    ]
+    shape_values = [(m, n, k) for m in m_values for n, k in projection_shapes]
+else:
+    shape_values = [(m, n, k) for m in m_values for n in n_values for k in k_values]
 for weight_nz in weight_nz_values:
     for transpose in transpose_values:
         for dtype in test_dtypes:
-            for m in m_values:
-                for n in n_values:
-                    for k in k_values:
-                        if transpose and dtype == torch.float:
-                            continue
-                        x = torch.randn(m, k, dtype=dtype, device="npu:0")
-                        if transpose:
-                            y = torch.randn(k, n, dtype=dtype, device="npu:0")
-                            y_standard = y.transpose(0, 1).contiguous().reshape(n, k)
-                        else:
-                            y = torch.randn(n, k, dtype=dtype, device="npu:0")
-                            y_standard = y.clone()
-                        z = torch.zeros(m, n, dtype=dtype, device="npu:0")
+            for m, n, k in shape_values:
+                if transpose and dtype == torch.float:
+                    continue
+                x = torch.randn(m, k, dtype=dtype, device="npu:0")
+                if transpose:
+                    y = torch.randn(k, n, dtype=dtype, device="npu:0")
+                    y_standard = y.transpose(0, 1).contiguous().reshape(n, k)
+                else:
+                    y = torch.randn(n, k, dtype=dtype, device="npu:0")
+                    y_standard = y.clone()
+                z = torch.full((m, n), torch.nan, dtype=dtype, device="npu:0")
 
-                        standard = F.linear(x, y_standard, None)
+                standard = F.linear(x, y_standard, None)
 
-                        if weight_nz and dtype != torch.float:
-                            y = matrix_nd2nz(y)
+                if weight_nz and dtype != torch.float:
+                    y = matrix_nd2nz(y)
 
-                        torch.npu.synchronize()
-                        matmul(rt, x, y, z, weight_nz and dtype != torch.float, transpose)
-                        torch.npu.synchronize()
+                torch.npu.synchronize()
+                matmul(rt, x, y, z, weight_nz and dtype != torch.float, transpose)
+                torch.npu.synchronize()
+                if torch.isnan(z).any():
+                    raise AssertionError("matmul output still contains the no-op sentinel")
 
-                        if transpose:
-                            print(f'[{m}, {k}] x [{k}, {n}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
-                        else:
-                            print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
+                if transpose:
+                    print(f'[{m}, {k}] x [{k}, {n}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
+                else:
+                    print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
 
-                        try:
-                            torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
-                        except AssertionError as e:
-                            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
-                                raise
-                            print(f'{e}')
-                            print(f'torch_npu: {standard}')
-                            print(f'xlite: {z}')
+                try:
+                    torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+                except AssertionError as e:
+                    if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                        raise
+                    print(f'{e}')
+                    print(f'torch_npu: {standard}')
+                    print(f'xlite: {z}')

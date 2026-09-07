@@ -22,13 +22,15 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
 for dtype in supported_dtype_list:
     x = torch.randn(8, 2048, dtype=dtype, device="npu:0")
     y = torch.randn(8, 2048, dtype=dtype, device="npu:0")
-    z = torch.empty(8, 2048, dtype=dtype, device="npu:0")
+    z = torch.full((8, 2048), torch.nan, dtype=dtype, device="npu:0")
 
     standard = x + y
 
     torch.npu.synchronize()
     add(rt, x, y, z)
     torch.npu.synchronize()
+    if torch.isnan(z).any():
+        raise AssertionError("add output still contains the no-op sentinel")
     print(f'add {dtype} executed!')
 
     try:
