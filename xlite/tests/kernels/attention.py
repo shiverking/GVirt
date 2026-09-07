@@ -9,6 +9,7 @@
 # ===============================================================================
 from __future__ import absolute_import
 import logging
+import os
 import torch
 import math
 import numpy as np
@@ -32,11 +33,14 @@ models = [
     ("qwen2.5_0.5B_TP1", 14, 2, 64, torch.bfloat16),
     ("qwen2_32B_TP8", 5, 1, 128, torch.bfloat16),
     ("qwen3_32B_TP8", 8, 1, 128, torch.bfloat16),
+    ("qwen3_asr_1.7B_TP1", 16, 8, 128, torch.float16),
     ("qwen3_moe_30B_TP8", 4, 1, 128, torch.bfloat16),
     ("llama_7B_TP1", 32, 32, 128, torch.float16),
     ("llama_13B_TP2", 20, 20, 128, torch.float16),
     ("codellama_34B_TP8", 8, 1, 128, torch.bfloat16),
 ]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    models = [model for model in models if model[0] == "qwen3_asr_1.7B_TP1"]
 
 # work configurations: batch_size, cached_lens, query_lens
 work = [
@@ -58,6 +62,14 @@ work = [
     (5, [8, 13, 65, 11, 5], [1] * 5),
     (1, [1 * BLOCK_SIZE], [1800]),
 ]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    work = [
+        (1, [0], [1]),
+        (1, [0], [127]),
+        (1, [0], [128]),
+        (1, [0], [129]),
+        (1, [128], [1]),
+    ]
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
@@ -239,6 +251,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         try:
             torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                raise
             logging.error(f'{e}')
             logging.error(f'torch_npu: {output_standard}')
             logging.error(f'xlite: {output_xlite}')
