@@ -36,6 +36,19 @@ public:
             uint64_t weightOffset =
                 localRow ? static_cast<uint64_t>(row - start) * embeddingDim : 0;
 
+            // Row starts are also unaligned when embeddingDim is not a
+            // multiple of one 32-byte FP16 block. Avoid DataCopyPad on m200
+            // and use a correctness-first scalar fallback for the whole row.
+            if ((embeddingDim % FP16_BLOCK_ELEMENTS) != 0) {
+                for (uint32_t column = 0; column < embeddingDim; ++column) {
+                    float16_t value = localRow
+                                          ? weightGm.GetValue(weightOffset + column)
+                                          : static_cast<float16_t>(0.0f);
+                    outputGm.SetValue(outputOffset + column, value);
+                }
+                continue;
+            }
+
             for (uint32_t column = 0; column < embeddingDim;
                  column += EMBED_TILE_ELEMENTS) {
                 uint32_t count = embeddingDim - column < EMBED_TILE_ELEMENTS
@@ -66,29 +79,13 @@ private:
     __aicore__ inline void CopyIn(LocalTensor<float16_t> dst,
                                   GlobalTensor<float16_t> src, uint32_t count)
     {
-        if ((count % FP16_BLOCK_ELEMENTS) == 0) {
-            DataCopy(dst, src, count);
-            return;
-        }
-        DataCopyParams params;
-        params.blockCount = 1;
-        params.blockLen = count * sizeof(float16_t);
-        DataCopyPadParams padParams;
-        padParams.isPad = false;
-        DataCopyPad(dst, src, params, padParams);
+        DataCopy(dst, src, count);
     }
 
     __aicore__ inline void CopyOut(GlobalTensor<float16_t> dst,
                                    LocalTensor<float16_t> src, uint32_t count)
     {
-        if ((count % FP16_BLOCK_ELEMENTS) == 0) {
-            DataCopy(dst, src, count);
-            return;
-        }
-        DataCopyParams params;
-        params.blockCount = 1;
-        params.blockLen = count * sizeof(float16_t);
-        DataCopyPad(dst, src, params);
+        DataCopy(dst, src, count);
     }
 
     TPipe pipe;
