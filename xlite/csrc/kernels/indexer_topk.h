@@ -584,7 +584,7 @@ public:
                 RunAicIndexerScores(q[qOffset], weight[wOffset], queryTaskLen, blockTable, kvOffset,
                                     kvLen, scores[curr]);
                 ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr]);
-#else
+#elif defined(__DAV_C220_VEC__)
                 int nWork = queryTaskLen;
                 int nWorkPerCore = DIV_ROUND_UP(nWork, 2);
                 int nWorkCurCore = nWorkPerCore;
@@ -612,7 +612,7 @@ public:
 #ifdef __DAV_C220_CUBE__
         wait_flag_dev(v2aSyncFlag[0]);
         wait_flag_dev(v2aSyncFlag[1]);
-#else
+#elif defined(__DAV_C220_VEC__)
         PipeBarrier<PIPE_ALL>();
         if (resetPrevCore) {
             ResetPrevCore();
@@ -658,6 +658,16 @@ private:
     LocalTensor<float> l0cBuf;  // event 0
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                       \
+    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                              \
+        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens, \
+        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,           \
+        GM_ADDR indices, GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads, uint32_t headDim, \
+        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK)             \
+    {                                                                                         \
+    }
+#else
 #define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                        \
     extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                \
         GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,   \
@@ -671,3 +681,4 @@ private:
                 maxNumBlock, topK);                                                            \
         op.Run();                                                                              \
     }
+#endif

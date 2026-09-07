@@ -14,6 +14,14 @@
 #ifdef CCE_STUB
 #include "cce_stub.h"
 #endif
+
+// CANN's 310P compiler defines __NPU_ARCH__ for every AscendC target, including
+// compatibility targets that intentionally do not receive XLITE_ARCH_310P.
+// Keep device-header feature checks tied to the real compiler architecture so
+// common/BF16 stub translation units do not parse unsupported BF16/FixPipe APIs.
+#if defined(XLITE_ARCH_310P) || (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 2002))
+#define XLITE_DEVICE_310P 1
+#endif
 using namespace AscendC;
 
 #define ROUND_DOWN(x, y) (((x) / (y)) * (y))
@@ -258,7 +266,7 @@ __aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTen
         mode = NoQuant;
     } else if constexpr (std::is_same<Dtype, float16_t>::value) {
         mode = F322F16;
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
 #endif
@@ -277,7 +285,7 @@ inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
         mode = NoQuant;
     } else if constexpr (std::is_same<Dtype, float16_t>::value) {
         mode = F322F16;
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
 #endif
@@ -300,7 +308,7 @@ __aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
         mode = NoQuant;
     } else if constexpr (std::is_same<Dtype, float16_t>::value) {
         mode = F322F16;
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
 #endif
@@ -320,7 +328,7 @@ __aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTe
         float quant = 1;
         uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t *>(&quant));
         SetFixpipePreQuantFlag(deqScalar);
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
         PipeBarrier<PIPE_FIX>();
 #endif
     }
@@ -344,7 +352,7 @@ __aicore__ inline void CopyToGmWithDequant(const GlobalTensor<OutDtype> &dst,
     if constexpr (std::is_same<MatDtype, float>::value) {
         if constexpr (std::is_same<OutDtype, float16_t>::value) {
             mode = F322F16;
-#if !defined(XLITE_ARCH_310P)
+#if !defined(XLITE_DEVICE_310P)
         } else if constexpr (std::is_same<OutDtype, bfloat16_t>::value) {
             mode = F322BF16;
 #endif

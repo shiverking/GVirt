@@ -267,7 +267,9 @@ public:
                           (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)),
                                                   FIXPIPE_DATABLOCK)),
                           0, 0});
+#if !defined(XLITE_DEVICE_310P)
                 PipeBarrier<PIPE_FIX>();
+#endif
             }
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -434,6 +436,15 @@ private:
     bool hasDeqScale = false;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define MATMUL_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                        \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,         \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias, \
+        GM_ADDR deqScale)                                                                         \
+    {                                                                                             \
+    }
+#else
 #define MATMUL_FUNC_DEFINE(dtype)                                                                  \
     extern "C" __global__ __aicore__ void matmul_##dtype(                                          \
         GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,          \
@@ -450,5 +461,6 @@ private:
             op.Run();                                                                              \
         }                                                                                          \
     }
+#endif
 
 #endif
