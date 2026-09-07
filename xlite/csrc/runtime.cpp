@@ -814,6 +814,15 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                 ": invalid attnMeta version: " + std::to_string(attnMeta.version));
     }
+#ifdef XLITE_310P_LLM_FP16_POC
+    // The metadata copies above use local std::vector storage as the source of
+    // asynchronous H2D transfers.  Keep that storage alive until the copies
+    // complete.  Repeated POC forwards otherwise allow a subsequent call to
+    // reuse the host memory before the device has consumed lens, cached_lens,
+    // block tables, or slot mappings.  The 310P backend is correctness-first,
+    // so the synchronization cost is intentional.
+    Synchronize();
+#endif
 }
 
 void XRuntime::Synchronize(void)

@@ -121,7 +121,10 @@ static uint32_t RequireContiguousBlocks(const XRuntime &rt, uint32_t totalLength
 {
     const uint32_t blocks = (totalLength + blockSize - 1) / blockSize;
     if (rt._blockTablesHost.size() < blocks) {
-        throw std::runtime_error("Ascend310P block table is smaller than the valid KV length");
+        throw std::runtime_error(
+            "Ascend310P block table is smaller than the valid KV length: total_kv=" +
+            std::to_string(totalLength) + ", required_blocks=" + std::to_string(blocks) +
+            ", supplied_blocks=" + std::to_string(rt._blockTablesHost.size()));
     }
     const uint32_t firstBlock = rt._blockTablesHost[0];
     for (uint32_t i = 0; i < blocks; ++i) {
