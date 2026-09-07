@@ -11,7 +11,9 @@ profile:
 
 ```bash
 cd xlite
-export SOC_VERSION=ascend310p3
+# Xlite accepts either case, then passes the canonical CANN product name to
+# AscendC. Prefer the canonical spelling in build commands.
+export SOC_VERSION=Ascend310P3
 export XLITE_KERNEL_SET=llm_fp16
 pip install -v -e . --no-build-isolation
 ```
