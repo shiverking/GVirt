@@ -400,7 +400,9 @@ public:
                            queryTaskOffset + queryTaskLen, kvHeadIdx, calcLen, currQkIdx);
                 RunAicQK(input[qOffset], queryTaskLen, kvHeadIdx, blockTable, calcLen,
                          qk[currQkIdx]);
+#if !defined(XLITE_DEVICE_310P)
                 ffts_cross_core_sync(PIPE_FIX, config);
+#endif
 
                 if (needDoSV != 0) {
                     // wait vector softmax done
@@ -564,6 +566,16 @@ private:
     LocalTensor<float> l0cBuf;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define ATTN_FUNC_DEFINE(dtype)                                                                   \
+    extern "C" __global__ __aicore__ void attention_##dtype(                                     \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,                \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,        \
+        uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch, \
+        uint32_t maxNumBlocks)                                                                    \
+    {                                                                                             \
+    }
+#else
 #define ATTN_FUNC_DEFINE(dtype)                                                                    \
     extern "C" __global__ __aicore__ void attention_##dtype(                                       \
         GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,                 \
@@ -576,3 +588,4 @@ private:
                 blockTables, nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks);          \
         op.Run();                                                                                  \
     }
+#endif

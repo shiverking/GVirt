@@ -291,6 +291,15 @@ private:
     LocalTensor<float> l0cBuf;  // event 0
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define INDEXER_SCORES_FUNC_DEFINE(dtype)                                                    \
+    extern "C" __global__ __aicore__ void indexer_scores_##dtype(                           \
+        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores, GM_ADDR queryStartLoc,   \
+        GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,        \
+        uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)         \
+    {                                                                                        \
+    }
+#else
 #define INDEXER_SCORES_FUNC_DEFINE(dtype)                                                     \
     extern "C" __global__ __aicore__ void indexer_scores_##dtype(                             \
         GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores, GM_ADDR queryStartLoc,     \
@@ -302,3 +311,4 @@ private:
                 nHeads, headDim, blockSize, batch, maxNumBlock);                              \
         op.Run();                                                                             \
     }
+#endif

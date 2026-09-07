@@ -607,7 +607,9 @@ public:
                            nHeads, kvOffset, kvOffset + kvLen, curr);
                 RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], queryTaskLen, blockTable, kvOffset,
                          kvLen, qk[curr]);
+#if !defined(XLITE_DEVICE_310P)
                 ffts_cross_core_sync(PIPE_FIX, softmaxConfig);
+#endif
 
                 if (needDoSV != 0) {
                     // wait vector softmax done
@@ -620,7 +622,9 @@ public:
                                kvOffset + kvLen, last);
                     RunAicSV(qk[last], lastQueryTaskLen, lastBlockTable, lastKvOffset, lastKvLen,
                              sv[last]);
+#if !defined(XLITE_DEVICE_310P)
                     ffts_cross_core_sync(PIPE_FIX, updateConfig);
+#endif
                 }
 
                 lastBatchIdx = batchIdx;
@@ -646,7 +650,9 @@ public:
                        lastQueryTaskOffset + lastQueryTaskLen, nHeads, lastKvOffset,
                        lastKvOffset + lastKvLen, last);
             RunAicSV(qk[last], lastQueryTaskLen, lastBlockTable, lastKvOffset, lastKvLen, sv[last]);
+#if !defined(XLITE_DEVICE_310P)
             ffts_cross_core_sync(PIPE_FIX, updateConfig);
+#endif
         }
     }
 
@@ -911,6 +917,18 @@ private:
     int svk0;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define FLASH_MLA_V2_FUNC_DEFINE(dtype)                                                       \
+    extern "C" __global__ __aicore__ void flash_mla_v2_##dtype(                              \
+        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,    \
+        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,   \
+        GM_ADDR sync, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens,              \
+        GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,       \
+        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,       \
+        float scale, uint32_t tileSizeOfCachedKV, uint32_t topK)                              \
+    {                                                                                         \
+    }
+#else
 #define FLASH_MLA_V2_FUNC_DEFINE(dtype)                                                        \
     extern "C" __global__ __aicore__ void flash_mla_v2_##dtype(                                \
         GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,     \
@@ -927,3 +945,4 @@ private:
                 tileSizeOfCachedKV, topK);                                                     \
         op.Run();                                                                              \
     }
+#endif

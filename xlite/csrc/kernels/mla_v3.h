@@ -551,7 +551,9 @@ public:
                            nHeads, calcLen, curr);
                 RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], queryTaskLen, calcLen, qk[curr],
                          kCache, peCache);
+#if !defined(XLITE_DEVICE_310P)
                 ffts_cross_core_sync(PIPE_FIX, config);
+#endif
 
                 if (needDoSV != 0) {
                     // wait vector softmax done
@@ -735,6 +737,16 @@ private:
     int svk0;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define MLA_V3_FUNC_DEFINE(dtype)                                                             \
+    extern "C" __global__ __aicore__ void mla_v3_##dtype(                                    \
+        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kDenseCache, GM_ADDR peDenseCache, GM_ADDR qk,  \
+        GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,       \
+        uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank, uint32_t batch,          \
+        uint32_t indexTopK, float scale)                                                     \
+    {                                                                                        \
+    }
+#else
 #define MLA_V3_FUNC_DEFINE(dtype)                                                              \
     extern "C" __global__ __aicore__ void mla_v3_##dtype(                                      \
         GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kDenseCache, GM_ADDR peDenseCache, GM_ADDR qk,    \
@@ -747,3 +759,4 @@ private:
                 cachedLens, nHeads, ropeHeadDim, kvLoraRank, batch, indexTopK, scale);         \
         op.Run();                                                                              \
     }
+#endif
