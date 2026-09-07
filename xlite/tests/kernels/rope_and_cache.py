@@ -136,3 +136,8 @@ for test_dtype, head_dim, rot_dim in test_cases:
         logging.error(f'{e}')
         logging.error(f'torch_npu: {qkv_standard_out}')
         logging.error(f'xlite: {qkv_xlite}')
+
+# Destroy the native runtime before interpreter teardown; otherwise some
+# torch_npu/Python callback objects may already have become None.
+torch.npu.synchronize()
+del rt
