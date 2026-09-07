@@ -13,6 +13,11 @@
 #include "trace/trace.h"
 #ifdef XLITE_ARCH_310P
 #include "aclnn_310p.h"
+
+// Implemented in the Bisheng host object emitted from the isolated official
+// Add baseline translation unit.
+extern void xlite_official_add_probe_310p_do(uint32_t blockDim, void *stream, uint8_t *x,
+                                             uint8_t *y, uint8_t *z);
 #endif
 
 #define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
@@ -53,8 +58,11 @@ void XliteOpOfficialAddProbe310P(XRuntime &rt, XTensor &x, XTensor &y, XTensor &
         throw std::runtime_error(
             "official Ascend310P Add probe requires three FP16 tensors with 8*2048 elements");
     }
-    // Fixed at the blockDim used by the passing AddKernelInvocationNeo sample.
-    aclrtlaunch_xlite_official_add_probe_310p(8, rt.stream, x.ptr, y.ptr, z.ptr);
+    // Fixed at the blockDim and triple-chevron host wrapper used by the
+    // passing AddKernelInvocationNeo sample.
+    xlite_official_add_probe_310p_do(8, rt.stream, reinterpret_cast<uint8_t *>(x.ptr),
+                                     reinterpret_cast<uint8_t *>(y.ptr),
+                                     reinterpret_cast<uint8_t *>(z.ptr));
 #else
     (void)x;
     (void)y;
