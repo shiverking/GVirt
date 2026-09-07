@@ -16,6 +16,20 @@
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
+#ifdef XLITE_310P_LLM_FP16_POC
+    if (rankId != 0 || c.defTpSize != 1 || c.defDpSize != 1 || c.moeEpSize != 1 ||
+        c.moeTPSize != 1) {
+        throw std::runtime_error(
+            "Ascend310P llm_fp16 POC only supports rank=0, TP=1, DP=1 and EP=1");
+    }
+    if (c.attnType != XMODEL_ATTN_MHA || c.nRoutedExperts != 0 || c.nSharedExperts != 0) {
+        throw std::runtime_error(
+            "Ascend310P llm_fp16 POC only supports dense MHA/GQA decoder models");
+    }
+    if (c.quantMsdW4a8 || c.quantAttnWeightTrans || c.quantAttnWeightNz) {
+        throw std::runtime_error("Ascend310P llm_fp16 POC does not support quantization");
+    }
+#endif
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
     mhaQKV.resize(c.nLayers);

@@ -3,12 +3,30 @@ project(xlite)
 
 set(RUN_MODE "npu" CACHE STRING "sim/npu")
 set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
+set(XLITE_KERNEL_SET "full" CACHE STRING "kernel set: full or llm_fp16")
+set_property(CACHE XLITE_KERNEL_SET PROPERTY STRINGS full llm_fp16)
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
     CACHE STRING "ASCEND CANN package installation directory"
 )
 message(STATUS "RUN_MODE: ${RUN_MODE}")
 message(STATUS "SOC_VERSION: ${SOC_VERSION}")
+message(STATUS "XLITE_KERNEL_SET: ${XLITE_KERNEL_SET}")
 message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
+
+if(NOT XLITE_KERNEL_SET STREQUAL "full" AND NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    message(FATAL_ERROR "XLITE_KERNEL_SET must be one of: full, llm_fp16")
+endif()
+
+if(SOC_VERSION MATCHES "^Ascend310P" AND NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    message(FATAL_ERROR "Ascend310P POC only supports XLITE_KERNEL_SET=llm_fp16")
+endif()
+
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    if(NOT SOC_VERSION MATCHES "^Ascend310P")
+        message(FATAL_ERROR "llm_fp16 is a POC kernel profile restricted to Ascend310P")
+    endif()
+    add_compile_definitions(XLITE_310P_LLM_FP16_POC=1 XLITE_DISABLE_SWIZZLE_TABLE=1)
+endif()
 
 find_program(CCACHE_FOUND ccache)
 if (CCACHE_FOUND)

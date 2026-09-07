@@ -35,7 +35,19 @@ using namespace AscendC;
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy
 #define UB_BUF_ALIGN_SIZE 32    // The align size of UB buffer address; i.e., BLOCK_SIZE
-#if __NPU_ARCH__ != 3510
+#if defined(XLITE_310P_LLM_FP16_POC)
+// Conservative 310P POC profile.  Do not reuse the 910B3 bank-conflict
+// offset until it has been tuned on silicon.  The working-set limit stays at
+// 192 KiB so kernels never depend on capacity above the existing baseline.
+#define UB_SIZE 196608
+#define UB_BANK_SIZE 4096
+#define UB_BANK_NUM 48
+#define UB_BANKGROUP_UNUM 16
+#define UB_BANKGROUP_BATCH 3
+#define UB_BANKGROUP_ROW_SIZE 512
+#define UB_BANKGROUP_SIZE 65536
+#define UB_BANK_CONFLICT_OFFSET 0
+#elif __NPU_ARCH__ != 3510
 // the following is architecture specific (NpuArch 2201)
 #define UB_SIZE 196608     // 192KB, total size of unified buffer (UB), = UB_BANK_SIZE * UB_BANK_NUM
 #define UB_BANK_SIZE 4096  // 4KB, size per UB bank
@@ -43,7 +55,7 @@ using namespace AscendC;
 #define UB_BANKGROUP_UNUM 16         // The number of unique UB bank groups
 #define UB_BANKGROUP_BATCH 3         // The number of UB bank group batches
 #define UB_BANKGROUP_ROW_SIZE 512    // 512B, UB_BUF_ALIGN_SIZE * UB_BANK_GROUP_NUM
-#define UB_BANKGROUP_SIZE 65526      // 64KB, UB_BANK_SIZE * UB_BANK_GROUP_NUM
+#define UB_BANKGROUP_SIZE 65536      // 64KB, UB_BANK_SIZE * UB_BANK_GROUP_NUM
 #define UB_BANK_CONFLICT_OFFSET 256  // recommended offset trick in bytes to avoid UB bank conflict
 #else                                // NpuArch 3510
 #define UB_SIZE 262144               // 256 KB

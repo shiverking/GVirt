@@ -14,8 +14,17 @@ static const std::map<Key, uint64_t> BestSwizzles = {
 
 void XlitePickSwizzle(uint64_t n, uint64_t k, uint64_t *swizzle)
 {
+#ifdef XLITE_DISABLE_SWIZZLE_TABLE
+    (void)n;
+    (void)k;
+    // The table below was tuned on 910B3.  Keep the caller-provided default on
+    // 310P until a device-specific sweep has been completed.
+    (void)swizzle;
+    return;
+#else
     const auto best = BestSwizzles.find({n, k});
     if (best != BestSwizzles.end()) {
         *swizzle = best->second;
     }
+#endif
 }

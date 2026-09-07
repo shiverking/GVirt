@@ -21,6 +21,14 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize), _moeTpSize(moeTpSize),
       _moeEpSize(moeEpSize)
 {
+#ifdef XLITE_310P_LLM_FP16_POC
+    if (rankId != 0 || tpSize != 1 || dpSize != 1 || moeTpSize != 1 || moeEpSize != 1) {
+        throw std::runtime_error(
+            "Ascend310P llm_fp16 POC only supports rank=0, TP=1, DP=1 and no MoE parallelism");
+    }
+    defaultMatmulSwizzle = 0;
+    disableSwizzleTable = true;
+#endif
     if (sizeMB != 0) {
         Init(sizeMB);
     }
@@ -816,6 +824,11 @@ int64_t XRuntime::GetTensorOffset(XTensor &t)
 
 void XRuntime::ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable)
 {
+#ifdef XLITE_310P_LLM_FP16_POC
+    if (swizzle != 0 || useSwizzleTable) {
+        throw std::runtime_error("Ascend310P llm_fp16 POC does not support matmul swizzle tuning");
+    }
+#endif
     defaultMatmulSwizzle = swizzle;
     disableSwizzleTable = !useSwizzleTable;
 }

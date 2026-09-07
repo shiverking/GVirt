@@ -272,6 +272,10 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}",
             f"-DXLITE_EDITABLE_BUILD={'ON' if is_editable else 'OFF'}",
         ]
+        for env_name in ("SOC_VERSION", "XLITE_KERNEL_SET", "ASCEND_CANN_PACKAGE_PATH"):
+            env_value = os.environ.get(env_name)
+            if env_value:
+                configure_cmd.append(f"-D{env_name}={env_value}")
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
