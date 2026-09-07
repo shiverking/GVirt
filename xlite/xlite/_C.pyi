@@ -29,6 +29,12 @@ class Runtime:
     """Peer notify handle used by the peer-stream sync path."""
     multi_task_parallel: bool = ...
     """Enables the dual-task scheduling path."""
+    aic_num: int = ...
+    """Number of AI cores reported by ACL."""
+    aiv_num: int = ...
+    """Logical vector-kernel launch block count used by GVirt."""
+    reported_aiv_num: int = ...
+    """Dedicated vector-core count reported by ACL before 310P mapping."""
 
     def __init__(
         self,
@@ -1004,6 +1010,10 @@ def alltoallv(
     Raises:
         RuntimeError: If ``in_.dtype != out.dtype`` or the HCCL call fails.
     """
+    ...
+
+def probe_310p(rt: Runtime, out: torch.Tensor, value: int = 0x03102002) -> None:
+    """Launch one 310P block and write ``value`` directly to an INT32 GM tensor."""
     ...
 
 def add(rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> None:

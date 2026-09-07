@@ -153,6 +153,7 @@ public:
     uint32_t aivNum;
     uint32_t originAicNum;
     uint32_t originAivNum;
+    uint32_t reportedAivNum;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
     HcclComm _epComm = nullptr;
