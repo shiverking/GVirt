@@ -2165,6 +2165,23 @@ void UnpackActivation(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 
 PYBIND11_MODULE(_C, m)
 {
+    m.def("get_build_info", []() {
+        py::dict info;
+        info["soc"] = XLITE_BUILD_SOC;
+        info["kernel_set"] = XLITE_BUILD_KERNEL_SET;
+#ifdef XLITE_310P_LLM_FP16_POC
+        info["abi"] = 1;
+        info["cache_layout"] = "BSHD";
+        info["max_batch"] = 20;
+        info["max_seq_len"] = 2048;
+        info["attention_backend"] = "aclnn_per_request";
+#else
+        info["abi"] = 0;
+        info["cache_layout"] = "native";
+#endif
+        return info;
+    });
+
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>(),
              py::arg("devid"), py::arg("size") = 0, py::arg("rank") = 0, py::arg("tp_size") = 1,

@@ -11,6 +11,9 @@ from typing import List, Optional, Sequence, Union
 
 import torch
 
+def get_build_info() -> dict[str, object]:
+    """Return the compiled SoC, kernel set, ABI and cache-layout contract."""
+
 class Runtime:
     """Ascend runtime handle for streams, communication, and tensor pools.
 
