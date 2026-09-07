@@ -8,25 +8,33 @@ set_property(CACHE XLITE_KERNEL_SET PROPERTY STRINGS full llm_fp16)
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
     CACHE STRING "ASCEND CANN package installation directory"
 )
-message(STATUS "RUN_MODE: ${RUN_MODE}")
-message(STATUS "SOC_VERSION: ${SOC_VERSION}")
-message(STATUS "XLITE_KERNEL_SET: ${XLITE_KERNEL_SET}")
-message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
+
+# Environment-facing projects such as vLLM-Ascend commonly spell the SoC name
+# in lowercase, while AscendC's CMake/packaging layer uses the canonical
+# product spelling (and embeds it in case-sensitive simulator/library paths).
+# Accept either spelling at the boundary, but never pass the lowercase value
+# into ascendc_library().
+set(XLITE_SOC_VERSION_INPUT "${SOC_VERSION}")
+string(TOLOWER "${SOC_VERSION}" XLITE_SOC_VERSION_LOWER)
 
 if(NOT XLITE_KERNEL_SET STREQUAL "full" AND NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
     message(FATAL_ERROR "XLITE_KERNEL_SET must be one of: full, llm_fp16")
 endif()
 
-if(SOC_VERSION MATCHES "^ascend310p" AND NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
+if(XLITE_SOC_VERSION_LOWER MATCHES "^ascend310p" AND
+   NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
     message(FATAL_ERROR "Ascend310P POC only supports XLITE_KERNEL_SET=llm_fp16")
 endif()
 
 if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
-    if(NOT SOC_VERSION STREQUAL "ascend310p3")
+    if(NOT XLITE_SOC_VERSION_LOWER STREQUAL "ascend310p3")
         message(FATAL_ERROR
-            "llm_fp16 requires SOC_VERSION=ascend310p3 (lowercase, as required by the compiler)")
+            "llm_fp16 requires SOC_VERSION=Ascend310P3 (case-insensitive input)")
     endif()
+    set(SOC_VERSION "Ascend310P3" CACHE STRING "system on chip type" FORCE)
     set(XLITE_BUILD_ARCH_310P TRUE)
+    message(STATUS
+        "Normalized SOC_VERSION '${XLITE_SOC_VERSION_INPUT}' -> '${SOC_VERSION}' for AscendC")
     message(STATUS "Ascend310P architecture gate: device compilation must report __NPU_ARCH__=2002")
     message(STATUS "Ascend310P conservative memory profile: UB=192KiB; no 910B swizzle/CoreAssigner")
     foreach(_aclnn_header
@@ -49,6 +57,11 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
             "${ASCEND_CANN_PACKAGE_PATH}/lib64")
     endif()
 endif()
+
+message(STATUS "RUN_MODE: ${RUN_MODE}")
+message(STATUS "SOC_VERSION: ${SOC_VERSION}")
+message(STATUS "XLITE_KERNEL_SET: ${XLITE_KERNEL_SET}")
+message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
 
 find_program(CCACHE_FOUND ccache)
 if (CCACHE_FOUND)

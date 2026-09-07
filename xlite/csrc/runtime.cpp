@@ -78,15 +78,14 @@ void XRuntime::Init(size_t sizeMB)
     aivNum = static_cast<uint32_t>(val);
     reportedAivNum = aivNum;
 #ifdef XLITE_310P_LLM_FP16_POC
-    // Some M200 variants expose unified AI cores and report no dedicated
-    // vector cores.  Preserve a non-zero device value; only fall back to the
-    // AI-core count when ACL actually reports zero.
+    // Ascend310P/M200 uses unified AI cores.  The official 310P Add kernel
+    // sample launches all eight AI cores successfully, while some runtime
+    // stacks report seven through ACL_DEVICE_INFO_VECTOR_CORE_NUM.  Keep that
+    // raw value for diagnostics, but use the unified AI-core count for launch.
     if (aicNum == 0) {
         throw std::runtime_error("Ascend 310P reported zero AI cores");
     }
-    if (aivNum == 0) {
-        aivNum = aicNum;
-    }
+    aivNum = aicNum;
 #endif
     originAicNum = aicNum;
     originAivNum = aivNum;
@@ -880,9 +879,7 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     if (aicNum == 0) {
         throw std::runtime_error("Ascend 310P reported zero AI cores");
     }
-    if (aivNum == 0) {
-        aivNum = aicNum;
-    }
+    aivNum = aicNum;
 #endif
     originAicNum = aicNum;
     originAivNum = aivNum;
