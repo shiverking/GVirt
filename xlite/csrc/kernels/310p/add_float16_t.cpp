@@ -20,6 +20,8 @@ public:
         xGm.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(x));
         yGm.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(y));
         zGm.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(z));
+        rowCount = rows;
+        columnCount = cols;
         totalElements = static_cast<uint64_t>(rows) * cols;
 
         pipe.InitBuffer(xQueue, 1, ADD_TILE_ELEMENTS * sizeof(half));
@@ -34,11 +36,17 @@ public:
         // POC, so handle them with scalar GM access. Qwen3's production
         // dimensions remain on the vectorized path below.
         if ((totalElements % FP16_BLOCK_ELEMENTS) != 0) {
-            for (uint64_t index = GetBlockIdx(); index < totalElements;
-                 index += GetBlockNum()) {
-                float value = static_cast<float>(xGm.GetValue(index)) +
-                              static_cast<float>(yGm.GetValue(index));
-                zGm.SetValue(index, static_cast<half>(value));
+            // Assign whole rows to cores. Striding individual scalar elements
+            // across cores produces non-contiguous GM transactions on m200
+            // and was observed to commit only part of the output.
+            for (uint32_t row = GetBlockIdx(); row < rowCount; row += GetBlockNum()) {
+                uint64_t rowOffset = static_cast<uint64_t>(row) * columnCount;
+                for (uint32_t column = 0; column < columnCount; ++column) {
+                    uint64_t index = rowOffset + column;
+                    float value = static_cast<float>(xGm.GetValue(index)) +
+                                  static_cast<float>(yGm.GetValue(index));
+                    zGm.SetValue(index, static_cast<half>(value));
+                }
             }
             return;
         }
@@ -91,6 +99,8 @@ private:
     GlobalTensor<half> xGm;
     GlobalTensor<half> yGm;
     GlobalTensor<half> zGm;
+    uint32_t rowCount = 0;
+    uint32_t columnCount = 0;
     uint64_t totalElements = 0;
 };
 
