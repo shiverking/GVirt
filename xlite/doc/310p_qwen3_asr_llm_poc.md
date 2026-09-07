@@ -11,7 +11,7 @@ profile:
 
 ```bash
 cd xlite
-export SOC_VERSION=Ascend310P3
+export SOC_VERSION=ascend310p3
 export XLITE_KERNEL_SET=llm_fp16
 pip install -v -e . --no-build-isolation
 ```
@@ -102,7 +102,7 @@ vector tests prefill outputs with NaN sentinels, so an empty kernel fails before
 the numeric comparison. MatMul covers M=1/8/127/128/129. Attention covers
 prefill 1/127/128/129 and decode valid lengths 16/127/128/129/512/2048, including
 cache block boundaries. If MatMul, RoPE/cache or decode attention
-cannot compile for `Ascend310P3`, stop the full-model run and record the first
+cannot compile for `ascend310p3`, stop the full-model run and record the first
 compiler diagnostic plus the affected kernel and shape. Do not silently fall
 back to BF16, quantized kernels, multi-card communication or vLLM's 5D NZ KV
 cache.
