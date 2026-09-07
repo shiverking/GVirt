@@ -10,6 +10,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Literal
+import math
 import os
 import torch
 import torch.nn as nn
@@ -564,18 +565,51 @@ class Llama(nn.Module):
         intermediate_size = self.args.inter_dim
 
         param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
+        loaded_elements = {name: 0 for name in param_dict}
+
+        def record_loaded(param_name: str, elements: int) -> None:
+            loaded_elements[param_name] += elements
+
+        def tensor_elements(value) -> int:
+            if isinstance(value, torch.Tensor):
+                return value.numel()
+            shape = value.get_shape() if hasattr(value, "get_shape") else value.shape
+            return math.prod(shape)
+
+        def decoder_weight_name(checkpoint_name: str) -> Optional[str]:
+            # Qwen3-ASR uses thinker.model.* for the decoder and
+            # thinker.lm_head.* for its output head.  Some related Omni
+            # checkpoints insert a language_model component instead.
+            language_model_marker = "language_model."
+            if language_model_marker in checkpoint_name:
+                suffix = checkpoint_name.split(language_model_marker, 1)[1]
+                if suffix.startswith(("model.", "lm_head.")):
+                    return suffix
+                return "model." + suffix
+            if checkpoint_name.startswith("thinker.model."):
+                return checkpoint_name[len("thinker."):]
+            if checkpoint_name.startswith("thinker.lm_head."):
+                return checkpoint_name[len("thinker."):]
+            if (
+                checkpoint_name.startswith("thinker.")
+                or "audio_tower" in checkpoint_name
+                or "audio_encoder" in checkpoint_name
+            ):
+                return None
+            return checkpoint_name
+
         for _, param in self.named_parameters():
             param.requires_grad = False
         for name, loaded_weight in hf_model_weights_iterator(model_path):
-            # Qwen3-ASR checkpoints nest the decoder below thinker.language_model.
-            # Ignore the audio tower and present the decoder with ordinary Qwen3 names.
-            language_model_marker = "language_model."
-            if language_model_marker in name:
-                name = name.split(language_model_marker, 1)[1]
-            elif name.startswith("thinker.") or "audio_tower" in name or "audio_encoder" in name:
+            name = decoder_weight_name(name)
+            if name is None:
                 continue
             if "rotary_emb.inv_freq" in name or "g_idx" in name:
                 continue
+            if name.startswith("model.layers."):
+                layer_id = int(name.split(".", 3)[2])
+                if layer_id >= self.args.n_layers:
+                    continue
 
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
@@ -601,6 +635,7 @@ class Llama(nn.Module):
                                      f" checkpoint shape({loaded_weight.shape})")
 
                 param_slice.copy_(loaded_weight)
+                record_loaded(param_name, tensor_elements(loaded_weight))
                 is_attention_weight = True
                 break
 
@@ -623,6 +658,7 @@ class Llama(nn.Module):
                 param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
 
                 param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                record_loaded(param_name, tensor_elements(loaded_weight))
                 is_gate_up_weight = True
                 break
             if is_gate_up_weight:
@@ -638,6 +674,7 @@ class Llama(nn.Module):
                                              self.args.vocab_size,
                                              self.args.dim,
                                              name, True, False, rank, world_size)
+                record_loaded(name, param.numel())
                 continue
 
             if "lm_head" in name:
@@ -645,26 +682,48 @@ class Llama(nn.Module):
                                              self.args.dim,
                                              self.args.vocab_size,
                                              name, False, True, rank, world_size)
+                record_loaded(name, param.numel())
                 continue
 
             if "o_proj" in name:
                 load_tensor_parallel_weights(param, loaded_weight,
                                              self.args.head_dim * self.args.n_heads, self.args.dim,
                                              name, True, True, rank, world_size)
+                record_loaded(name, param.numel())
                 continue
 
             if "down_proj" in name:
                 load_tensor_parallel_weights(param, loaded_weight,
                                              intermediate_size, self.args.dim,
                                              name, True, True, rank, world_size)
+                record_loaded(name, param.numel())
                 continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
+            record_loaded(name, param.numel())
             torch.npu.empty_cache()
 
         if self.args.tie_word_embeddings:
             self.lm_head.weight.data = self.embed_tokens.weight.data
+            if "lm_head.weight" in loaded_elements:
+                loaded_elements["lm_head.weight"] = self.lm_head.weight.numel()
+
+        incomplete = [
+            f"{name}: loaded {loaded_elements[name]}/{param.numel()} elements"
+            for name, param in param_dict.items()
+            if loaded_elements[name] != param.numel()
+        ]
+        if incomplete:
+            raise RuntimeError(
+                "Decoder checkpoint load coverage is incomplete; refusing a false-positive POC: "
+                + "; ".join(incomplete[:16])
+            )
+        self.weight_load_report = {
+            "parameters": len(param_dict),
+            "elements": sum(loaded_elements.values()),
+            "complete": True,
+        }
 
         if self.xlite_weight_nz:
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)

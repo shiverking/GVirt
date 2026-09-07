@@ -45,6 +45,15 @@ def _cosine(left: torch.Tensor, right: torch.Tensor) -> float:
     return float(F.cosine_similarity(left.float().flatten(), right.float().flatten(), dim=0).cpu())
 
 
+def _require_nonzero_finite(name: str, value: torch.Tensor) -> None:
+    if not bool(torch.isfinite(value).all().item()):
+        raise RuntimeError(f"{name} contains NaN or Inf")
+    if float(value.float().abs().max().item()) == 0.0:
+        raise RuntimeError(
+            f"{name} is entirely zero; checkpoint loading or the execution path is invalid"
+        )
+
+
 def _clear_caches(model: Llama) -> None:
     for layer in model.layers:
         layer.self_attn.k_cache.zero_()
@@ -171,6 +180,11 @@ def main() -> int:
             inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
     )
 
+    _require_nonzero_finite("reference hidden state", reference_hidden)
+    _require_nonzero_finite("Xlite hidden state", xlite_hidden)
+    _require_nonzero_finite("reference logits", reference_logits)
+    _require_nonzero_finite("Xlite logits", xlite_logits)
+
     hidden_cosine = _cosine(reference_hidden, xlite_hidden)
     logits_cosine = _cosine(reference_logits, xlite_logits)
     reference_next_token = reference_logits.argmax(dim=-1)
@@ -228,6 +242,7 @@ def main() -> int:
     report = {
         "device": device_name,
         "dtype": "float16",
+        "weight_load": model.weight_load_report,
         "batch_size": 1,
         "num_layers": model_args.n_layers,
         "input_mode": args.input_mode,
