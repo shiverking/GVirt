@@ -108,6 +108,13 @@ private:
     uint32_t yNumel;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define ADDBIAS_FUNC_DEFINE(dtype)                                                          \
+    extern "C" __global__ __aicore__ void add_bias_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, \
+                                                            uint32_t xNumel, uint32_t yNumel) \
+    {                                                                                       \
+    }
+#else
 #define ADDBIAS_FUNC_DEFINE(dtype)                                                           \
     extern "C" __global__ __aicore__ void add_bias_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z,  \
                                                            uint32_t xNumel, uint32_t yNumel) \
@@ -116,3 +123,4 @@ private:
         op.Init(x, y, z, xNumel, yNumel);                                                    \
         op.Process();                                                                        \
     }
+#endif
