@@ -25,8 +25,10 @@ PROBE_MAGIC = 0x03102002
 
 
 def _assert_written(value: torch.Tensor, name: str) -> None:
-    if torch.isnan(value).any():
-        raise AssertionError(f"{name} left the non-zero/no-op sentinel unchanged")
+    nan_count = int(torch.isnan(value).sum().cpu().item())
+    if nan_count:
+        raise AssertionError(
+            f"{name} left {nan_count}/{value.numel()} no-op sentinel values unchanged")
 
 
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -53,6 +55,16 @@ def _test_add(runtime: Runtime, device: str) -> None:
     torch.testing.assert_close(output, left + right, rtol=1e-2, atol=1e-2)
 
 
+def _test_add_unaligned(runtime: Runtime, device: str) -> None:
+    left = torch.randn(3, 2051, dtype=torch.float16, device=device)
+    right = torch.randn_like(left)
+    output = torch.full_like(left, torch.nan)
+    add(runtime, left, right, output)
+    torch.npu.synchronize()
+    _assert_written(output, "add-unaligned")
+    torch.testing.assert_close(output, left + right, rtol=1e-2, atol=1e-2)
+
+
 def _test_add_single_block(_runtime: Runtime, device: str) -> None:
     runtime = Runtime(0, 64)
     runtime.update_core_num(1.0 / runtime.aic_num)
@@ -70,6 +82,17 @@ def _test_embedding(runtime: Runtime, device: str) -> None:
     torch.npu.synchronize()
     _assert_written(embedded, "embedding")
     torch.testing.assert_close(embedded, F.embedding(ids.long(), table), rtol=1e-2, atol=1e-2)
+
+
+def _test_embedding_unaligned(runtime: Runtime, device: str) -> None:
+    table = torch.randn(256, 2051, dtype=torch.float16, device=device)
+    ids = torch.tensor([0, 1, 127, 255], dtype=torch.int32, device=device)
+    embedded = torch.full((4, 2051), torch.nan, dtype=torch.float16, device=device)
+    embed(runtime, table, ids, embedded, 0, 256)
+    torch.npu.synchronize()
+    _assert_written(embedded, "embedding-unaligned")
+    torch.testing.assert_close(
+        embedded, F.embedding(ids.long(), table), rtol=1e-2, atol=1e-2)
 
 
 def _test_rmsnorm(runtime: Runtime, device: str) -> None:
@@ -153,7 +176,9 @@ def main() -> int:
         ("launch-probe", _test_launch_probe),
         ("add-single-block", _test_add_single_block),
         ("add", _test_add),
+        ("add-unaligned", _test_add_unaligned),
         ("embedding", _test_embedding),
+        ("embedding-unaligned", _test_embedding_unaligned),
         ("rmsnorm", _test_rmsnorm),
         ("qk-rmsnorm", _test_qk_rmsnorm),
         ("silu-and-mul", _test_silu_and_mul),
