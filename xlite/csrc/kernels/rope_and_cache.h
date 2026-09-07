@@ -306,6 +306,7 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
     __ubuf__ float *query_calc_fp32_ubuf, *key_calc_fp32_ubuf;
 
     uint32_t calcbuf_start = ROUND_UP(cossin_start + ubuf_num * cossin_blocksize, BLOCK_SIZE);
+#if !defined(XLITE_ARCH_310P)
     if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
         uint64_t offset = 0;
         uint32_t q_fp32_blocksize = ROUND_UP(q_size * sizeof(float), BLOCK_SIZE);
@@ -387,11 +388,14 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
             reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + q_fp32_blocksize));
         calcbuf_start += (q_fp32_blocksize + kv_fp32_blocksize);
     } else {
+#endif
         query_calc_dtype_ubuf_addr = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)calcbuf_start);
         key_calc_dtype_ubuf_addr =
             reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)(calcbuf_start + q_bytesize));
         calcbuf_start += 2 * q_bytesize;
+#if !defined(XLITE_ARCH_310P)
     }
+#endif
 
     // pos and slot
     uint32_t params_start = calcbuf_start;
@@ -416,11 +420,15 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
         reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start + pos_dim * pos_size));
 
     uint64_t q_repeat;
+#if !defined(XLITE_ARCH_310P)
     if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
         q_repeat = DIV_ROUND_UP(q_size, VECTOR_MAX_NUM_OF_FP32);
     } else {
+#endif
         q_repeat = DIV_ROUND_UP(q_size, VECTOR_MAX_NUM_OF_FP16);
+#if !defined(XLITE_ARCH_310P)
     }
+#endif
 
     uint64_t lenBurst_q = DIV_ROUND_UP(q_bytesize, BLOCK_SIZE);
     uint64_t lenBurst_kv = DIV_ROUND_UP(kv_bytesize, BLOCK_SIZE);
@@ -516,6 +524,7 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                                 (__gm__ Dtype *)cos_sin_cache + sin_w_shift, dmi_cfg_cossin);
                 set_flag(PIPE_MTE2, PIPE_V, event_id);
                 wait_flag(PIPE_MTE2, PIPE_V, event_id);
+#if !defined(XLITE_ARCH_310P)
                 if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                     vconv_bf162f32(
                         cos_fp32_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
@@ -530,9 +539,11 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                         sin_fp32_mrope_w_ubuf_addr[event_id], sin_mrope_w_ubuf_addr[event_id],
                         DIV_ROUND_UP(embed_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
                 }
+#endif
                 pipe_barrier(PIPE_V);
             }
 
+#if !defined(XLITE_ARCH_310P)
             if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                 calc_cossin_cast(
                     gm_key, key_dtype_ubuf_addr[event_id], sin_dtype_ubuf_addr[event_id],
@@ -543,13 +554,16 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                     cos_fp32_mrope_w_ubuf_addr[event_id], embed_dim, rot_dim, event_id,
                     num_kv_heads, head_size, pos_dim, mrope_mask_h, mrope_mask_w, dmi_cfg_kv);
             } else {
+#endif
                 calc_cossin(gm_key, key_dtype_ubuf_addr[event_id], key_calc_dtype_ubuf_addr,
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
                             sin_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
                             sin_mrope_w_ubuf_addr[event_id], cos_mrope_w_ubuf_addr[event_id],
                             embed_dim, rot_dim, event_id, num_kv_heads, head_size, pos_dim,
                             mrope_mask_h, mrope_mask_w, dmi_cfg_kv);
+#if !defined(XLITE_ARCH_310P)
             }
+#endif
             set_flag(PIPE_V, PIPE_MTE3, event_id);
             wait_flag(PIPE_V, PIPE_MTE3, event_id);
 
@@ -557,6 +571,7 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
             copy_ubuf_to_gm(gm_key, key_dtype_ubuf_addr[event_id], dmi_cfg_kv);
             copy_ubuf_to_gm(gm_kcache, key_dtype_ubuf_addr[event_id], dmi_cfg_kv);
 
+#if !defined(XLITE_ARCH_310P)
             if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                 calc_cossin_cast(
                     gm_query, query_dtype_ubuf_addr[event_id], sin_dtype_ubuf_addr[event_id],
@@ -579,6 +594,7 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                                 8);
                 pipe_barrier(PIPE_V);
             } else {
+#endif
                 calc_cossin(gm_query, query_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
                             sin_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
@@ -588,7 +604,9 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                 vmuls(query_dtype_ubuf_addr[event_id], query_dtype_ubuf_addr[event_id], scale,
                       q_repeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
+#if !defined(XLITE_ARCH_310P)
             }
+#endif
             set_flag(PIPE_V, PIPE_MTE3, event_id);
             wait_flag(PIPE_V, PIPE_MTE3, event_id);
             copy_ubuf_to_gm(gm_query, query_dtype_ubuf_addr[event_id], dmi_cfg_q);
