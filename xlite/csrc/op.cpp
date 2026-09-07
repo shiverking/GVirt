@@ -41,6 +41,28 @@ void XliteOpProbe310P(XRuntime &rt, XTensor &out, uint32_t value)
 #endif
 }
 
+void XliteOpOfficialAddProbe310P(XRuntime &rt, XTensor &x, XTensor &y, XTensor &z)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+#ifdef XLITE_ARCH_310P
+    constexpr uint64_t probeElements = 8 * 2048;
+    if (x.dtype != FP16 || y.dtype != FP16 || z.dtype != FP16 ||
+        x.numel != probeElements || y.numel != probeElements || z.numel != probeElements) {
+        throw std::runtime_error(
+            "official Ascend310P Add probe requires three FP16 tensors with 8*2048 elements");
+    }
+    // Fixed at the blockDim used by the passing AddKernelInvocationNeo sample.
+    aclrtlaunch_xlite_official_add_probe_310p(8, rt.stream, x.ptr, y.ptr, z.ptr);
+#else
+    (void)x;
+    (void)y;
+    (void)z;
+    throw std::runtime_error("official Ascend310P Add probe is unavailable in this build");
+#endif
+}
+
 // Pick how many AIV blocks to launch for a byte-wise copy kernel (concat/split)
 // based on the total bytes. Each block processes ~tilePerCore bytes in series,
 // so for small data we launch only a few blocks (avoids the multi-core launch +

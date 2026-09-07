@@ -14,6 +14,7 @@ from xlite._C import (
     Runtime,
     add,
     embed,
+    official_add_probe_310p,
     probe_310p,
     qk_rmsnorm_310p,
     rmsnorm,
@@ -52,6 +53,16 @@ def _test_add(runtime: Runtime, device: str) -> None:
     add(runtime, left, right, output)
     torch.npu.synchronize()
     _assert_written(output, "add")
+    torch.testing.assert_close(output, left + right, rtol=1e-2, atol=1e-2)
+
+
+def _test_official_add_probe(runtime: Runtime, device: str) -> None:
+    left = torch.randn(8, 2048, dtype=torch.float16, device=device)
+    right = torch.randn_like(left)
+    output = torch.full_like(left, torch.nan)
+    official_add_probe_310p(runtime, left, right, output)
+    torch.npu.synchronize()
+    _assert_written(output, "official-add-baseline")
     torch.testing.assert_close(output, left + right, rtol=1e-2, atol=1e-2)
 
 
@@ -174,6 +185,7 @@ def main() -> int:
 
     cases = (
         ("launch-probe", _test_launch_probe),
+        ("official-add-baseline", _test_official_add_probe),
         ("add-single-block", _test_add_single_block),
         ("add", _test_add),
         ("add-unaligned", _test_add_unaligned),

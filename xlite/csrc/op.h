@@ -15,6 +15,7 @@ static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
 void XliteOpProbe310P(XRuntime &rt, XTensor &out, uint32_t value);
+void XliteOpOfficialAddProbe310P(XRuntime &rt, XTensor &x, XTensor &y, XTensor &z);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
                       uint32_t copySize = COPY_SIZE);
