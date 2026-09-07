@@ -7,6 +7,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
 import torch
 from xlite._C import Runtime, silu_and_mul
 
@@ -19,6 +20,8 @@ supported_dtype_list = [
     (torch.float16, 2e-5, 2e-3),
     (torch.bfloat16, 2e-2, 2e-4)
 ]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    supported_dtype_list = [item for item in supported_dtype_list if item[0] == torch.float16]
 
 for dtype, atol, rtol in supported_dtype_list:
     for dim in [2304, 6400]:
@@ -37,6 +40,8 @@ for dtype, atol, rtol in supported_dtype_list:
         try:
             torch.testing.assert_close(standard, output, atol=atol, rtol=rtol)
         except AssertionError as e:
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                raise
             print(f'{e}')
             print(f'torch_npu: {standard}')
             print(f'xlite: {output}')

@@ -10,6 +10,7 @@
 from __future__ import absolute_import
 import logging
 import os
+import os
 import torch
 import torch_npu
 import torch.distributed as dist
@@ -33,6 +34,8 @@ BATCH_SIZE = 64
 DIM = 8192
 NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    dtype_list = [torch.float16]
 
 for test_dtype in dtype_list:
     for has_bias in [True, False]:
@@ -60,6 +63,8 @@ for test_dtype in dtype_list:
         try:
             torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                raise
             logging.error(f'{e}')
             print(f"standard: {standard}")
             print(f"bias: {bias}")
@@ -72,6 +77,8 @@ CNT = 8
 SIZE1 = DIM * (CNT + 2)
 NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    dtype_list = [torch.float16]
 
 for test_dtype in dtype_list:
     for has_bias in [True, False]:
@@ -111,6 +118,8 @@ for test_dtype in dtype_list:
         try:
             torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                raise
             logging.error(f'{e}')
             logging.error(f'torch_npu: {standard}')
             logging.error(f'xlite: {y}')

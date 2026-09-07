@@ -7,6 +7,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
 import torch
 from xlite._C import Runtime, matmul
 import torch.nn.functional as F
@@ -17,12 +18,19 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 
-for weight_nz in [False, True]:
-    for transpose in [False, True]:
-        for dtype in [torch.float16, torch.bfloat16, torch.float]:
-            for m in [1, 8]:
-                for n in [32, 64, 16128]:
-                    for k in [32, 128, 7168, 7184, 7232, 7296, 7424, 7488, 7616]:
+test_dtypes = [torch.float16] if os.getenv("XLITE_TEST_FP16_ONLY") == "1" else [torch.float16, torch.bfloat16, torch.float]
+poc_fp16 = os.getenv("XLITE_TEST_FP16_ONLY") == "1"
+weight_nz_values = [False] if poc_fp16 else [False, True]
+transpose_values = [False] if poc_fp16 else [False, True]
+m_values = [1, 8, 129] if poc_fp16 else [1, 8]
+n_values = [2048, 6144] if poc_fp16 else [32, 64, 16128]
+k_values = [2048, 6144] if poc_fp16 else [32, 128, 7168, 7184, 7232, 7296, 7424, 7488, 7616]
+for weight_nz in weight_nz_values:
+    for transpose in transpose_values:
+        for dtype in test_dtypes:
+            for m in m_values:
+                for n in n_values:
+                    for k in k_values:
                         if transpose and dtype == torch.float:
                             continue
                         x = torch.randn(m, k, dtype=dtype, device="npu:0")
@@ -51,6 +59,8 @@ for weight_nz in [False, True]:
                         try:
                             torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
                         except AssertionError as e:
+                            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                                raise
                             print(f'{e}')
                             print(f'torch_npu: {standard}')
                             print(f'xlite: {z}')

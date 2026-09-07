@@ -7,6 +7,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
 import torch
 from xlite._C import Runtime, add
 
@@ -15,6 +16,8 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 supported_dtype_list = [torch.float16, torch.bfloat16]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    supported_dtype_list = [torch.float16]
 
 for dtype in supported_dtype_list:
     x = torch.randn(8, 2048, dtype=dtype, device="npu:0")
@@ -31,6 +34,8 @@ for dtype in supported_dtype_list:
     try:
         torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
+        if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+            raise
         print(f'{e}')
         print(f'x: {x}')
         print(f'y: {y}')

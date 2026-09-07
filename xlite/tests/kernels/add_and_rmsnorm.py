@@ -10,6 +10,7 @@
 from __future__ import absolute_import
 import logging
 import os
+import os
 import torch
 from xlite._C import Runtime, add_and_rmsnorm
 
@@ -22,6 +23,8 @@ BATCH_SIZE = 64
 DIM = 6144
 NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    dtype_list = [torch.float16]
 
 for test_dtype in dtype_list:
     with torch.device("npu"):
@@ -51,6 +54,8 @@ for test_dtype in dtype_list:
     try:
         torch.testing.assert_close(add_standard, y, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
+        if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+            raise
         logging.error(f'{e}')
         logging.error(f'torch_npu add: {add_standard}')
         logging.error(f'xlite add: {y}')
@@ -58,6 +63,8 @@ for test_dtype in dtype_list:
     try:
         torch.testing.assert_close(standard, x, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
+        if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+            raise
         logging.error(f'{e}')
         logging.error(f'torch_npu rmsnorm: {standard}')
         logging.error(f'xlite rmsnorm: {x}')

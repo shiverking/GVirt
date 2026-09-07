@@ -9,6 +9,7 @@
 # ===============================================================================
 from __future__ import absolute_import
 import logging
+import os
 import torch
 from xlite._C import Runtime, rope_and_cache
 
@@ -59,6 +60,8 @@ BLOCK_NUM = 1
 
 test_cases = {(torch.float16, 64, 64), (torch.float16, 128, 128), (torch.float16, 128, 64),
               (torch.bfloat16, 64, 64), (torch.bfloat16, 128, 128), (torch.bfloat16, 128, 64)}
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+    test_cases = {case for case in test_cases if case[0] == torch.float16}
 
 for test_dtype, head_dim, rot_dim in test_cases:
     out_features = (N_HEADS + 2 * N_KV_HEADS) * head_dim
@@ -113,6 +116,8 @@ for test_dtype, head_dim, rot_dim in test_cases:
     try:
         torch.testing.assert_close(qkv_standard_out, qkv_xlite, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
+        if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+            raise
         logging.error(f'{e}')
         logging.error(f'torch_npu: {qkv_standard_out}')
         logging.error(f'xlite: {qkv_xlite}')
