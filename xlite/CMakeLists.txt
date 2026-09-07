@@ -25,7 +25,28 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     if(NOT SOC_VERSION MATCHES "^Ascend310P")
         message(FATAL_ERROR "llm_fp16 is a POC kernel profile restricted to Ascend310P")
     endif()
-    add_compile_definitions(XLITE_310P_LLM_FP16_POC=1 XLITE_DISABLE_SWIZZLE_TABLE=1)
+    set(XLITE_BUILD_ARCH_310P TRUE)
+    message(STATUS "Ascend310P architecture gate: device compilation must report __NPU_ARCH__=2002")
+    message(STATUS "Ascend310P conservative memory profile: UB=192KiB; no 910B swizzle/CoreAssigner")
+    foreach(_aclnn_header
+            aclnn_matmul.h
+            aclnn_prompt_flash_attention.h
+            aclnn_incre_flash_attention.h)
+        if(NOT EXISTS "${ASCEND_CANN_PACKAGE_PATH}/include/aclnnop/${_aclnn_header}")
+            message(FATAL_ERROR
+                "Ascend310P POC stop gate: missing ACLNN header "
+                "${ASCEND_CANN_PACKAGE_PATH}/include/aclnnop/${_aclnn_header}")
+        endif()
+    endforeach()
+    find_library(XLITE_NNOPBASE_LIBRARY NAMES nnopbase
+        PATHS "${ASCEND_CANN_PACKAGE_PATH}/lib64" NO_DEFAULT_PATH)
+    find_library(XLITE_OPAPI_LIBRARY NAMES opapi
+        PATHS "${ASCEND_CANN_PACKAGE_PATH}/lib64" NO_DEFAULT_PATH)
+    if(NOT XLITE_NNOPBASE_LIBRARY OR NOT XLITE_OPAPI_LIBRARY)
+        message(FATAL_ERROR
+            "Ascend310P POC stop gate: libnnopbase.so and libopapi.so are required in "
+            "${ASCEND_CANN_PACKAGE_PATH}/lib64")
+    endif()
 endif()
 
 find_program(CCACHE_FOUND ccache)
@@ -143,6 +164,16 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_prepare_float16_t.cpp
 )
 
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    # The 310P correctness backend must not accidentally resolve the 910B
+    # hand-written cube/attention implementations.
+    list(REMOVE_ITEM KERNEL_FILES_F16
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_attention_float16_t.cpp
+    )
+endif()
+
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
     set(ASCENDC_CMAKE_DIR ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
 elseif(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/tools/tikcpp/ascendc_kernel_cmake)
@@ -156,6 +187,12 @@ include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
 ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
 ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
+
+if(XLITE_BUILD_ARCH_310P)
+    # Only the selected FP16 vector kernels receive the project-owned 310P
+    # device macro. BF16/common compatibility stubs are not promoted to 310P.
+    ascendc_compile_definitions(xlite_kernels_f16_${RUN_MODE} PRIVATE XLITE_ARCH_310P=1)
+endif()
 
 # Bundle all generated aclrtlaunch_*.h headers into one merged header so
 # csrc/op.cpp only needs a single #include. The individual headers are only
@@ -214,9 +251,19 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/trace/matmul_tracer.cpp
 )
 
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    target_sources(xlite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_310p.cpp)
+    target_compile_definitions(xlite PRIVATE
+        XLITE_ARCH_310P=1
+        XLITE_310P_LLM_FP16_POC=1
+        XLITE_DISABLE_SWIZZLE_TABLE=1
+    )
+endif()
+
 target_include_directories(xlite PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc
+    ${ASCEND_CANN_PACKAGE_PATH}/include
 )
 
 add_dependencies(xlite xlite_aclrtlaunch_all)
@@ -289,6 +336,9 @@ target_link_libraries(xlite PRIVATE
     hccl
     torch
 )
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    target_link_libraries(xlite PRIVATE ${XLITE_NNOPBASE_LIBRARY} ${XLITE_OPAPI_LIBRARY})
+endif()
 
 # _C
 find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)

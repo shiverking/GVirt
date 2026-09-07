@@ -29,6 +29,12 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     if (c.quantMsdW4a8 || c.quantAttnWeightTrans || c.quantAttnWeightNz) {
         throw std::runtime_error("Ascend310P llm_fp16 POC does not support quantization");
     }
+    if (c.nHeads != 16 || c.nKvHeads != 8 || c.headDim != 128 || c.blockSize != 128 ||
+        c.intermediateSize != 6144 || c.addBias) {
+        throw std::runtime_error(
+            "Ascend310P llm_fp16 POC requires Q16/KV8, head_dim=128, block_size=128, "
+            "intermediate_size=6144 and bias-free QKV");
+    }
 #endif
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
@@ -1795,6 +1801,15 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
 
 void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache)
 {
+#ifdef XLITE_310P_LLM_FP16_POC
+    if (rt.multiTaskParallel) {
+        throw std::runtime_error(
+            "Ascend310P llm_fp16 POC does not support CoreAssigner/multi-task concurrency");
+    }
+    if (embed.dtype != FP16 || norm.dtype != FP16 || head.dtype != FP16) {
+        throw std::runtime_error("Ascend310P llm_fp16 POC model tensors must all be FP16");
+    }
+#endif
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                  ": check runtime communication setting failed");
@@ -1809,6 +1824,16 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                  ": state cache size must equal nLayers");
     }
+
+#ifdef XLITE_310P_LLM_FP16_POC
+    for (size_t layer = 0; layer < kvCache.size(); ++layer) {
+        if (kvCache[layer].size() != 2 || kvCache[layer][0].dtype != FP16 ||
+            kvCache[layer][1].dtype != FP16) {
+            throw std::runtime_error(
+                "Ascend310P llm_fp16 POC requires exactly two FP16 4D KV tensors per layer");
+        }
+    }
+#endif
 
     if (_c.attnType == XMODEL_ATTN_HYBRID) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));

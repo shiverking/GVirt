@@ -489,6 +489,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     _decodeStep = !anyMultiToken;
     // Decode only when every request has cache and this step is a single token.
     _linearDecodeStep = allCached && !anyMultiToken && batch > 0;
+    _lensHost = lens;
     _cachedLensHost = cachedLens;
 
     if (batchedTokens == 0 || batchedTokens > maxBatchedTokens) {
@@ -548,6 +549,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
         }
     }
+    _blockTablesHost = blockTables;
     size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
                                ACL_MEMCPY_HOST_TO_DEVICE, stream));

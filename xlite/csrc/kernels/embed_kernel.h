@@ -5,7 +5,7 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 template <typename Dtype>
 __aicore__ void embed_kernel(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t dim, uint32_t batch_size,
                              uint32_t emb_start_idx, uint32_t emb_end_idx, uint32_t tp_size)

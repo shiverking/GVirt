@@ -6,7 +6,7 @@
 #include "kernel_macro.h"
 #include "kernel_param.h"
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 
 template <typename Dtype>
 __aicore__ inline void convert_input(__ubuf__ float *dst, __ubuf__ Dtype *src, uint64_t repeat)

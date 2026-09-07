@@ -186,6 +186,10 @@ public:
     // only for requests with cached==0 (fresh prefill); chunked-prefill
     // continuation (cached>0, multi-token) reuses state via recurrent GDN.
     std::vector<uint32_t> _cachedLensHost;
+    // Retained for the batch=1 ACLNN correctness backend. The 910B launch path
+    // continues to consume the device-side tensors below.
+    std::vector<uint32_t> _lensHost;
+    std::vector<uint32_t> _blockTablesHost;
     uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;

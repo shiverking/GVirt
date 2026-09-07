@@ -175,6 +175,8 @@ class ModelConfig:
     """Total number of transformer layers."""
     attn_type: AttnType = ...
     """Attention family."""
+    rope_type: RopeType = ...
+    """Rotary embedding layout (NeoX or GPT-J)."""
     n_heads: int = ...
     """Number of attention heads."""
     n_kv_heads: int = ...
@@ -352,6 +354,12 @@ class AttnType(Enum):
     AttnCxA = ...
     """C4A / C128A attention (DeepSeek-V4)."""
 
+class RopeType(Enum):
+    """Rotary embedding layout enum exported by the native extension."""
+
+    RopeNeox = ...
+    RopeGptj = ...
+
 class ScoringFuncType(Enum):
     """MoE scoring function enum exported by the native extension."""
 
@@ -370,6 +378,10 @@ AttnDSA: AttnType = ...
 """Alias for :attr:`AttnType.AttnDSA`."""
 AttnCxA: AttnType = ...
 """Alias for :attr:`AttnType.AttnCxA`."""
+RopeNeox: RopeType = ...
+"""Alias for :attr:`RopeType.RopeNeox`."""
+RopeGptj: RopeType = ...
+"""Alias for :attr:`RopeType.RopeGptj`."""
 
 ScoringFuncSoftmax: ScoringFuncType = ...
 """Alias for :attr:`ScoringFuncType.ScoringFuncSoftmax`."""
@@ -1207,6 +1219,20 @@ def rmsnorm_with_bias(
     Returns:
         None: `out` is written in place.
     """
+    ...
+
+def qk_rmsnorm_310p(
+    rt: Runtime,
+    in_: torch.Tensor,
+    q_norm: torch.Tensor,
+    k_norm: torch.Tensor,
+    out: torch.Tensor,
+    norm_eps: float,
+    n_heads: int = 16,
+    n_kv_heads: int = 8,
+    head_dim: int = 128,
+) -> None:
+    """Run the fixed-shape Q/K RMSNorm gate used by the 310P POC."""
     ...
 
 def layernorm(
