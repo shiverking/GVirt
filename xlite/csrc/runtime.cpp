@@ -76,6 +76,16 @@ void XRuntime::Init(size_t sizeMB)
     aicNum = static_cast<uint32_t>(val);
     CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
     aivNum = static_cast<uint32_t>(val);
+#ifdef XLITE_310P_LLM_FP16_POC
+    // Ascend 310P (M200) exposes unified AI cores.  CANN may report zero
+    // dedicated vector cores even though vector kernels execute on those AI
+    // cores.  GVirt uses aivNum as the launch block count, so leaving it at
+    // zero silently skips every vector kernel launch.
+    if (aicNum == 0) {
+        throw std::runtime_error("Ascend 310P reported zero AI cores");
+    }
+    aivNum = aicNum;
+#endif
     originAicNum = aicNum;
     originAivNum = aivNum;
 
@@ -1097,6 +1107,12 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     aicNum = static_cast<uint32_t>(val);
     CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
     aivNum = static_cast<uint32_t>(val);
+#ifdef XLITE_310P_LLM_FP16_POC
+    if (aicNum == 0) {
+        throw std::runtime_error("Ascend 310P reported zero AI cores");
+    }
+    aivNum = aicNum;
+#endif
     originAicNum = aicNum;
     originAivNum = aivNum;
 
