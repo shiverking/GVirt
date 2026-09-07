@@ -25,6 +25,16 @@ from xlite._C import (
 PROBE_MAGIC = 0x03102002
 
 
+def _inputs_ready() -> None:
+    """Finish PyTorch NPU writes before launching on Xlite's private ACL stream.
+
+    The standalone operator bindings synchronize the Xlite stream after a
+    launch, but unlike Model.forward they do not receive the PyTorch current
+    stream and therefore cannot insert the input-side event dependency.
+    """
+    torch.npu.synchronize()
+
+
 def _assert_written(value: torch.Tensor, name: str) -> None:
     nan_count = int(torch.isnan(value).sum().cpu().item())
     if nan_count:
@@ -39,6 +49,7 @@ def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tens
 
 def _test_launch_probe(runtime: Runtime, device: str) -> None:
     output = torch.zeros(1, dtype=torch.int32, device=device)
+    _inputs_ready()
     probe_310p(runtime, output, PROBE_MAGIC)
     actual = int(output.cpu().item())
     if actual != PROBE_MAGIC:
@@ -50,6 +61,7 @@ def _test_add(runtime: Runtime, device: str) -> None:
     left = torch.randn(8, 2048, dtype=torch.float16, device=device)
     right = torch.randn_like(left)
     output = torch.full_like(left, torch.nan)
+    _inputs_ready()
     add(runtime, left, right, output)
     torch.npu.synchronize()
     _assert_written(output, "add")
@@ -60,6 +72,7 @@ def _test_official_add_probe(runtime: Runtime, device: str) -> None:
     left = torch.randn(8, 2048, dtype=torch.float16, device=device)
     right = torch.randn_like(left)
     output = torch.full_like(left, torch.nan)
+    _inputs_ready()
     official_add_probe_310p(runtime, left, right, output)
     torch.npu.synchronize()
     _assert_written(output, "official-add-baseline")
@@ -70,6 +83,7 @@ def _test_add_unaligned(runtime: Runtime, device: str) -> None:
     left = torch.randn(3, 2051, dtype=torch.float16, device=device)
     right = torch.randn_like(left)
     output = torch.full_like(left, torch.nan)
+    _inputs_ready()
     add(runtime, left, right, output)
     torch.npu.synchronize()
     _assert_written(output, "add-unaligned")
@@ -89,6 +103,7 @@ def _test_embedding(runtime: Runtime, device: str) -> None:
     table = torch.randn(256, 2048, dtype=torch.float16, device=device)
     ids = torch.tensor([0, 1, 127, 255], dtype=torch.int32, device=device)
     embedded = torch.full((4, 2048), torch.nan, dtype=torch.float16, device=device)
+    _inputs_ready()
     embed(runtime, table, ids, embedded, 0, 256)
     torch.npu.synchronize()
     _assert_written(embedded, "embedding")
@@ -99,6 +114,7 @@ def _test_embedding_unaligned(runtime: Runtime, device: str) -> None:
     table = torch.randn(256, 2051, dtype=torch.float16, device=device)
     ids = torch.tensor([0, 1, 127, 255], dtype=torch.int32, device=device)
     embedded = torch.full((4, 2051), torch.nan, dtype=torch.float16, device=device)
+    _inputs_ready()
     embed(runtime, table, ids, embedded, 0, 256)
     torch.npu.synchronize()
     _assert_written(embedded, "embedding-unaligned")
@@ -110,6 +126,7 @@ def _test_rmsnorm(runtime: Runtime, device: str) -> None:
     norm_input = torch.randn(8, 2048, dtype=torch.float16, device=device)
     norm_weight = torch.randn(2048, dtype=torch.float16, device=device)
     norm_output = torch.full_like(norm_input, torch.nan)
+    _inputs_ready()
     rmsnorm(runtime, norm_input, norm_weight, norm_output, 1e-6)
     torch.npu.synchronize()
     _assert_written(norm_output, "rmsnorm")
@@ -126,6 +143,7 @@ def _test_qk_rmsnorm(runtime: Runtime, device: str) -> None:
     k_weight = torch.randn(head_dim, dtype=torch.float16, device=device)
     qkv_output = qkv.clone()
     qkv_output[:, : (n_heads + n_kv_heads) * head_dim] = torch.nan
+    _inputs_ready()
     qk_rmsnorm_310p(runtime, qkv, q_weight, k_weight, qkv_output, 1e-6)
     torch.npu.synchronize()
     _assert_written(qkv_output, "qk-rmsnorm")
@@ -143,6 +161,7 @@ def _test_silu_and_mul(runtime: Runtime, device: str) -> None:
     silu_input = torch.randn(8, 2 * 6144, dtype=torch.float16, device=device)
     silu_output = torch.full(
         (8, 6144), torch.nan, dtype=torch.float16, device=device)
+    _inputs_ready()
     silu_and_mul(runtime, silu_input, silu_output)
     torch.npu.synchronize()
     _assert_written(silu_output, "silu-and-mul")
@@ -182,6 +201,7 @@ def main() -> int:
         f"launch_aiv={runtime.aiv_num}",
         flush=True,
     )
+    print("Stream policy: synchronize PyTorch NPU inputs before Xlite ACL launch", flush=True)
 
     cases = (
         ("launch-probe", _test_launch_probe),
