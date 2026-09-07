@@ -109,6 +109,7 @@ extern "C" __global__ __aicore__ void embed_kernel_float16_t(
     GM_ADDR weight, GM_ADDR ids, GM_ADDR output, uint32_t dim, uint32_t tokenCount,
     uint32_t embStart, uint32_t embEnd, uint32_t tpSize)
 {
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     KernelEmbedding310P op;
     op.Init(weight, ids, output, dim, tokenCount, embStart, embEnd);
     op.Process();
