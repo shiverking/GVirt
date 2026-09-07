@@ -148,7 +148,9 @@ public:
                            kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 aicHelper.RunAicQK(input[qOffset], this->kCache, queryTaskLen, kvHeadIdx,
                                    blockTable, kvOffset, kvLen, qk[curr]);
+#if !defined(XLITE_DEVICE_310P)
                 ffts_cross_core_sync(PIPE_FIX, softmaxConfig);
+#endif
 
                 if (needDoSV != 0) {
                     // wait vector softmax done
@@ -161,7 +163,9 @@ public:
                                lastKvOffset + lastKvLen, last);
                     aicHelper.RunAicSV(qk[last], this->vCache, lastQueryTaskLen, lastkvHeadIdx,
                                        lastBlockTable, lastKvOffset, lastKvLen, sv[last], false);
+#if !defined(XLITE_DEVICE_310P)
                     ffts_cross_core_sync(PIPE_FIX, updateConfig);
+#endif
                 }
 
                 lastBatchIdx = batchIdx;
@@ -189,7 +193,9 @@ public:
                        lastKvOffset + lastKvLen, last);
             aicHelper.RunAicSV(qk[last], this->vCache, lastQueryTaskLen, lastkvHeadIdx,
                                lastBlockTable, lastKvOffset, lastKvLen, sv[last], false);
+#if !defined(XLITE_DEVICE_310P)
             ffts_cross_core_sync(PIPE_FIX, updateConfig);
+#endif
         }
     }
 
@@ -424,6 +430,17 @@ private:
     AicHelper<Dtype> aicHelper;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define FLASH_ATTN_FUNC_DEFINE(dtype)                                                             \
+    extern "C" __global__ __aicore__ void flash_attention_##dtype(                               \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,       \
+        GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,              \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,        \
+        uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch, \
+        uint32_t maxNumBlocks, uint32_t tileSizeOfCachedKV)                                       \
+    {                                                                                             \
+    }
+#else
 #define FLASH_ATTN_FUNC_DEFINE(dtype)                                                              \
     extern "C" __global__ __aicore__ void flash_attention_##dtype(                                 \
         GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,        \
@@ -438,3 +455,4 @@ private:
                 blockSize, batch, maxNumBlocks, tileSizeOfCachedKV);                               \
         op.Run();                                                                                  \
     }
+#endif

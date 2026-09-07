@@ -117,7 +117,9 @@ public:
                            nHeads, curr);
                 aicHelper.RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], kCache, peCache,
                                    queryTaskLen, blockTable, 0, calcLen, qk[curr]);
+#if !defined(XLITE_DEVICE_310P)
                 ffts_cross_core_sync(PIPE_FIX, config);
+#endif
 
                 if (needDoSV != 0) {
                     // wait vector softmax done
@@ -298,6 +300,16 @@ private:
     int svk0;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define MLA_V2_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void mla_v2_##dtype(                                        \
+        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,        \
+        GM_ADDR qk, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
+        GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,          \
+        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks, float scale, uint32_t topK)    \
+    {                                                                                             \
+    }
+#else
 #define MLA_V2_FUNC_DEFINE(dtype)                                                                  \
     extern "C" __global__ __aicore__ void mla_v2_##dtype(                                          \
         GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,         \
@@ -311,3 +323,4 @@ private:
                 maxNumBlocks, scale, topK);                                                        \
         op.Run();                                                                                  \
     }
+#endif

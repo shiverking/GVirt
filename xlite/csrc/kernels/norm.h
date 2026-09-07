@@ -606,8 +606,10 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             }
         } else {
             if (output) {
+#if !defined(XLITE_ARCH_310P)
                 copy_ubuf_to_gm_align_b16(gm_out_float, out_float[outCurr], 0, 1, sizeof(float), 0,
                                           0, 0, 0);
+#endif
             }
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
