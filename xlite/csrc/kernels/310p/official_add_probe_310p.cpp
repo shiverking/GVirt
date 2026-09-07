@@ -86,3 +86,15 @@ extern "C" __global__ __aicore__ void xlite_official_add_probe_310p(GM_ADDR x, G
     op.Init(x, y, z);
     op.Process();
 }
+
+#ifndef ASCENDC_CPU_DEBUG
+// Match AddKernelInvocationNeo's proven host launch path.  This wrapper is
+// compiled by Bisheng's host pass and exported by the AscendC kernel library;
+// it intentionally bypasses the generated aclrtlaunch_* entry used elsewhere
+// in Xlite so the two mechanisms can be distinguished on Ascend310P.
+void xlite_official_add_probe_310p_do(uint32_t blockDim, void *stream, uint8_t *x,
+                                      uint8_t *y, uint8_t *z)
+{
+    xlite_official_add_probe_310p<<<blockDim, nullptr, stream>>>(x, y, z);
+}
+#endif
