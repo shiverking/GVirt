@@ -23,7 +23,7 @@ run_test() {
 }
 
 run_test vector-kernels python3 tests/poc_310p/test_vector_kernels.py
-run_test matmul python3 tests/kernels/matmul.py
+run_test matmul python3 tests/poc_310p/test_matmul.py --report-dir "${log_dir}/matmul-shapes"
 run_test rope-and-cache python3 tests/kernels/rope_and_cache.py
 run_test attention python3 tests/kernels/attention.py
 
