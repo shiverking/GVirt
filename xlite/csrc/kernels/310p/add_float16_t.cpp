@@ -29,6 +29,20 @@ public:
 
     __aicore__ inline void Process()
     {
+        // DataCopyPad is not functional on the target dav-m200 toolchain.
+        // Non-aligned shapes are a correctness-only boundary case for this
+        // POC, so handle them with scalar GM access. Qwen3's production
+        // dimensions remain on the vectorized path below.
+        if ((totalElements % FP16_BLOCK_ELEMENTS) != 0) {
+            for (uint64_t index = GetBlockIdx(); index < totalElements;
+                 index += GetBlockNum()) {
+                float value = static_cast<float>(xGm.GetValue(index)) +
+                              static_cast<float>(yGm.GetValue(index));
+                zGm.SetValue(index, static_cast<half>(value));
+            }
+            return;
+        }
+
         const uint64_t blockStride =
             static_cast<uint64_t>(ADD_TILE_ELEMENTS) * GetBlockNum();
         for (uint64_t offset = static_cast<uint64_t>(GetBlockIdx()) * ADD_TILE_ELEMENTS;
@@ -61,29 +75,13 @@ private:
     __aicore__ inline void CopyIn(LocalTensor<half> dst, GlobalTensor<half> src,
                                   uint32_t count)
     {
-        if ((count % FP16_BLOCK_ELEMENTS) == 0) {
-            DataCopy(dst, src, count);
-            return;
-        }
-        DataCopyParams params;
-        params.blockCount = 1;
-        params.blockLen = count * sizeof(half);
-        DataCopyPadParams padParams;
-        padParams.isPad = false;
-        DataCopyPad(dst, src, params, padParams);
+        DataCopy(dst, src, count);
     }
 
     __aicore__ inline void CopyOut(GlobalTensor<half> dst, LocalTensor<half> src,
                                    uint32_t count)
     {
-        if ((count % FP16_BLOCK_ELEMENTS) == 0) {
-            DataCopy(dst, src, count);
-            return;
-        }
-        DataCopyParams params;
-        params.blockCount = 1;
-        params.blockLen = count * sizeof(half);
-        DataCopyPad(dst, src, params);
+        DataCopy(dst, src, count);
     }
 
     TPipe pipe;
