@@ -200,9 +200,10 @@ class MHA(nn.Module):
         if args.qk_norm:
             self.q_norm = RMSNorm(args.head_dim, args.norm_eps)
             self.k_norm = RMSNorm(args.head_dim, args.norm_eps)
-        if forward_backend != "xlite":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
-            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+        # Keep reference caches even for the xlite backend.  The 310P POC uses
+        # them to compare the same weights against the torch_npu implementation.
+        self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+        self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
 
     def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.shape
@@ -335,19 +336,30 @@ class Llama(nn.Module):
         _bsz, seqlen = tokens.shape
         h = self.embed_tokens(tokens)
 
+        return self.forward_naive_with_inputs_embeds(h, start_pos)
+
+
+    @torch.inference_mode()
+    def forward_naive_with_inputs_embeds(self, inputs_embeds: torch.Tensor, start_pos: int = 0,
+                                         return_hidden: bool = False):
+        _bsz, seqlen, _hidden = inputs_embeds.shape
+        h = inputs_embeds
+
         mask = None
         if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+            mask = torch.full(
+                (seqlen, seqlen), float("-inf"), device=inputs_embeds.device
+            ).triu_(1)
 
         for layer in self.layers:
             h = layer(h, start_pos, self.freqs_cis, mask)
-        h = self.norm(h)[:, 0]
+        h = self.norm(h)[:, -1]
         logits = self.lm_head(h)
         if world_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
-        return logits
+        return (logits, h) if return_hidden else logits
 
 
     @torch.inference_mode()
@@ -364,6 +376,44 @@ class Llama(nn.Module):
         self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
+
+
+    @torch.inference_mode()
+    def forward_xlite_with_inputs_embeds(self, inputs_embeds: torch.Tensor, start_pos: int = 0,
+                                         return_hidden: bool = False):
+        if inputs_embeds.ndim != 3 or inputs_embeds.size(0) != 1:
+            raise ValueError("310P LLM POC inputs_embeds must have shape [1, num_tokens, hidden_size]")
+        if inputs_embeds.size(2) != self.args.dim:
+            raise ValueError(
+                f"inputs_embeds hidden size {inputs_embeds.size(2)} != model hidden size {self.args.dim}"
+            )
+        if inputs_embeds.dtype != torch.float16:
+            raise ValueError("310P LLM POC inputs_embeds must use torch.float16")
+
+        batch, seqlen, _hidden = inputs_embeds.shape
+        meta_shape = torch.empty((batch, seqlen), dtype=torch.int32, device=inputs_embeds.device)
+        attn_meta = self.prepare_xlite_attnmeta(meta_shape, start_pos)
+        stream = torch.npu.current_stream().npu_stream
+        hidden = torch.empty(batch * seqlen, self.args.dim, dtype=torch.float16,
+                             device=inputs_embeds.device)
+        self.xlite_model.forward_with_inputs_embeds(
+            self.xlite_rt, inputs_embeds.contiguous().view(-1, self.args.dim), attn_meta,
+            self.xlite_kv_cache, self.freqs_cis, hidden, stream
+        )
+        logits_indices = torch.tensor([seqlen - 1], dtype=torch.int32, device=inputs_embeds.device)
+        logits = torch.empty(world_size, batch, self.args.vocab_size // world_size,
+                             dtype=torch.float16, device=inputs_embeds.device)
+        self.xlite_model.forward_get_logits(self.xlite_rt, hidden, logits_indices, logits)
+        logits = logits.permute(1, 0, 2).reshape(batch, self.args.vocab_size)
+        selected_hidden = hidden[logits_indices.long()]
+        return (logits, selected_hidden) if return_hidden else logits
+
+
+    @torch.inference_mode()
+    def forward_with_inputs_embeds(self, inputs_embeds: torch.Tensor, start_pos: int = 0):
+        if forward_backend == "xlite":
+            return self.forward_xlite_with_inputs_embeds(inputs_embeds, start_pos)
+        return self.forward_naive_with_inputs_embeds(inputs_embeds, start_pos)
 
     class PersistentThread(threading.Thread):
         def __init__(self, model, task_id):
@@ -437,7 +487,12 @@ class Llama(nn.Module):
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
-        self.xlite_weight_nz = forward_backend == "xlite" and not self.args.tie_word_embeddings
+        use_weight_nz = os.getenv("XLITE_WEIGHT_NZ", "1").strip().lower() not in {
+            "0", "false", "no", "off"
+        }
+        self.xlite_weight_nz = (
+            forward_backend == "xlite" and not self.args.tie_word_embeddings and use_weight_nz
+        )
 
         q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
@@ -454,6 +509,13 @@ class Llama(nn.Module):
         for _, param in self.named_parameters():
             param.requires_grad = False
         for name, loaded_weight in hf_model_weights_iterator(model_path):
+            # Qwen3-ASR checkpoints nest the decoder below thinker.language_model.
+            # Ignore the audio tower and present the decoder with ordinary Qwen3 names.
+            language_model_marker = "language_model."
+            if language_model_marker in name:
+                name = name.split(language_model_marker, 1)[1]
+            elif name.startswith("thinker.") or "audio_tower" in name or "audio_encoder" in name:
+                continue
             if "rotary_emb.inv_freq" in name or "g_idx" in name:
                 continue
 
