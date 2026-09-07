@@ -336,6 +336,10 @@ target_include_directories(xlite PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc
     ${ASCEND_CANN_PACKAGE_PATH}/include
 )
+target_compile_definitions(xlite PRIVATE
+    XLITE_BUILD_SOC="${SOC_VERSION}"
+    XLITE_BUILD_KERNEL_SET="${XLITE_KERNEL_SET}"
+)
 
 add_dependencies(xlite xlite_aclrtlaunch_all)
 
