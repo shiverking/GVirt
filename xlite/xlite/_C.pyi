@@ -1176,6 +1176,12 @@ def probe_310p(rt: Runtime, out: torch.Tensor, value: int = 0x03102002) -> None:
     """Launch one 310P block and write ``value`` directly to an INT32 GM tensor."""
     ...
 
+def official_add_probe_310p(
+    rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor
+) -> None:
+    """Run the fixed 8x2048 FP16 Add used by Ascend's official 310P sample."""
+    ...
+
 def add(rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> None:
     """Elementwise add two tensors into output.
 

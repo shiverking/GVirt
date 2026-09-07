@@ -207,6 +207,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     )
     set(KERNEL_FILES_F16_310P
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/probe_310p.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/official_add_probe_310p.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/add_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/embed_kernel_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/norm_float16_t.cpp

@@ -1258,6 +1258,16 @@ void Probe310P(XRuntime &rt, at::Tensor &out, uint32_t value)
     rt.Synchronize();
 }
 
+void OfficialAddProbe310P(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
+{
+    XTensor _x, _y, _z;
+    InitXTensor(_x, x);
+    InitXTensor(_y, y);
+    InitXTensor(_z, z);
+    XliteOpOfficialAddProbe310P(rt, _x, _y, _z);
+    rt.Synchronize();
+}
+
 void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 {
     XTensor _x;
@@ -2688,6 +2698,8 @@ PYBIND11_MODULE(_C, m)
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
     m.def("probe_310p", &Probe310P, py::arg("rt"), py::arg("out"),
           py::arg("value") = 0x03102002U);
+    m.def("official_add_probe_310p", &OfficialAddProbe310P, py::arg("rt"), py::arg("x"),
+          py::arg("y"), py::arg("z"));
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
