@@ -21,9 +21,9 @@ public:
         zGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t *>(z));
         totalElements = static_cast<uint64_t>(rows) * cols;
 
-        pipe.InitBuffer(xFp16Buf, ADD_TILE_ELEMENTS * sizeof(float16_t));
-        pipe.InitBuffer(yFp16Buf, ADD_TILE_ELEMENTS * sizeof(float16_t));
-        pipe.InitBuffer(zFp16Buf, ADD_TILE_ELEMENTS * sizeof(float16_t));
+        pipe.InitBuffer(xQueue, 1, ADD_TILE_ELEMENTS * sizeof(float16_t));
+        pipe.InitBuffer(yQueue, 1, ADD_TILE_ELEMENTS * sizeof(float16_t));
+        pipe.InitBuffer(zQueue, 1, ADD_TILE_ELEMENTS * sizeof(float16_t));
         pipe.InitBuffer(xFp32Buf, ADD_TILE_ELEMENTS * sizeof(float));
         pipe.InitBuffer(yFp32Buf, ADD_TILE_ELEMENTS * sizeof(float));
         pipe.InitBuffer(zFp32Buf, ADD_TILE_ELEMENTS * sizeof(float));
@@ -31,9 +31,6 @@ public:
 
     __aicore__ inline void Process()
     {
-        LocalTensor<float16_t> xFp16 = xFp16Buf.Get<float16_t>();
-        LocalTensor<float16_t> yFp16 = yFp16Buf.Get<float16_t>();
-        LocalTensor<float16_t> zFp16 = zFp16Buf.Get<float16_t>();
         LocalTensor<float> xFp32 = xFp32Buf.Get<float>();
         LocalTensor<float> yFp32 = yFp32Buf.Get<float>();
         LocalTensor<float> zFp32 = zFp32Buf.Get<float>();
@@ -45,9 +42,16 @@ public:
             uint32_t count = static_cast<uint32_t>(
                 totalElements - offset < ADD_TILE_ELEMENTS ? totalElements - offset
                                                            : ADD_TILE_ELEMENTS);
+            LocalTensor<float16_t> xFp16 = xQueue.AllocTensor<float16_t>();
+            LocalTensor<float16_t> yFp16 = yQueue.AllocTensor<float16_t>();
             CopyIn(xFp16, xGm[offset], count);
             CopyIn(yFp16, yGm[offset], count);
-            PipeBarrier<PIPE_ALL>();
+            xQueue.EnQue(xFp16);
+            yQueue.EnQue(yFp16);
+
+            xFp16 = xQueue.DeQue<float16_t>();
+            yFp16 = yQueue.DeQue<float16_t>();
+            LocalTensor<float16_t> zFp16 = zQueue.AllocTensor<float16_t>();
 
             Cast(xFp32, xFp16, RoundMode::CAST_NONE, count);
             Cast(yFp32, yFp16, RoundMode::CAST_NONE, count);
@@ -55,10 +59,13 @@ public:
             Add(zFp32, xFp32, yFp32, count);
             PipeBarrier<PIPE_V>();
             Cast(zFp16, zFp32, RoundMode::CAST_RINT, count);
-            PipeBarrier<PIPE_ALL>();
+            zQueue.EnQue(zFp16);
+            xQueue.FreeTensor(xFp16);
+            yQueue.FreeTensor(yFp16);
 
+            zFp16 = zQueue.DeQue<float16_t>();
             CopyOut(zGm[offset], zFp16, count);
-            PipeBarrier<PIPE_ALL>();
+            zQueue.FreeTensor(zFp16);
         }
     }
 
@@ -92,9 +99,9 @@ private:
     }
 
     TPipe pipe;
-    TBuf<TPosition::VECCALC> xFp16Buf;
-    TBuf<TPosition::VECCALC> yFp16Buf;
-    TBuf<TPosition::VECCALC> zFp16Buf;
+    TQue<QuePosition::VECIN, 1> xQueue;
+    TQue<QuePosition::VECIN, 1> yQueue;
+    TQue<QuePosition::VECOUT, 1> zQueue;
     TBuf<TPosition::VECCALC> xFp32Buf;
     TBuf<TPosition::VECCALC> yFp32Buf;
     TBuf<TPosition::VECCALC> zFp32Buf;

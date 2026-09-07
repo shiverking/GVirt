@@ -23,12 +23,12 @@ public:
         tokens = tokenCount;
         start = embStart;
         end = embEnd;
-        pipe.InitBuffer(rowBuf, EMBED_TILE_ELEMENTS * sizeof(float16_t));
+        pipe.InitBuffer(inputQueue, 1, EMBED_TILE_ELEMENTS * sizeof(float16_t));
+        pipe.InitBuffer(outputQueue, 1, EMBED_TILE_ELEMENTS * sizeof(float16_t));
     }
 
     __aicore__ inline void Process()
     {
-        LocalTensor<float16_t> rowLocal = rowBuf.Get<float16_t>();
         for (uint32_t token = GetBlockIdx(); token < tokens; token += GetBlockNum()) {
             uint32_t row = idsGm.GetValue(token);
             bool localRow = row >= start && row < end;
@@ -41,15 +41,23 @@ public:
                 uint32_t count = embeddingDim - column < EMBED_TILE_ELEMENTS
                                      ? embeddingDim - column
                                      : EMBED_TILE_ELEMENTS;
+                LocalTensor<float16_t> outputLocal =
+                    outputQueue.AllocTensor<float16_t>();
                 if (localRow) {
-                    CopyIn(rowLocal, weightGm[weightOffset + column], count);
-                    PipeBarrier<PIPE_ALL>();
+                    LocalTensor<float16_t> inputLocal =
+                        inputQueue.AllocTensor<float16_t>();
+                    CopyIn(inputLocal, weightGm[weightOffset + column], count);
+                    inputQueue.EnQue(inputLocal);
+                    inputLocal = inputQueue.DeQue<float16_t>();
+                    Adds(outputLocal, inputLocal, static_cast<float16_t>(0.0f), count);
+                    inputQueue.FreeTensor(inputLocal);
                 } else {
-                    Duplicate(rowLocal, static_cast<float16_t>(0.0f), count);
-                    PipeBarrier<PIPE_V>();
+                    Duplicate(outputLocal, static_cast<float16_t>(0.0f), count);
                 }
-                CopyOut(outputGm[outputOffset + column], rowLocal, count);
-                PipeBarrier<PIPE_ALL>();
+                outputQueue.EnQue(outputLocal);
+                outputLocal = outputQueue.DeQue<float16_t>();
+                CopyOut(outputGm[outputOffset + column], outputLocal, count);
+                outputQueue.FreeTensor(outputLocal);
             }
         }
     }
@@ -84,7 +92,8 @@ private:
     }
 
     TPipe pipe;
-    TBuf<TPosition::VECCALC> rowBuf;
+    TQue<QuePosition::VECIN, 1> inputQueue;
+    TQue<QuePosition::VECOUT, 1> outputQueue;
     GlobalTensor<float16_t> weightGm;
     GlobalTensor<uint32_t> idsGm;
     GlobalTensor<float16_t> outputGm;
