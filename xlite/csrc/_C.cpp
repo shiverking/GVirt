@@ -1506,6 +1506,21 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     }
 }
 
+void QkRmsNorm310P(XRuntime &rt, at::Tensor &in, at::Tensor &qNorm, at::Tensor &kNorm,
+                   at::Tensor &out, float normEps, uint32_t nHeads, uint32_t nKvHeads,
+                   uint32_t headDim)
+{
+    XTensor _in, _qNorm, _kNorm, _out;
+    InitXTensor(_in, in);
+    InitXTensor(_qNorm, qNorm);
+    InitXTensor(_kNorm, kNorm);
+    InitXTensor(_out, out);
+    XliteOpQkRmsNorm(rt, _in, _qNorm, XTensor(), _kNorm, XTensor(), _out, normEps,
+                     headDim, nHeads, headDim, nKvHeads, nHeads * headDim, true,
+                     XTensor(), XTensor());
+    rt.Synchronize();
+}
+
 void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache,
            at::Tensor &peCache, at::Tensor &wukT, at::Tensor &wuv, at::Tensor &output,
            at::Tensor &queryStartLoc, at::Tensor &lens, at::Tensor &cachedLens,
@@ -2378,6 +2393,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
         .def_readwrite("n_layers", &XModelConfig::nLayers)
         .def_readwrite("attn_type", &XModelConfig::attnType)
+        .def_readwrite("rope_type", &XModelConfig::ropeType)
         .def_readwrite("n_heads", &XModelConfig::nHeads)
         .def_readwrite("n_kv_heads", &XModelConfig::nKvHeads)
         .def_readwrite("head_dim", &XModelConfig::headDim)
@@ -2477,6 +2493,10 @@ PYBIND11_MODULE(_C, m)
         .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
         .value("AttnHybrid", XModelAttnType::XMODEL_ATTN_HYBRID)
         .value("AttnCxA", XModelAttnType::XMODEL_ATTN_CXA)
+        .export_values();
+    py::enum_<XModelRopeType>(m, "RopeType")
+        .value("RopeNeox", XModelRopeType::XMODEL_ROPE_NEOX)
+        .value("RopeGptj", XModelRopeType::XMODEL_ROPE_GPTJ)
         .export_values();
 
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
@@ -2676,6 +2696,10 @@ PYBIND11_MODULE(_C, m)
           py::arg("norm"), py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"),
           py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
           py::arg("out_start_offset") = 0);
+    m.def("qk_rmsnorm_310p", &QkRmsNorm310P, py::arg("rt"), py::arg("in_"),
+          py::arg("q_norm"), py::arg("k_norm"), py::arg("out"), py::arg("norm_eps"),
+          py::arg("n_heads") = 16, py::arg("n_kv_heads") = 8,
+          py::arg("head_dim") = 128);
     m.def("layernorm", &LayerNorm, py::arg("rt"), py::arg("in_"), py::arg("norm"),
           py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim"));
     m.def("l2norm", &L2Norm, py::arg("rt"), py::arg("in_"), py::arg("out"), py::arg("norm_eps"),

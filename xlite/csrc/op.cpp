@@ -11,6 +11,9 @@
 
 #include "kernels/kernel_param.h"
 #include "trace/trace.h"
+#ifdef XLITE_ARCH_310P
+#include "aclnn_310p.h"
+#endif
 
 #define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
 
@@ -502,6 +505,12 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    if (in.dtype != INT32 || embed.dtype != FP16 || out.dtype != FP16 || rt.tpSize() != 1) {
+        throw std::runtime_error(
+            "Ascend310P embedding requires INT32 ids, FP16 tensors and TP=1");
+    }
+#endif
     KERNEL_PTR_TYPE(embed_kernel) * launchKernel;
     if (EachXDtype(FP16, embed, out)) {
         launchKernel = aclrtlaunch_embed_kernel_float16_t;
@@ -522,6 +531,13 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    if (in.dtype != FP16 || norm.dtype != FP16 || out.dtype != FP16 || normBias.ptr != nullptr ||
+        variance.ptr != nullptr || !useNorm) {
+        throw std::runtime_error(
+            "Ascend310P RMSNorm requires FP16 I/O/weight and the standard no-bias path");
+    }
+#endif
     KERNEL_PTR_TYPE(norm) * launchKernel;
     if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
         launchKernel = aclrtlaunch_norm_float16_t;
@@ -588,6 +604,11 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    if (!EachXDtype(FP16, in1, in2, out)) {
+        throw std::runtime_error("Ascend310P add only supports FP16");
+    }
+#endif
     KERNEL_PTR_TYPE(add) * launchKernel;
     if (EachXDtype(FP16, in1, in2, out)) {
         launchKernel = aclrtlaunch_add_float16_t;
@@ -627,6 +648,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                    uint64_t n0, uint64_t k0)
 {
     if (IsDummyRuntime(rt)) {
+#ifdef XLITE_ARCH_310P
+        XTensor &workspace =
+            rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
+        rt.PutTensor(workspace);
+#endif
         if (EachXDtype(BF16, in, weight, out) && bias.ptr != nullptr) {
             XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             rt.PutTensor(biasFp32);
@@ -641,6 +667,10 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         }
         return;
     }
+#ifdef XLITE_ARCH_310P
+    XliteAclnn310PMatmul(rt, in, weight, out, weightNZ, bias, deqScale, transpose);
+    return;
+#else
 
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
@@ -762,6 +792,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     if (castedOut) {
         rt.PutTensor(*castedOut);
     }
+#endif
 }
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num,
@@ -770,6 +801,12 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
     if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    if (!EachXDtype(FP16, in, out) || out.shape.size() != 2 || out.shape[1] != 6144) {
+        throw std::runtime_error(
+            "Ascend310P SiLU-and-Mul requires FP16 and intermediate_size=6144");
+    }
+#endif
     KERNEL_PTR_TYPE(silu_and_mul) * launchKernel;
     if (EachXDtype(FP16, in, out)) {
         launchKernel = aclrtlaunch_silu_and_mul_float16_t;
@@ -874,6 +911,14 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    if (!EachXDtype(FP16, inout, kCache, vCache, cossin) || nHeads != 16 || nKvHeads != 8 ||
+        headDim != 128 || blockSize != 128 || kCache.shape.size() != 4 ||
+        vCache.shape.size() != 4) {
+        throw std::runtime_error(
+            "Ascend310P RoPE-and-Cache requires FP16, Q16/KV8, head_dim=128 and 4D block-128 cache");
+    }
+#endif
     uint32_t localHeads = nHeads / rt.tpSize();
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
@@ -912,8 +957,23 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       uint32_t blockSize, uint32_t batch)
 {
     if (IsDummyRuntime(rt)) {
+#ifdef XLITE_ARCH_310P
+        XTensor &workspace =
+            rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
+        rt.PutTensor(workspace);
+#endif
         return;
     }
+#ifdef XLITE_ARCH_310P
+    (void)qk;
+    (void)queryStartLoc;
+    (void)lens;
+    (void)cachedLens;
+    (void)blockTables;
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, lens, cachedLens, blockTables,
+                            maxNumBlocks, nHeads, nKvHeads, headDim, blockSize, batch, true);
+#else
     KERNEL_PTR_TYPE(attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
         launchKernel = aclrtlaunch_attention_float16_t;
@@ -928,6 +988,7 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
                  queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads,
                  headDim, blockSize, batch, maxNumBlocks);
+#endif
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
@@ -938,9 +999,30 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            uint32_t batch, uint32_t tileSizeOfCachedKV)
 {
     if (IsDummyRuntime(rt)) {
+#ifdef XLITE_ARCH_310P
+        XTensor &workspace =
+            rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
+        rt.PutTensor(workspace);
+#endif
         return;
     }
-
+#ifdef XLITE_ARCH_310P
+    (void)qk;
+    (void)sv;
+    (void)max;
+    (void)sum;
+    (void)lastMax;
+    (void)lastSum;
+    (void)sync;
+    (void)queryStartLoc;
+    (void)lens;
+    (void)cachedLens;
+    (void)blockTables;
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    (void)tileSizeOfCachedKV;
+    XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, lens, cachedLens, blockTables,
+                            maxNumBlocks, nHeads, nKvHeads, headDim, blockSize, batch, false);
+#else
     KERNEL_PTR_TYPE(flash_attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
         launchKernel = aclrtlaunch_flash_attention_float16_t;
@@ -956,6 +1038,7 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize,
                  batch, maxNumBlocks, tileSizeOfCachedKV);
+#endif
 }
 
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
@@ -1152,6 +1235,15 @@ void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTe
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    if (in.dtype != FP16 || out.dtype != FP16 || qNorm.dtype != FP16 || kNorm.dtype != FP16 ||
+        qNormBias.ptr != nullptr || kNormBias.ptr != nullptr || qNormDim != 128 ||
+        kNormDim != 128 || qCntPerToken != 16 || kCntPerToken != 8 || kStartOffset != 2048 ||
+        !useNorm || qVariance.ptr != nullptr || kVariance.ptr != nullptr) {
+        throw std::runtime_error(
+            "Ascend310P Q/K RMSNorm requires FP16, head_dim=128 and Q16/KV8");
+    }
+#endif
     KERNEL_PTR_TYPE(qk_rms_norm) * launchKernel;
     if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
         launchKernel = aclrtlaunch_qk_rms_norm_float16_t;

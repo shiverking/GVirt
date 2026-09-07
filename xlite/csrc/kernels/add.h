@@ -8,7 +8,7 @@
 #define UBA(T) (__ubuf__ T *)
 #define GMA(T) (__gm__ T *)
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 // 2维矩阵加法
 template <typename Dtype>
 __aicore__ void add(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t x_numel, uint32_t y_numel)

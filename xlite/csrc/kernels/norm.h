@@ -6,7 +6,7 @@
 #include "kernel_macro.h"
 #include "kernel_param.h"
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 
 __aicore__ inline void reduce_sum(__ubuf__ float *buf, uint32_t cnt_per_token, uint32_t norm_dim)
 {

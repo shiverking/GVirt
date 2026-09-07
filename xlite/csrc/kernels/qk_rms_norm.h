@@ -7,7 +7,7 @@
 #include "kernel_param.h"
 #include "norm.h"
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 
 // Fuses the two independent RmsNorm passes (Q segment + K segment) applied to
 // disjoint column ranges of the same qkv buffer into a single device kernel.

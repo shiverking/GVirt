@@ -5,7 +5,7 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 
 #define GMA(T) (__gm__ T *)
 #define UBA(T) (__ubuf__ T *)

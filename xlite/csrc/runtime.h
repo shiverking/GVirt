@@ -209,6 +209,12 @@ public:
     // only for requests with cached==0 (fresh prefill); chunked-prefill
     // continuation (cached>0, multi-token) reuses state via recurrent GDN.
     std::vector<uint32_t> _cachedLensHost;
+    // Retained for the 310P ACLNN correctness backend. Version 0/1 metadata is
+    // already available on the host, so the backend need not copy it back per
+    // decoder layer. The normal device-side metadata remains authoritative for
+    // every other architecture.
+    std::vector<uint32_t> _lensHost;
+    std::vector<uint32_t> _blockTablesHost;
     uint32_t _batch;
     uint32_t _maxTotalLens;
     uint32_t _tileSizeOfCachedKV;

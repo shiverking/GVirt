@@ -5,7 +5,7 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 
 #define HEAD_SIZE_64 64
 #define HEAD_SIZE_128 128
