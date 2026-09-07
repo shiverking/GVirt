@@ -58,7 +58,7 @@ def main() -> int:
         }
 
     report = {
-        "expected_soc_version": "Ascend310P3",
+        "expected_soc_version": "ascend310p3",
         "expected_npu_arch": 2002,
         "npu_arch_verification": (
             "enforced by csrc/kernels/kernel_macro.h during AscendC device compilation"

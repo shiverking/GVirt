@@ -23,13 +23,14 @@ if(NOT XLITE_KERNEL_SET STREQUAL "full" AND NOT XLITE_KERNEL_SET STREQUAL "llm_f
     message(FATAL_ERROR "XLITE_KERNEL_SET must be one of: full, llm_fp16")
 endif()
 
-if(SOC_VERSION MATCHES "^Ascend310P" AND NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
+if(SOC_VERSION MATCHES "^ascend310p" AND NOT XLITE_KERNEL_SET STREQUAL "llm_fp16")
     message(FATAL_ERROR "Ascend310P POC only supports XLITE_KERNEL_SET=llm_fp16")
 endif()
 
 if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
-    if(NOT SOC_VERSION MATCHES "^Ascend310P")
-        message(FATAL_ERROR "llm_fp16 is a POC kernel profile restricted to Ascend310P")
+    if(NOT SOC_VERSION STREQUAL "ascend310p3")
+        message(FATAL_ERROR
+            "llm_fp16 requires SOC_VERSION=ascend310p3 (lowercase, as required by the compiler)")
     endif()
     set(XLITE_BUILD_ARCH_310P TRUE)
     message(STATUS "Ascend310P architecture gate: device compilation must report __NPU_ARCH__=2002")
