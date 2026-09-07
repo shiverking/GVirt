@@ -71,6 +71,12 @@ def main() -> int:
     parser.add_argument("--report-dir", type=Path, default=Path("matmul_310p_report"))
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per shape")
     parser.add_argument("--list", action="store_true", help="List shapes without loading NPU")
+    parser.add_argument(
+        "--case", action="append", default=[], metavar="NAME",
+        help="Run only a named case; repeat to select multiple cases (see --list)")
+    parser.add_argument(
+        "--rerun-failed", action="store_true",
+        help="Run only failures recorded in REPORT_DIR/summary.json")
     parser.add_argument("--shape", type=int, nargs=3, metavar=("M", "N", "K"),
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -83,6 +89,26 @@ def main() -> int:
         for name, m, n, k in cases:
             print(f"{name}: [{m},{k}] @ [{n},{k}].T")
         return 0
+    if args.rerun_failed:
+        summary_path = args.report_dir / "summary.json"
+        if not summary_path.is_file():
+            parser.error(f"cannot rerun failures: {summary_path} does not exist")
+        try:
+            previous = json.loads(summary_path.read_text(encoding="utf-8"))
+            args.case.extend(
+                item["name"] for item in previous if int(item["exit_code"]) != 0)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            parser.error(f"cannot read failures from {summary_path}: {error}")
+        if not args.case:
+            print(f"No failed cases recorded in {summary_path}")
+            return 0
+    if args.case:
+        known = {name for name, _m, _n, _k in cases}
+        unknown = [name for name in args.case if name not in known]
+        if unknown:
+            parser.error("unknown --case: " + ", ".join(unknown) + "; use --list")
+        selected = set(args.case)
+        cases = [case for case in cases if case[0] in selected]
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     args.report_dir.mkdir(parents=True, exist_ok=True)

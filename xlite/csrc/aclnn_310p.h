@@ -10,6 +10,10 @@
 #include "runtime.h"
 
 constexpr size_t XLITE_310P_ACLNN_WORKSPACE_BYTES = 512ULL * 1024ULL * 1024ULL;
+// The 310P ACLNN implementation can select a workspace larger than the POC
+// budget for the 151936-column LM head.  Projection sizes up to 12288 have
+// been validated on the target, so split only wider, non-transposed outputs.
+constexpr size_t XLITE_310P_MATMUL_N_CHUNK = 12288;
 
 // Correctness-first Ascend 310P backend. These entry points intentionally expose
 // the existing Xlite tensor ABI while delegating cube/attention work to ACLNN.

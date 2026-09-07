@@ -666,9 +666,18 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
+        const size_t matmulN = transpose ? weight.shape[1] : weight.shape[0];
+        XTensor *chunkOutput = nullptr;
+        if (!transpose && matmulN > XLITE_310P_MATMUL_N_CHUNK) {
+            chunkOutput = &rt.GetTensor(
+                {in.shape[0], std::min(matmulN, XLITE_310P_MATMUL_N_CHUNK)}, FP16, DBG_LOC);
+        }
         XTensor &workspace =
             rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
         rt.PutTensor(workspace);
+        if (chunkOutput != nullptr) {
+            rt.PutTensor(*chunkOutput);
+        }
 #endif
         if (EachXDtype(BF16, in, weight, out) && bias.ptr != nullptr) {
             XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
