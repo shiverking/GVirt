@@ -15,7 +15,9 @@ extern "C" __global__ __aicore__ void add_float16_t(GM_ADDR x, GM_ADDR y, GM_ADD
     for (uint32_t row = block_idx; row < rows; row += static_cast<uint32_t>(block_num)) {
         uint64_t offset = static_cast<uint64_t>(row) * cols;
         for (uint32_t col = 0; col < cols; ++col) {
-            zGm[offset + col] = xGm[offset + col] + yGm[offset + col];
+            float value = static_cast<float>(xGm[offset + col]) +
+                          static_cast<float>(yGm[offset + col]);
+            zGm[offset + col] = static_cast<float16_t>(value);
         }
     }
 }
