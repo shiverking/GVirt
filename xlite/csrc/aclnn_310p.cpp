@@ -1,6 +1,15 @@
 /*
  * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  */
+
+// CANN 9.1 keeps the v1 attention APIs available but marks them for a future
+// December 2026 removal.  This correctness POC intentionally targets those
+// APIs until the V3/V4 signatures are probed on the physical 310P environment.
+// Keep the repository-wide -Werror policy while limiting the exception to this
+// backend translation unit.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcpp"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "aclnn_310p.h"
 
 #include <algorithm>
@@ -324,3 +333,5 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
     }
     rt.PutTensor(query);
 }
+
+#pragma GCC diagnostic pop

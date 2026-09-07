@@ -774,6 +774,10 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
             "Ascend310P SiLU-and-Mul requires FP16 and intermediate_size=6144");
     }
 #endif
+#ifdef XLITE_ARCH_310P
+    decltype(aclrtlaunch_silu_and_mul_float16_t) *launchKernel;
+    launchKernel = aclrtlaunch_silu_and_mul_float16_t;
+#else
     KERNEL_PTR_TYPE(silu_and_mul) * launchKernel;
     if (EachXDtype(FP16, in, out)) {
         launchKernel = aclrtlaunch_silu_and_mul_float16_t;
@@ -785,6 +789,7 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+#endif
     launchKernel(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0], out.shape[1]);
 }
 
@@ -812,9 +817,13 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    throw std::runtime_error("Ascend310P LLM FP16 POC does not support permutation/MoE");
+#else
     aclrtlaunch_permutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr,
                             counts.ptr, in.shape[0], in.shape[1], out.shape[0], counts.shape[0],
                             start, end);
+#endif
 }
 
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
@@ -1124,6 +1133,9 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
         return;
     }
 
+#ifdef XLITE_ARCH_310P
+    throw std::runtime_error("Ascend310P LLM FP16 POC does not support complex RoPE/MLA");
+#else
     KERNEL_PTR_TYPE(rope_complex_and_cache) * launchKernel;
     if (inputWithR.dtype == FP16) {
         launchKernel = aclrtlaunch_rope_complex_and_cache_float16_t;
@@ -1136,6 +1148,7 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  0, inputWithR.ptr, output.ptr, outStepDim, outOffset, freqs.ptr, position.ptr, 0,
                  nullptr, nullptr);
+#endif
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
@@ -1147,6 +1160,9 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
         return;
     }
 
+#ifdef XLITE_ARCH_310P
+    throw std::runtime_error("Ascend310P LLM FP16 POC does not support complex RoPE/MLA cache");
+#else
     KERNEL_PTR_TYPE(rope_complex_and_cache) * launchKernel;
     if (inputWithR.dtype == FP16) {
         launchKernel = aclrtlaunch_rope_complex_and_cache_float16_t;
@@ -1159,6 +1175,7 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  vdim, inputWithR.ptr, nullptr, 0, 0, freqs.ptr, position.ptr, blockSize,
                  vCache.ptr, slotMapping.ptr);
+#endif
 }
 
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
@@ -1514,9 +1531,9 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
         return;
     }
 
-    constexpr uint32_t maxInputs = 8;
-
     // Concat kernel supports up to maxInputs inputs
+#ifndef XLITE_ARCH_310P
+    constexpr uint32_t maxInputs = 8;
     if (inputs.size() <= maxInputs) {
         void *ptrs[maxInputs] = {nullptr};
         uint64_t sizes[maxInputs] = {0};
@@ -1535,6 +1552,7 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
                            static_cast<uint32_t>(inputs.size()), totalBytes);
         return;
     }
+#endif
 
     // Fallback for the rare > maxInputs case
     size_t offset = 0;
@@ -1604,9 +1622,9 @@ void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs
         totalSize += size;
     }
 
-    constexpr uint32_t maxOutputs = 8;
-
     // Split kernel supports up to maxOutputs outputs
+#ifndef XLITE_ARCH_310P
+    constexpr uint32_t maxOutputs = 8;
     if (outputs.size() <= maxOutputs && sizes.size() == outputs.size()) {
         void *ptrs[maxOutputs] = {nullptr};
         uint64_t s[maxOutputs] = {0};
@@ -1623,6 +1641,7 @@ void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs
                           static_cast<uint64_t>(totalSize));
         return;
     }
+#endif
 
     // Fallback for the rare > maxOutputs case
     for (uint32_t i = 0; i < numPackets; i++) {
@@ -1731,9 +1750,13 @@ void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor 
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    throw std::runtime_error("Ascend310P LLM FP16 POC does not support expert/MoE kernels");
+#else
     aclrtlaunch_experts_counts_sum(rt.aivNum, rt.stream, expertsCountsInput.ptr,
                                    tokensPerEpgroup.ptr, expertsCountsOutput.ptr, nRoutedExperts,
                                    tokensPerEpgroup.shape[0]);
+#endif
 }
 
 void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
@@ -1743,6 +1766,9 @@ void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &c
         return;
     }
 
+#ifdef XLITE_ARCH_310P
+    throw std::runtime_error("Ascend310P LLM FP16 POC does not support reorder-MoE");
+#else
     if (in.numel == 0 || localStart >= localEnd) {
         return;
     }
@@ -1754,6 +1780,7 @@ void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &c
     aclrtlaunch_reorder_moe(rt.aivNum, rt.stream, in.ptr, out.ptr, counts.ptr, moeEpSize,
                             nRoutedExperts, hiddenSize, localStart, localEnd, forward ? 1 : 0,
                             elemBytes);
+#endif
 }
 void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output)
 {
