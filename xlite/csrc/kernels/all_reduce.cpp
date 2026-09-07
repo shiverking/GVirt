@@ -363,6 +363,14 @@ private:
     bool skipMyRank;
 };
 
+#if defined(XLITE_DEVICE_310P)
+#define ALLREDUCE_FUNC_DEFINE(dtype)                                                              \
+    extern "C" __global__ __aicore__ void allreduce_##dtype(                                     \
+        GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize,        \
+        uint64_t generation, GM_ADDR param, uint32_t copySize, bool fetchOffset)                  \
+    {                                                                                             \
+    }
+#else
 #define ALLREDUCE_FUNC_DEFINE(dtype)                                                               \
     extern "C" __global__ __aicore__ void allreduce_##dtype(                                       \
         GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize,         \
@@ -375,6 +383,7 @@ private:
         op.Init(input, output, count, rankId, rankSize, generation, param, copySize, fetchOffset); \
         op.Run();                                                                                  \
     }
+#endif
 
 ALLREDUCE_FUNC_DEFINE(int8_t);
 ALLREDUCE_FUNC_DEFINE(int16_t);

@@ -22,49 +22,30 @@ __aicore__ inline void xlite_310p_set_mask(uint32_t len)
     }
 }
 
-// CANN 9.1's M200 AscendC ReduceSum API accepts LocalTensor and additional
-// workspace arguments.  GVirt's kernels use raw UB pointers, so retain the
-// existing staged vcadd reduction for the 310P vector path.
+// CANN 9.1's M200 AscendC does not expose the C220 vcadd reduction intrinsic.
+// Qwen3's norm dimensions are powers of two, so reduce in place with the vadd
+// primitive that is available on M200.  Larger stages use repeated 64-lane
+// FP32 vectors; the final stages progressively narrow the vector mask.
 __aicore__ inline void xlite_310p_reduce_sum(__ubuf__ float *dst, __ubuf__ float *src,
                                              uint32_t dim)
 {
+    assert(dim != 0 && (dim & (dim - 1)) == 0);
+    constexpr uint32_t lanes = VECTOR_MAX_BYTESIZE / sizeof(float);
     uint32_t remain = dim;
-    __ubuf__ float *calc = src;
-    constexpr uint32_t pad = VECTOR_MAX_BYTESIZE / sizeof(float);
-    constexpr uint32_t inst_pad = VECTOR_MAX_REPEAT * pad;
-    uint32_t repeat = DIV_ROUND_UP(remain, pad);
     set_mask_norm();
-
-    while (remain != 1) {
-        if (repeat == 1) {
-            xlite_310p_set_mask(remain);
-        } else if (remain % pad != 0) {
-            uint32_t tail = remain % pad;
-            uint64_t mask = ~((static_cast<uint64_t>(1) << (64 - tail)) - 1);
-            set_vector_mask(0, mask);
-            vector_dup(calc + ROUND_DOWN(remain, pad), 0.0f, 1, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
+    while (remain > 1) {
+        uint32_t half = remain / 2;
+        uint32_t repeat = 1;
+        if (half >= lanes) {
             set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
+            repeat = half / lanes;
         } else {
-            set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
+            xlite_310p_set_mask(half);
         }
-
-        if (repeat > VECTOR_MAX_REPEAT) {
-            uint32_t inst_num = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
-            for (uint32_t i = 0; i < inst_num; ++i) {
-                uint32_t curr_repeat = VECTOR_MAX_REPEAT;
-                if (curr_repeat + i * VECTOR_MAX_REPEAT > repeat) {
-                    curr_repeat = repeat - i * VECTOR_MAX_REPEAT;
-                }
-                vcadd(dst + i * VECTOR_MAX_REPEAT, calc + i * inst_pad, curr_repeat, 1, 1, 8, 0);
-            }
-        } else {
-            vcadd(dst, calc, repeat, 1, 1, 8, 0);
-        }
-        calc = dst;
+        vadd(dst, src, src + half, repeat, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
-        remain = repeat;
-        repeat = DIV_ROUND_UP(remain, pad);
+        src = dst;
+        remain = half;
     }
     set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
 }
@@ -73,11 +54,15 @@ __aicore__ inline void xlite_310p_reduce_sum(__ubuf__ float *dst, __ubuf__ float
 __aicore__ inline void reduce_sum(__ubuf__ float *buf, uint32_t cnt_per_token, uint32_t norm_dim)
 {
     if (norm_dim == 128) {
-        vadd(buf, buf, buf + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
-        pipe_barrier(PIPE_V);
         for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
             auto buf_norm = buf + norm_idx * norm_dim;
+#if defined(XLITE_ARCH_310P)
+            xlite_310p_reduce_sum(buf_norm, buf_norm, norm_dim);
+#else
+            vadd(buf_norm, buf_norm, buf_norm + 64, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
             vcadd(buf_norm, buf_norm, 1, 1, 1, 8, 0);
+#endif
         }
     } else {
         for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
@@ -507,10 +492,18 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         if (variance) {
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
             auto gm_variance_float = (__gm__ float *)variance + loop;
+#if defined(XLITE_ARCH_310P)
+            float variance_value = *gm_variance_float;
+            set_flag(PIPE_S, PIPE_V, EVENT_ID0 + inCurr);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID0 + inCurr);
+            vector_dup(in_variance_float[inCurr], variance_value, 1, 1, 1, 8, 0);
+            pipe_barrier(PIPE_V);
+#else
             copy_gm_to_ubuf_align_b16(in_variance_float[inCurr], gm_variance_float, 0, 1,
                                       sizeof(float), 0, 0, 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+#endif
             vmuls(calc1, in_variance_float[inCurr], divTpSize, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
@@ -582,6 +575,18 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             pipe_barrier(PIPE_V);
         }
 
+#if defined(XLITE_ARCH_310P)
+        if (!useNorm) {
+            set_flag(PIPE_V, PIPE_S, EVENT_ID0 + outCurr);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID0 + outCurr);
+            if (output) {
+                *gm_out_float = *out_float[outCurr];
+            }
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
+            outCurr = 1 - outCurr;
+            continue;
+        }
+#endif
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + outCurr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + outCurr);
 

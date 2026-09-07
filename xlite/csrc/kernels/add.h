@@ -77,7 +77,11 @@ __aicore__ void add(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t x_numel, uint32_t 
 
         // --- V pipeline: convert result back to dtype ---
         if constexpr (std::is_same_v<Dtype, float16_t>) {
+#if defined(XLITE_DEVICE_310P)
+            vconv_f322f16(UBA(Dtype) t2_float, UBA(float) t1_float, vec_repeat_float, 1, 1, 4, 8);
+#else
             vconv_f322f16r(UBA(Dtype) t2_float, UBA(float) t1_float, vec_repeat_float, 1, 1, 4, 8);
+#endif
 #if !defined(XLITE_DEVICE_310P)
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
             vconv_f322bf16r(UBA(Dtype) t2_float, UBA(float) t1_float, vec_repeat_float, 1, 1, 4, 8);
