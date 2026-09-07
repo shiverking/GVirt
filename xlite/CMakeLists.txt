@@ -193,13 +193,19 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     )
     set(KERNEL_FILES_F16_310P
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/probe_310p.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/official_add_probe_310p.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/add_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/embed_kernel_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/norm_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/qk_rms_norm_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/rope_and_cache_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/silu_and_mul_float16_t.cpp
+    )
+    # Keep the official Add baseline in a one-kernel library.  The passing
+    # AddKernelInvocationNeo sample produces a default AIC device object;
+    # mixing that kernel with AIV_ONLY entries can change the legacy AscendC
+    # precompile/merge route on Ascend310P.
+    set(KERNEL_FILES_310P_BASELINE
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/official_add_probe_310p.cpp
     )
     list(REMOVE_ITEM KERNEL_FILES_F16
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
@@ -226,6 +232,9 @@ ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 if(XLITE_BUILD_ARCH_310P)
     ascendc_library(xlite_kernels_f16_310p_${RUN_MODE} SHARED ${KERNEL_FILES_F16_310P})
     ascendc_compile_definitions(xlite_kernels_f16_310p_${RUN_MODE} PRIVATE XLITE_ARCH_310P=1)
+    ascendc_library(xlite_kernels_baseline_310p_${RUN_MODE} SHARED ${KERNEL_FILES_310P_BASELINE})
+    ascendc_compile_definitions(xlite_kernels_baseline_310p_${RUN_MODE}
+        PRIVATE XLITE_ARCH_310P=1)
 endif()
 
 # Bundle all generated aclrtlaunch_*.h headers into one merged header so
@@ -239,7 +248,10 @@ set(_XLITE_KERNEL_TARGETS
     xlite_kernels_f16_${RUN_MODE}
 )
 if(XLITE_BUILD_ARCH_310P)
-    list(APPEND _XLITE_KERNEL_TARGETS xlite_kernels_f16_310p_${RUN_MODE})
+    list(APPEND _XLITE_KERNEL_TARGETS
+        xlite_kernels_f16_310p_${RUN_MODE}
+        xlite_kernels_baseline_310p_${RUN_MODE}
+    )
 endif()
 add_custom_command(
     OUTPUT "${_MERGED_KERN_H}"
@@ -275,6 +287,8 @@ if(NOT _xlite_dbg_enabled)
     ascendc_compile_definitions(xlite_kernels_f16_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
     if(XLITE_BUILD_ARCH_310P)
         ascendc_compile_definitions(xlite_kernels_f16_310p_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
+        ascendc_compile_definitions(xlite_kernels_baseline_310p_${RUN_MODE}
+            PRIVATE ASCENDC_DUMP=0)
     endif()
 endif()
 
@@ -388,6 +402,7 @@ target_link_libraries(xlite PRIVATE
 if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     target_link_libraries(xlite PRIVATE
         xlite_kernels_f16_310p_${RUN_MODE}
+        xlite_kernels_baseline_310p_${RUN_MODE}
         ${XLITE_NNOPBASE_LIBRARY}
         ${XLITE_OPAPI_LIBRARY}
     )
@@ -460,7 +475,9 @@ install(TARGETS xlite_kernels_common_${RUN_MODE} xlite_kernels_bf16_${RUN_MODE} 
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
 )
 if(XLITE_BUILD_ARCH_310P)
-    install(TARGETS xlite_kernels_f16_310p_${RUN_MODE}
+    install(TARGETS
+        xlite_kernels_f16_310p_${RUN_MODE}
+        xlite_kernels_baseline_310p_${RUN_MODE}
         LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
     )
 endif()
