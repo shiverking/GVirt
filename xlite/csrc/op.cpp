@@ -991,16 +991,24 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
-        XTensor *causalMask = nullptr;
-        if (qkv.shape[0] > 1) {
-            causalMask = &rt.GetTensor({qkv.shape[0], qkv.shape[0]}, INT8, DBG_LOC);
+        const size_t paddedTokens = (qkv.shape[0] + blockSize - 1) / blockSize * blockSize;
+        XTensor &query = rt.GetTensor({qkv.shape[0], nHeads * headDim}, FP16, DBG_LOC);
+        XTensor *paddedQuery = nullptr;
+        XTensor *paddedOutput = nullptr;
+        if (paddedTokens != qkv.shape[0]) {
+            paddedQuery = &rt.GetTensor({paddedTokens, nHeads * headDim}, FP16, DBG_LOC);
+            paddedOutput = &rt.GetTensor({paddedTokens, nHeads * headDim}, FP16, DBG_LOC);
         }
+        XTensor &causalMask = rt.GetTensor({paddedTokens, paddedTokens}, INT8, DBG_LOC);
         XTensor &workspace =
             rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
         rt.PutTensor(workspace);
-        if (causalMask != nullptr) {
-            rt.PutTensor(*causalMask);
+        rt.PutTensor(causalMask);
+        if (paddedOutput != nullptr) {
+            rt.PutTensor(*paddedOutput);
+            rt.PutTensor(*paddedQuery);
         }
+        rt.PutTensor(query);
 #endif
         return;
     }
@@ -1039,16 +1047,24 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
-        XTensor *causalMask = nullptr;
-        if (qkv.shape[0] > 1) {
-            causalMask = &rt.GetTensor({qkv.shape[0], qkv.shape[0]}, INT8, DBG_LOC);
+        const size_t paddedTokens = (qkv.shape[0] + blockSize - 1) / blockSize * blockSize;
+        XTensor &query = rt.GetTensor({qkv.shape[0], nHeads * headDim}, FP16, DBG_LOC);
+        XTensor *paddedQuery = nullptr;
+        XTensor *paddedOutput = nullptr;
+        if (paddedTokens != qkv.shape[0]) {
+            paddedQuery = &rt.GetTensor({paddedTokens, nHeads * headDim}, FP16, DBG_LOC);
+            paddedOutput = &rt.GetTensor({paddedTokens, nHeads * headDim}, FP16, DBG_LOC);
         }
+        XTensor &causalMask = rt.GetTensor({paddedTokens, paddedTokens}, INT8, DBG_LOC);
         XTensor &workspace =
             rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
         rt.PutTensor(workspace);
-        if (causalMask != nullptr) {
-            rt.PutTensor(*causalMask);
+        rt.PutTensor(causalMask);
+        if (paddedOutput != nullptr) {
+            rt.PutTensor(*paddedOutput);
+            rt.PutTensor(*paddedQuery);
         }
+        rt.PutTensor(query);
 #endif
         return;
     }

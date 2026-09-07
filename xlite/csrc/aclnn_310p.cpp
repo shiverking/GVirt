@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,24 +45,6 @@ public:
 
 private:
     aclTensor *tensor_;
-};
-
-class AclIntArrayGuard {
-public:
-    explicit AclIntArrayGuard(aclIntArray *array) : array_(array) {}
-    ~AclIntArrayGuard()
-    {
-        if (array_ != nullptr) {
-            (void)aclDestroyIntArray(array_);
-        }
-    }
-    aclIntArray *get() const
-    {
-        return array_;
-    }
-
-private:
-    aclIntArray *array_;
 };
 
 static aclTensor *CreateTensor(const std::vector<int64_t> &dims, const std::vector<int64_t> &strides,
@@ -270,16 +251,49 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
     }
 
     XTensor &query = ExtractQuery(rt, qkv, queryLength, nHeads, nKvHeads, headDim);
-    const std::vector<int64_t> qDims{1, queryLength, nHeads, headDim};
-    const std::vector<int64_t> kvDims{1, totalLength, nKvHeads, headDim};
-    const std::vector<int64_t> outDims{1, queryLength, nHeads, headDim};
+    const size_t qElements = static_cast<size_t>(nHeads) * headDim;
+    uint32_t queryTensorLength = queryLength;
+    uint32_t kvTensorLength = totalLength;
+    XTensor *paddedQuery = nullptr;
+    XTensor *paddedOutput = nullptr;
+    void *queryData = query.ptr;
+    void *outputData = output.ptr;
+    if (!isDecode && queryLength % blockSize != 0) {
+        const uint32_t paddedLength =
+            (queryLength + blockSize - 1) / blockSize * blockSize;
+        paddedQuery = &rt.GetTensor({paddedLength, qElements}, FP16, DBG_LOC);
+        paddedOutput = &rt.GetTensor({paddedLength, qElements}, FP16, DBG_LOC);
+        CHECK_ACL(aclrtMemsetAsync(paddedQuery->ptr, paddedQuery->bytes, 0,
+                                   paddedQuery->bytes, rt.stream));
+        CHECK_ACL(aclrtMemcpyAsync(paddedQuery->ptr, paddedQuery->bytes, query.ptr, query.bytes,
+                                   ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        queryTensorLength = paddedLength;
+        kvTensorLength = paddedLength;
+        queryData = paddedQuery->ptr;
+        outputData = paddedOutput->ptr;
+    }
+
+    const std::vector<int64_t> qDims{1, queryTensorLength, nHeads, headDim};
+    const std::vector<int64_t> kvDims{1, kvTensorLength, nKvHeads, headDim};
+    const std::vector<int64_t> outDims{1, queryTensorLength, nHeads, headDim};
     AclTensorGuard aclQuery(
-        CreateTensor(qDims, ContiguousStrides(qDims), ACL_FLOAT16, query.ptr));
+        CreateTensor(qDims, ContiguousStrides(qDims), ACL_FLOAT16, queryData));
     const size_t blockElements = static_cast<size_t>(blockSize) * nKvHeads * headDim;
     const size_t byteOffset = static_cast<size_t>(firstBlock) * blockElements * sizeof(uint16_t);
     void *keyData = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(kCache.ptr) + byteOffset);
     void *valueData =
         reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(vCache.ptr) + byteOffset);
+    if (kvTensorLength > totalLength) {
+        const size_t validKvBytes =
+            static_cast<size_t>(totalLength) * nKvHeads * headDim * sizeof(uint16_t);
+        const size_t paddedKvBytes =
+            static_cast<size_t>(kvTensorLength - totalLength) * nKvHeads * headDim *
+            sizeof(uint16_t);
+        CHECK_ACL(aclrtMemsetAsync(static_cast<uint8_t *>(keyData) + validKvBytes,
+                                   paddedKvBytes, 0, paddedKvBytes, rt.stream));
+        CHECK_ACL(aclrtMemsetAsync(static_cast<uint8_t *>(valueData) + validKvBytes,
+                                   paddedKvBytes, 0, paddedKvBytes, rt.stream));
+    }
     AclTensorGuard aclKey(CreateTensor(
         kvDims, ContiguousStrides(kvDims), ACL_FLOAT16, keyData,
         kvDims));
@@ -287,7 +301,7 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         kvDims, ContiguousStrides(kvDims), ACL_FLOAT16, valueData,
         kvDims));
     AclTensorGuard aclOut(
-        CreateTensor(outDims, ContiguousStrides(outDims), ACL_FLOAT16, output.ptr));
+        CreateTensor(outDims, ContiguousStrides(outDims), ACL_FLOAT16, outputData));
     // Xlite's RoPE-and-Cache kernel already scales Q by 1/sqrt(head_dim).
     // ACLNN must therefore use identity scaling or attention would be scaled twice.
     const double scale = 1.0;
@@ -303,28 +317,29 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                 "Ascend310P PromptFlashAttention POC does not support chunked prefill");
         }
         const size_t maskElements =
-            static_cast<size_t>(queryLength) * static_cast<size_t>(totalLength);
-        std::vector<uint8_t> hostMask(maskElements, 0);
+            static_cast<size_t>(queryTensorLength) * static_cast<size_t>(kvTensorLength);
+        // Future and padded keys are masked. Padded query rows keep key zero
+        // visible so the softmax never sees an all-masked row; those outputs
+        // are discarded below.
+        std::vector<uint8_t> hostMask(maskElements, 1);
         for (uint32_t row = 0; row < queryLength; ++row) {
-            for (uint32_t col = row + 1; col < totalLength; ++col) {
-                hostMask[static_cast<size_t>(row) * totalLength + col] = 1;
+            for (uint32_t col = 0; col <= row; ++col) {
+                hostMask[static_cast<size_t>(row) * kvTensorLength + col] = 0;
             }
         }
-        XTensor &causalMask = rt.GetTensor({queryLength, totalLength}, INT8, DBG_LOC);
+        for (uint32_t row = queryLength; row < queryTensorLength; ++row) {
+            hostMask[static_cast<size_t>(row) * kvTensorLength] = 0;
+        }
+        XTensor &causalMask =
+            rt.GetTensor({queryTensorLength, kvTensorLength}, INT8, DBG_LOC);
         rt.MemcpyH2D(causalMask.ptr, hostMask.data(), maskElements);
-        const std::vector<int64_t> maskDims{queryLength, totalLength};
+        const std::vector<int64_t> maskDims{queryTensorLength, kvTensorLength};
         AclTensorGuard aclMask(CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL,
                                             causalMask.ptr));
-        std::vector<int64_t> queryLengths{static_cast<int64_t>(queryLength)};
-        AclIntArrayGuard actualQueryLengths(
-            aclCreateIntArray(queryLengths.data(), queryLengths.size()));
-        if (actualQueryLengths.get() == nullptr) {
-            throw std::runtime_error("aclCreateIntArray returned nullptr");
-        }
         CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
             aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(),
-            actualQueryLengths.get(), nHeads, scale, 2147483647, 0, const_cast<char *>("BSND"),
-            nKvHeads, aclOut.get(), &workspaceSize, &executor));
+            nullptr, nHeads, scale, 2147483647, 0, const_cast<char *>("BSND"), nKvHeads,
+            aclOut.get(), &workspaceSize, &executor));
         workspace = GetWorkspace(rt, workspaceSize);
         CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                             workspaceSize, executor, rt.stream));
@@ -335,19 +350,21 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         // GQA (561002).  PromptFlashAttention has already accepted the same
         // GQA configuration.  With a one-token query and an exact valid-cache
         // view, unmasked prompt attention is mathematically identical to decode.
-        const int64_t queryLengthValue = queryLength;
-        AclIntArrayGuard actualQueryLengths(aclCreateIntArray(&queryLengthValue, 1));
-        if (actualQueryLengths.get() == nullptr) {
-            throw std::runtime_error("aclCreateIntArray returned nullptr");
-        }
         CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
             aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, nullptr,
-            actualQueryLengths.get(), nHeads, scale, 2147483647, 2147483647,
-            const_cast<char *>("BSND"), nKvHeads, aclOut.get(), &workspaceSize, &executor));
+            nullptr, nHeads, scale, 2147483647, 2147483647, const_cast<char *>("BSND"),
+            nKvHeads, aclOut.get(), &workspaceSize, &executor));
         workspace = GetWorkspace(rt, workspaceSize);
         CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                             workspaceSize, executor, rt.stream));
         FinishAclnn(rt, workspace);
+    }
+    if (paddedOutput != nullptr) {
+        CHECK_ACL(aclrtMemcpyAsync(output.ptr, output.bytes, paddedOutput->ptr, output.bytes,
+                                   ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        CHECK_ACL(aclrtSynchronizeStream(rt.stream));
+        rt.PutTensor(*paddedOutput);
+        rt.PutTensor(*paddedQuery);
     }
     rt.PutTensor(query);
 }
