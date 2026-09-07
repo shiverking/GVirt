@@ -49,14 +49,27 @@ def _device_name() -> str:
     return str(get_name(0)) if get_name is not None else "unknown"
 
 
+def _load_tensor_file(path: Path) -> torch.Tensor:
+    if path.suffix == ".npy":
+        import numpy as np
+        return torch.from_numpy(np.load(path))
+    value = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(value, torch.Tensor):
+        raise ValueError(f"{path} must contain one tensor")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--prompt", default="Transcribe the supplied audio embedding.")
-    parser.add_argument("--input-mode", choices=("tokens", "synthetic"), default="tokens")
+    parser.add_argument("--input-mode", choices=("tokens", "synthetic", "file"), default="tokens")
+    parser.add_argument("--embeds-file", type=Path)
+    parser.add_argument("--positions-file", type=Path)
     parser.add_argument("--prompt-tokens", type=int, default=32)
     parser.add_argument("--decode-tokens", type=int, default=16)
     parser.add_argument("--max-seq-len", type=int, default=512)
+    parser.add_argument("--num-layers", type=int, help="POC gate override; use 1 for Gate 5")
     parser.add_argument("--stability-iters", type=int, default=50)
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))
@@ -76,12 +89,23 @@ def main() -> int:
     torch.npu.set_device(0)
     torch.set_default_dtype(torch.float16)
     torch.manual_seed(20260907)
-    model_args = Qwen3ModelArgs(**load_qwen3_asr_llm_args(
-        args.checkpoint, max_seq_len=args.max_seq_len, max_batch_size=1
-    ))
+    model_config = load_qwen3_asr_llm_args(
+        args.checkpoint, max_seq_len=args.max_seq_len, max_batch_size=1)
+    if args.num_layers is not None:
+        if args.num_layers <= 0 or args.num_layers > model_config["n_layers"]:
+            parser.error("--num-layers must be between 1 and the checkpoint layer count")
+        model_config["n_layers"] = args.num_layers
+    model_args = Qwen3ModelArgs(**model_config)
     with torch.device("npu"):
         model = Llama(model_args)
     model.load_weights(args.checkpoint)
+
+    non_fp16_parameters = [name for name, value in model.named_parameters()
+                           if value.dtype != torch.float16]
+    if non_fp16_parameters:
+        raise RuntimeError(f"BF16/non-FP16 model parameters remain: {non_fp16_parameters[:8]}")
+    if any(cache.dtype != torch.float16 for pair in model.xlite_kv_cache for cache in pair):
+        raise RuntimeError("BF16/non-FP16 tensors remain in Xlite KV cache")
 
     if args.input_mode == "tokens":
         tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=True)
@@ -90,17 +114,51 @@ def main() -> int:
             raise ValueError("prompt produced no tokens")
         input_ids = torch.tensor([token_ids], dtype=torch.int64, device="npu")
         inputs_embeds = model.embed_tokens(input_ids).to(torch.float16)
-    else:
+    elif args.input_mode == "synthetic":
         inputs_embeds = torch.randn(
             1, args.prompt_tokens, model_args.dim, dtype=torch.float16, device="npu"
         ) * 0.02
+    else:
+        if args.embeds_file is None or args.positions_file is None:
+            parser.error("--input-mode=file requires --embeds-file and --positions-file")
+        inputs_embeds = _load_tensor_file(args.embeds_file)
+        if inputs_embeds.ndim == 2:
+            inputs_embeds = inputs_embeds.unsqueeze(0)
+        if inputs_embeds.ndim != 3 or inputs_embeds.shape[0] != 1:
+            parser.error("embedding file must have shape [tokens, hidden] or [1, tokens, hidden]")
+        if inputs_embeds.shape[2] != model_args.dim:
+            parser.error("embedding file hidden size does not match thinker_config.text_config")
+        inputs_embeds = inputs_embeds.to(device="npu", dtype=torch.float16)
+
+    total_position_count = inputs_embeds.size(1) + args.decode_tokens
+    if args.positions_file is not None:
+        all_positions = _load_tensor_file(args.positions_file).to(device="npu", dtype=torch.int64)
+        if tuple(all_positions.shape) not in ((total_position_count,), (3, total_position_count)):
+            parser.error(
+                "positions file must cover prompt plus decode and have shape "
+                f"[{total_position_count}] or [3, {total_position_count}]"
+            )
+    elif model_args.mrope_section:
+        if args.input_mode == "file":
+            parser.error("real embedding validation requires its processor-produced positions")
+        linear = torch.arange(total_position_count, device="npu", dtype=torch.int64)
+        all_positions = linear.repeat(3, 1)
+    else:
+        all_positions = torch.arange(total_position_count, device="npu", dtype=torch.int64)
+
+    if int(all_positions.min().item()) < 0 or int(all_positions.max().item()) >= args.max_seq_len:
+        parser.error("positions must be in [0, --max-seq-len)")
+
+    prompt_positions = all_positions[..., :inputs_embeds.size(1)]
 
     _clear_caches(model)
     (reference_logits, reference_hidden), reference_prefill_ms = _sync_ms(
-        lambda: model.forward_naive_with_inputs_embeds(inputs_embeds, 0, return_hidden=True)
+        lambda: model.forward_naive_with_inputs_embeds(
+            inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
     )
     (xlite_logits, xlite_hidden), xlite_prefill_ms = _sync_ms(
-        lambda: model.forward_xlite_with_inputs_embeds(inputs_embeds, 0, return_hidden=True)
+        lambda: model.forward_xlite_with_inputs_embeds(
+            inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
     )
 
     hidden_cosine = _cosine(reference_hidden, xlite_hidden)
@@ -111,9 +169,9 @@ def main() -> int:
     for _ in range(args.decode_tokens):
         reference_generated.append(int(reference_next_token.item()))
         reference_embed = model.embed_tokens(reference_next_token.view(1, 1)).to(torch.float16)
+        decode_positions = all_positions[..., reference_start_pos:reference_start_pos + 1]
         reference_logits = model.forward_naive_with_inputs_embeds(
-            reference_embed, reference_start_pos
-        )
+            reference_embed, reference_start_pos, positions=decode_positions)
         reference_next_token = reference_logits.argmax(dim=-1)
         reference_start_pos += 1
 
@@ -126,19 +184,34 @@ def main() -> int:
         token_embed = model.embed_tokens(next_token.view(1, 1)).to(torch.float16)
         logits, elapsed = _sync_ms(
             lambda token_embed=token_embed, start_pos=start_pos:
-                model.forward_xlite_with_inputs_embeds(token_embed, start_pos)
+                model.forward_xlite_with_inputs_embeds(
+                    token_embed, start_pos,
+                    positions=all_positions[..., start_pos:start_pos + 1])
         )
         decode_ms.append(elapsed)
         next_token = logits.argmax(dim=-1)
         start_pos += 1
 
+    def _run_complete_xlite_sequence() -> None:
+        stability_logits = model.forward_xlite_with_inputs_embeds(
+            inputs_embeds, 0, positions=prompt_positions)
+        stability_token = stability_logits.argmax(dim=-1)
+        stability_position = inputs_embeds.size(1)
+        for _ in range(args.decode_tokens):
+            stability_embed = model.embed_tokens(stability_token.view(1, 1)).to(torch.float16)
+            stability_logits = model.forward_xlite_with_inputs_embeds(
+                stability_embed, stability_position,
+                positions=all_positions[..., stability_position:stability_position + 1])
+            stability_token = stability_logits.argmax(dim=-1)
+            stability_position += 1
+
     _clear_caches(model)
-    model.forward_xlite_with_inputs_embeds(inputs_embeds, 0)
+    _run_complete_xlite_sequence()
     torch.npu.synchronize()
     initial_memory = int(torch.npu.memory_allocated())
     for _ in range(args.stability_iters):
         _clear_caches(model)
-        model.forward_xlite_with_inputs_embeds(inputs_embeds, 0)
+        _run_complete_xlite_sequence()
     torch.npu.synchronize()
     final_memory = int(torch.npu.memory_allocated())
 
@@ -146,7 +219,11 @@ def main() -> int:
         "device": device_name,
         "dtype": "float16",
         "batch_size": 1,
+        "num_layers": model_args.n_layers,
         "input_mode": args.input_mode,
+        "positions_shape": list(all_positions.shape),
+        "mrope_section": model_args.mrope_section,
+        "mrope_interleaved": model_args.mrope_interleaved,
         "prompt_tokens": int(inputs_embeds.size(1)),
         "decode_tokens": args.decode_tokens,
         "generated_token_ids": generated,

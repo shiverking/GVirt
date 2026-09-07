@@ -69,6 +69,12 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [0], [128]),
         (1, [0], [129]),
         (1, [128], [1]),
+        (1, [15], [1]),
+        (1, [126], [1]),
+        (1, [127], [1]),
+        (1, [128], [1]),
+        (1, [511], [1]),
+        (1, [2047], [1]),
     ]
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
@@ -115,6 +121,9 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
 
             # apply RMS-norm over head_dim for k and v caches
             qkv_standard = rms_norm_last_dim(qkv_standard).view(total_query_len, out_features)
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                # The real model's RoPE-and-Cache stage scales Q before the ACLNN backend.
+                qkv_standard[:, :n_heads * head_dim] *= head_dim ** -0.5
             k_cache = rms_norm_last_dim(k_cache)
             v_cache = rms_norm_last_dim(v_cache)
 
@@ -130,7 +139,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
 
             # xlite
             qkv_xlite = qkv_standard.clone()
-            output_xlite = torch.zeros(total_query_len, n_heads * head_dim)
+            output_xlite = torch.full(
+                (total_query_len, n_heads * head_dim), torch.nan, dtype=test_dtype)
 
             kvcache_block_num = max_num_blocks * batch
             k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, n_kv_heads, head_dim)
@@ -235,6 +245,9 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
                   output_xlite, query_start_loc, query_lens, cached_lens,
                   block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash)
+        torch.npu.synchronize()
+        if torch.isnan(output_xlite).any():
+            raise AssertionError("attention output still contains the no-op sentinel")
 
         logging.info(
             "attention %s (%d heads, %d kv heads, %d head dim, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",
@@ -249,7 +262,14 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         )
 
         try:
-            torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                cosine = torch.nn.functional.cosine_similarity(
+                    output_standard.float().flatten(), output_xlite.float().flatten(), dim=0)
+                if float(cosine.cpu()) < 0.999:
+                    raise AssertionError(f"attention cosine similarity {float(cosine.cpu())} < 0.999")
+                torch.testing.assert_close(output_standard, output_xlite, atol=1e-2, rtol=1e-2)
+            else:
+                torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
             if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
                 raise

@@ -52,6 +52,17 @@ def load_qwen3_asr_llm_args(
     if hidden_size != n_heads * head_dim:
         raise ValueError("310P POC requires hidden_size == num_attention_heads * head_dim")
 
+    rope_parameters = text.get("rope_parameters") or text.get("rope_scaling") or {}
+    if not isinstance(rope_parameters, dict):
+        raise ValueError("rope_parameters/rope_scaling must be an object")
+    mrope_section = rope_parameters.get("mrope_section", [])
+    if mrope_section is None:
+        mrope_section = []
+    if not isinstance(mrope_section, list) or any(int(item) < 0 for item in mrope_section):
+        raise ValueError("mrope_section must be a list of non-negative integers")
+    if mrope_section and sum(int(item) for item in mrope_section) != head_dim // 2:
+        raise ValueError("mrope_section must cover head_dim / 2 rotary pairs")
+
     return {
         "max_batch_size": max_batch_size,
         "max_seq_len": max_seq_len,
@@ -64,6 +75,9 @@ def load_qwen3_asr_llm_args(
         "n_kv_heads": int(text["num_key_value_heads"]),
         "norm_eps": float(text.get("rms_norm_eps", 1e-6)),
         "rope_theta": float(text.get("rope_theta", 1_000_000.0)),
+        "rope_type": str(rope_parameters.get("rope_type", rope_parameters.get("type", "default"))),
+        "mrope_section": [int(item) for item in mrope_section],
+        "mrope_interleaved": bool(rope_parameters.get("mrope_interleaved", False)),
         "dtype": "float16",
         "tie_word_embeddings": bool(text.get("tie_word_embeddings", False)),
         "qkv_bias": bool(text.get("attention_bias", False)),

@@ -31,7 +31,8 @@ rank = 0
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
-    from xlite._C import Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnMHA, Model
+    from xlite._C import (Runtime, ModelConfig, AttnMeta, AttnMetaV2,
+                          AttnMHA, Model, RopeNeox, RopeGptj)
     import numpy as np
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
@@ -50,6 +51,9 @@ class ModelArgs:
     n_kv_heads: int = 32
     norm_eps: float = 1e-5
     rope_theta: float = 10000.0
+    rope_type: str = "default"
+    mrope_section: list[int] | None = None
+    mrope_interleaved: bool = False
     dtype: Literal["bfloat16", "float16"] = "float16"
     tie_word_embeddings: bool = False
     qkv_bias: bool = False
@@ -178,9 +182,47 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     return freq_cis.to("npu")
 
 
-def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -> torch.Tensor:
+def _mrope_axes(section: list[int], interleaved: bool, half_dim: int,
+                device: torch.device) -> torch.Tensor:
+    if len(section) != 3 or sum(section) != half_dim:
+        raise ValueError(f"mrope_section must contain 3 entries summing to {half_dim}")
+    if interleaved:
+        axes = [0] * half_dim
+        for index in range(1, min(3 * section[1], half_dim), 3):
+            axes[index] = 1
+        for index in range(2, min(3 * section[2], half_dim), 3):
+            axes[index] = 2
+    else:
+        axes = [0] * section[0] + [1] * section[1] + [2] * section[2]
+    return torch.tensor(axes, dtype=torch.long, device=device)
+
+
+def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor,
+                     positions: Optional[torch.Tensor] = None,
+                     mrope_section: Optional[list[int]] = None,
+                     mrope_interleaved: bool = False) -> torch.Tensor:
     seqlen = x.size(2) # [bsz, n_local_heads, seqlen, head_dim]
-    cos, sin = freqs_cis[start_pos:start_pos + seqlen, :].chunk(2, dim=-1)
+    cos_table, sin_table = freqs_cis.chunk(2, dim=-1)
+    if positions is not None and positions.ndim == 2:
+        if positions.shape != (3, seqlen):
+            raise ValueError(f"mRoPE positions must have shape [3, {seqlen}]")
+        axes = _mrope_axes(mrope_section or [], mrope_interleaved,
+                           x.shape[-1] // 2, positions.device)
+        pair_positions = positions.long().transpose(0, 1)[:, axes]
+        pair_indices = torch.arange(x.shape[-1] // 2, device=positions.device) \
+            .expand(seqlen, -1)
+        cos = cos_table[pair_positions, pair_indices]
+        sin = sin_table[pair_positions, pair_indices]
+    else:
+        if positions is not None:
+            linear_positions = positions.reshape(-1).long()
+            if linear_positions.numel() != seqlen:
+                raise ValueError(f"positions must contain {seqlen} values")
+            cos = cos_table[linear_positions]
+            sin = sin_table[linear_positions]
+        else:
+            cos = cos_table[start_pos:start_pos + seqlen, :]
+            sin = sin_table[start_pos:start_pos + seqlen, :]
     cos = cos.repeat(1, 2) # [seqlen, head_dim]
     sin = sin.repeat(1, 2)
     x1 = x[..., :x.shape[-1] // 2]
@@ -197,6 +239,8 @@ class MHA(nn.Module):
         self.dim = args.dim
         self.head_dim = args.head_dim
         self.qk_norm = args.qk_norm
+        self.mrope_section = args.mrope_section
+        self.mrope_interleaved = args.mrope_interleaved
         self.n_local_heads = args.n_heads // world_size
         self.n_local_kv_heads = max(1, args.n_kv_heads // world_size)
         self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
@@ -209,7 +253,8 @@ class MHA(nn.Module):
         self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
         self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
 
-    def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+    def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
+                positions: Optional[torch.Tensor] = None):
         bsz, seqlen, _ = x.shape
 
         qkv = self.qkv_proj(x)
@@ -229,8 +274,12 @@ class MHA(nn.Module):
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
-        q = apply_rotary_emb(q, start_pos, freqs_cis=freqs_cis)
-        k = apply_rotary_emb(k, start_pos, freqs_cis=freqs_cis)
+        q = apply_rotary_emb(q, start_pos, freqs_cis=freqs_cis, positions=positions,
+                             mrope_section=self.mrope_section,
+                             mrope_interleaved=self.mrope_interleaved)
+        k = apply_rotary_emb(k, start_pos, freqs_cis=freqs_cis, positions=positions,
+                             mrope_section=self.mrope_section,
+                             mrope_interleaved=self.mrope_interleaved)
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
 
@@ -285,11 +334,13 @@ class Block(nn.Module):
         self.post_attention_layernorm = RMSNorm(args.dim, args.norm_eps)
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor,
+                mask: Optional[torch.Tensor] = None,
+                positions: Optional[torch.Tensor] = None) -> torch.Tensor:
         attn_norm_out = self.input_layernorm(x)
         if debug and rank == 0 and self.layer_id == 0:
             print(f"layer{self.layer_id} in: {attn_norm_out}")
-        attn_out = self.self_attn(attn_norm_out, start_pos, freqs_cis, mask)
+        attn_out = self.self_attn(attn_norm_out, start_pos, freqs_cis, mask, positions)
         if debug and rank == 0 and self.layer_id == 0:
             print(f"layer{self.layer_id} after attn: {attn_out}")
         x = x + attn_out
@@ -345,7 +396,8 @@ class Llama(nn.Module):
 
     @torch.inference_mode()
     def forward_naive_with_inputs_embeds(self, inputs_embeds: torch.Tensor, start_pos: int = 0,
-                                         return_hidden: bool = False):
+                                         return_hidden: bool = False,
+                                         positions: Optional[torch.Tensor] = None):
         _bsz, seqlen, _hidden = inputs_embeds.shape
         h = inputs_embeds
 
@@ -356,7 +408,7 @@ class Llama(nn.Module):
             ).triu_(1)
 
         for layer in self.layers:
-            h = layer(h, start_pos, self.freqs_cis, mask)
+            h = layer(h, start_pos, self.freqs_cis, mask, positions)
         h = self.norm(h)[:, -1]
         logits = self.lm_head(h)
         if world_size > 1:
@@ -385,7 +437,8 @@ class Llama(nn.Module):
 
     @torch.inference_mode()
     def forward_xlite_with_inputs_embeds(self, inputs_embeds: torch.Tensor, start_pos: int = 0,
-                                         return_hidden: bool = False):
+                                         return_hidden: bool = False,
+                                         positions: Optional[torch.Tensor] = None):
         if inputs_embeds.ndim != 3 or inputs_embeds.size(0) != 1:
             raise ValueError("310P LLM POC inputs_embeds must have shape [1, num_tokens, hidden_size]")
         if inputs_embeds.size(2) != self.args.dim:
@@ -397,7 +450,7 @@ class Llama(nn.Module):
 
         batch, seqlen, _hidden = inputs_embeds.shape
         meta_shape = torch.empty((batch, seqlen), dtype=torch.int32, device=inputs_embeds.device)
-        attn_meta = self.prepare_xlite_attnmeta(meta_shape, start_pos)
+        attn_meta = self.prepare_xlite_attnmeta(meta_shape, start_pos, positions=positions)
         stream = torch.npu.current_stream().npu_stream
         hidden = torch.empty(batch * seqlen, self.args.dim, dtype=torch.float16,
                              device=inputs_embeds.device)
@@ -660,6 +713,9 @@ class Llama(nn.Module):
         config.rope_head_dim = args.head_dim
         config.norm_eps = args.norm_eps
         config.rope_theta = args.rope_theta
+        config.rope_type = RopeGptj if args.rope_type.lower() == "gptj" else RopeNeox
+        config.mrope_section = args.mrope_section or []
+        config.mrope_interleaved = args.mrope_interleaved
         config.softmax_scale = args.head_dim ** -0.5
         config.n_dense_layers = args.n_layers
         config.intermediate_size = args.inter_dim
@@ -704,7 +760,8 @@ class Llama(nn.Module):
                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
         return kv_size
 
-    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
+    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int,
+                               positions: Optional[torch.Tensor] = None):
         batch = tokens.size(0)
         seqlen = tokens.size(1)
         step = (self.args.max_seq_len + block_size - 1) // block_size
@@ -715,8 +772,17 @@ class Llama(nn.Module):
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(block_num, dtype=np.uint32)
         attn_meta.block_tables_cpu = batch_indices * step + block_indices
-        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device)
+        if positions is None:
+            positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64,
+                                     device=tokens.device).repeat(batch)
+        else:
+            positions = positions.to(device=tokens.device, dtype=torch.int64).contiguous()
+            valid_shapes = ((batch * seqlen,), (3, batch * seqlen))
+            if tuple(positions.shape) not in valid_shapes:
+                raise ValueError(
+                    f"positions must have shape [{batch * seqlen}] or [3, {batch * seqlen}]"
+                )
+        attn_meta.positions = positions
         return attn_meta
 
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):

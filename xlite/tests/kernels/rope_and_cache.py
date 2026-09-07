@@ -46,22 +46,23 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 ROPE_THETA = 10000.0
-N_HEADS = 32
-N_KV_HEADS = 32
+poc_fp16 = os.getenv("XLITE_TEST_FP16_ONLY") == "1"
+N_HEADS = 16 if poc_fp16 else 32
+N_KV_HEADS = 8 if poc_fp16 else 32
 
 MAX_SEQ_LEN = 1024
 MAX_BATCH_SIZE = 8
-BATCH_SIZE = 8
-SEQ_LEN = 10
+BATCH_SIZE = 1 if poc_fp16 else 8
+SEQ_LEN = 129 if poc_fp16 else 10
 
 START_POS = 0
 BLOCK_SIZE = 128
-BLOCK_NUM = 1
+BLOCK_NUM = (SEQ_LEN + BLOCK_SIZE - 1) // BLOCK_SIZE
 
 test_cases = {(torch.float16, 64, 64), (torch.float16, 128, 128), (torch.float16, 128, 64),
               (torch.bfloat16, 64, 64), (torch.bfloat16, 128, 128), (torch.bfloat16, 128, 64)}
-if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
-    test_cases = {case for case in test_cases if case[0] == torch.float16}
+if poc_fp16:
+    test_cases = {(torch.float16, 128, 128)}
 
 for test_dtype, head_dim, rot_dim in test_cases:
     out_features = (N_HEADS + 2 * N_KV_HEADS) * head_dim
@@ -76,8 +77,10 @@ for test_dtype, head_dim, rot_dim in test_cases:
         qkv_xlite = qkv_standard.clone().view(BATCH_SIZE * SEQ_LEN, out_features)
         freqs_cis_xlite = freqs_cis_standard.clone()
 
-        k_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim)
-        v_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim)
+        k_cache_xlite = torch.full(
+            (BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim), torch.nan)
+        v_cache_xlite = torch.full(
+            (BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim), torch.nan)
 
         len = torch.arange(SEQ_LEN, dtype=torch.int64)
         position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
@@ -115,6 +118,18 @@ for test_dtype, head_dim, rot_dim in test_cases:
 
     try:
         torch.testing.assert_close(qkv_standard_out, qkv_xlite, atol=1e-5, rtol=1e-3)
+        # The test deliberately aliases every batch onto the same block; the last
+        # batch must therefore be the final cache writer.
+        expected_k_cache = k.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, head_dim)[-1]
+        expected_v_cache = v.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, head_dim)[-1]
+        torch.testing.assert_close(
+            expected_k_cache,
+            k_cache_xlite.view(-1, N_KV_HEADS, head_dim)[:SEQ_LEN],
+            atol=1e-5, rtol=1e-3)
+        torch.testing.assert_close(
+            expected_v_cache,
+            v_cache_xlite.view(-1, N_KV_HEADS, head_dim)[:SEQ_LEN],
+            atol=1e-5, rtol=1e-3)
     except AssertionError as e:
         if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
             raise

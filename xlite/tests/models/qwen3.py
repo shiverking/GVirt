@@ -25,6 +25,9 @@ class Qwen3ModelArgs:
     n_kv_heads: int = 8
     norm_eps: float = 1e-6
     rope_theta: float = 1000000.0
+    rope_type: str = "default"
+    mrope_section: list[int] | None = None
+    mrope_interleaved: bool = False
     dtype: Literal["bfloat16", "float16"] = "bfloat16"
     tie_word_embeddings: bool = False
     qkv_bias: bool = False
