@@ -77,7 +77,17 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [128], [1]),
         (1, [511], [1]),
         (1, [2047], [1]),
+        (2, [0, 127], [129, 1]),
+        (2, [128, 64], [65, 129]),
+        (8, [15, 31, 63, 127, 255, 511, 1023, 2047], [1] * 8),
+        (20, [16 + index * 7 for index in range(20)], [1] * 20),
     ]
+
+def case_name(batch: int, cached_lens: list[int], query_lens: list[int]) -> str:
+    if batch == 1:
+        return f"cache{cached_lens[0]}-query{query_lens[0]}"
+    return (f"batch{batch}-cache{'_'.join(map(str, cached_lens))}"
+            f"-query{'_'.join(map(str, query_lens))}")
 
 # Keep every 310P attention shape diagnosable even when one ACLNN invocation
 # fails or poisons its process.  The parent runs each shape in isolation and
@@ -105,7 +115,7 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
             parser.error(f"cannot read failures from {summary_path}: {error}")
         selected_indices = [
             index for index, (_batch, cached, query) in enumerate(work)
-            if f"cache{cached[0]}-query{query[0]}" in failed_names
+            if case_name(_batch, cached, query) in failed_names
         ]
         if not selected_indices:
             print(f"No failed cases recorded in {summary_path}")
@@ -113,9 +123,9 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
     results = []
     for index in selected_indices:
         batch, cached_lens_list, query_len_list = work[index]
-        case_name = f"cache{cached_lens_list[0]}-query{query_len_list[0]}"
-        print(f"[ RUN      ] {case_name}", flush=True)
-        log_path = report_dir / f"{case_name}.log"
+        current_case_name = case_name(batch, cached_lens_list, query_len_list)
+        print(f"[ RUN      ] {current_case_name}", flush=True)
+        log_path = report_dir / f"{current_case_name}.log"
         env = dict(os.environ, XLITE_ATTENTION_CASE_INDEX=str(index))
         with log_path.open("w", encoding="utf-8") as log:
             try:
@@ -126,9 +136,9 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
             except subprocess.TimeoutExpired:
                 log.write("\nTimeout after 1200 seconds\n")
                 status = 124
-        results.append({"name": case_name, "exit_code": status,
+        results.append({"name": current_case_name, "exit_code": status,
                         "log": str(log_path.resolve())})
-        print(f"[ {'      OK' if status == 0 else ' FAILED '} ] {case_name}", flush=True)
+        print(f"[ {'      OK' if status == 0 else ' FAILED '} ] {current_case_name}", flush=True)
         (report_dir / "summary.json").write_text(
             json.dumps(results, indent=2), encoding="utf-8")
     failures = [item for item in results if item["exit_code"] != 0]
@@ -227,9 +237,10 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             query_start_loc_np = np.cumsum(query_lens_np) - query_lens_np
             query_start_loc = torch.tensor(query_start_loc_np.tolist(), dtype=torch.int32).flatten()
 
-            batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-            block_indices = np.arange(max_num_blocks, dtype=np.uint32)
-            block_tables_array = batch_indices * max_num_blocks + block_indices
+            # Reverse the physical allocation to ensure the backend follows each
+            # request's block table instead of assuming contiguous cache storage.
+            physical_blocks = np.arange(kvcache_block_num, dtype=np.uint32)[::-1]
+            block_tables_array = physical_blocks.reshape(batch, max_num_blocks)
             block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
 
         # standard GQA forward: process each sample with its own query_len and cached_len
@@ -300,7 +311,6 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             full_k = torch.cat([cached_k_part, current_k], dim=1)
             full_v = torch.cat([cached_v_part, current_v], dim=1)
 
-            sample_cache_start = i * max_num_blocks
             total_len = clen + qlen
             num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
             for block_idx in range(num_blocks_needed):
@@ -308,10 +318,7 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 seq_end = min((block_idx + 1) * BLOCK_SIZE, total_len)
                 current_seq_len = seq_end - seq_start
 
-                cache_block_idx = sample_cache_start + block_idx
-                if cache_block_idx >= (i + 1) * max_num_blocks:
-                    warnings.warn(f"第{i}个样本的缓存块容量不足，无法容纳超长序列（需要{num_blocks_needed}块，仅分配{max_num_blocks}块）")
-                    break
+                cache_block_idx = int(block_tables_array[i, block_idx])
 
                 k_cache_xlite[cache_block_idx, :current_seq_len] = full_k[:, seq_start:seq_end]
                 v_cache_xlite[cache_block_idx, :current_seq_len] = full_v[:, seq_start:seq_end]
