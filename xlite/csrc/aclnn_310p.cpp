@@ -122,8 +122,8 @@ static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize)
         return nullptr;
     }
     if (workspaceSize > XLITE_310P_ACLNN_WORKSPACE_BYTES) {
-        throw std::runtime_error(
-            "ACLNN workspace exceeds the 512 MiB reserved 310P TensorPool budget");
+        throw std::runtime_error("ACLNN workspace request " + std::to_string(workspaceSize) +
+                                 " bytes exceeds the 512 MiB reserved 310P TensorPool budget");
     }
     return &rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
 }
@@ -208,28 +208,59 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         throw std::runtime_error("aclnnMatmul Ascend310P shape mismatch");
     }
 
-    const std::vector<int64_t> inDims{m, k};
-    const std::vector<int64_t> outDims{m, n};
+    const auto runMatmul = [&](int64_t currentN, void *weightData, void *outputData,
+                               const std::vector<int64_t> &weightStorage,
+                               const std::vector<int64_t> &weightStrides) {
+        const std::vector<int64_t> inDims{m, k};
+        const std::vector<int64_t> weightDims{k, currentN};
+        const std::vector<int64_t> outDims{m, currentN};
+        AclTensorGuard aclIn(
+            CreateTensor(inDims, ContiguousStrides(inDims), ACL_FLOAT16, in.ptr));
+        AclTensorGuard aclWeight(CreateTensor(weightDims, weightStrides, ACL_FLOAT16, weightData,
+                                              weightStorage));
+        AclTensorGuard aclOut(
+            CreateTensor(outDims, ContiguousStrides(outDims), ACL_FLOAT16, outputData));
+
+        uint64_t workspaceSize = 0;
+        aclOpExecutor *executor = nullptr;
+        CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn.get(), aclWeight.get(), aclOut.get(), 0,
+                                              &workspaceSize, &executor));
+        XTensor *workspace = GetWorkspace(rt, workspaceSize);
+        CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
+                              executor, rt.stream));
+        FinishAclnn(rt, workspace);
+    };
+
+    if (!transpose && n > static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK)) {
+        const int64_t chunkLimit = static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK);
+        // A contiguous temporary is necessary because an N slice of [M,N] is
+        // strided for M>1.  Copy each completed chunk into the final output.
+        XTensor &chunkOutput =
+            rt.GetTensor({static_cast<size_t>(m), XLITE_310P_MATMUL_N_CHUNK}, FP16, DBG_LOC);
+        for (int64_t offset = 0; offset < n; offset += chunkLimit) {
+            const int64_t currentN = std::min(chunkLimit, n - offset);
+            void *weightData = static_cast<void *>(
+                static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset * k));
+            runMatmul(currentN, weightData, chunkOutput.ptr, {currentN, k}, {1, k});
+            void *outputData = static_cast<void *>(
+                static_cast<uint16_t *>(out.ptr) + static_cast<size_t>(offset));
+            CHECK_ACL(aclrtMemcpy2dAsync(
+                outputData, static_cast<size_t>(n) * sizeof(uint16_t), chunkOutput.ptr,
+                static_cast<size_t>(currentN) * sizeof(uint16_t),
+                static_cast<size_t>(currentN) * sizeof(uint16_t), static_cast<size_t>(m),
+                ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        }
+        CHECK_ACL(aclrtSynchronizeStream(rt.stream));
+        rt.PutTensor(chunkOutput);
+        return;
+    }
+
     const std::vector<int64_t> weightStorage{
         static_cast<int64_t>(weight.shape[0]), static_cast<int64_t>(weight.shape[1])};
-    const std::vector<int64_t> weightDims{k, n};
     // Xlite linear weights are normally [N,K], hence the logical [K,N] view.
     const std::vector<int64_t> weightStrides =
         transpose ? std::vector<int64_t>{n, 1} : std::vector<int64_t>{1, k};
-
-    AclTensorGuard aclIn(CreateTensor(inDims, ContiguousStrides(inDims), ACL_FLOAT16, in.ptr));
-    AclTensorGuard aclWeight(CreateTensor(weightDims, weightStrides, ACL_FLOAT16, weight.ptr,
-                                          weightStorage));
-    AclTensorGuard aclOut(CreateTensor(outDims, ContiguousStrides(outDims), ACL_FLOAT16, out.ptr));
-
-    uint64_t workspaceSize = 0;
-    aclOpExecutor *executor = nullptr;
-    CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn.get(), aclWeight.get(), aclOut.get(), 0,
-                                          &workspaceSize, &executor));
-    XTensor *workspace = GetWorkspace(rt, workspaceSize);
-    CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr, workspaceSize, executor,
-                          rt.stream));
-    FinishAclnn(rt, workspace);
+    runMatmul(n, weight.ptr, out.ptr, weightStorage, weightStrides);
 }
 
 void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
