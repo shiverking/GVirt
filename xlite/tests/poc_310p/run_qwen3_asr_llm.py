@@ -6,8 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
+
+# When this file is executed by path, Python puts tests/poc_310p rather than
+# the repository root first on sys.path.  Pin the checkout root so
+# ``tests.models`` cannot be shadowed by an unrelated site-packages ``tests``.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+repo_root_str = str(REPO_ROOT)
+if repo_root_str in sys.path:
+    sys.path.remove(repo_root_str)
+sys.path.insert(0, repo_root_str)
 
 os.environ.setdefault("FORWARD_BACKEND", "xlite")
 os.environ.setdefault("XLITE_DP_SIZE", "1")
