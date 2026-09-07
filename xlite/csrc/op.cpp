@@ -1025,9 +1025,17 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
+        XTensor *causalMask = nullptr;
+        if (qkv.shape[0] > 1) {
+            const size_t maskKvLength = (qkv.shape[0] + 31) / 32 * 32;
+            causalMask = &rt.GetTensor({qkv.shape[0], maskKvLength}, INT8, DBG_LOC);
+        }
         XTensor &workspace =
             rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
         rt.PutTensor(workspace);
+        if (causalMask != nullptr) {
+            rt.PutTensor(*causalMask);
+        }
 #endif
         return;
     }
@@ -1067,9 +1075,17 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
+        XTensor *causalMask = nullptr;
+        if (qkv.shape[0] > 1) {
+            const size_t maskKvLength = (qkv.shape[0] + 31) / 32 * 32;
+            causalMask = &rt.GetTensor({qkv.shape[0], maskKvLength}, INT8, DBG_LOC);
+        }
         XTensor &workspace =
             rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
         rt.PutTensor(workspace);
+        if (causalMask != nullptr) {
+            rt.PutTensor(*causalMask);
+        }
 #endif
         return;
     }

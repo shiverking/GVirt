@@ -341,12 +341,31 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                                            workspaceSize, executor, rt.stream));
         FinishAclnn(rt, workspace);
     } else {
-        // The cache contains all prompt K/V after RoPE-and-Cache. For prefill starting at
-        // position zero, PromptFlashAttention's causal window is equivalent to a mask.
+        // The cache contains all prompt K/V after RoPE-and-Cache.  On Atlas inference
+        // products preTokens/nextTokens are ignored when attenMask is nullptr, so a
+        // real BOOL upper-triangular mask is required for causal prefill.
         if (cachedLength != 0) {
             throw std::runtime_error(
                 "Ascend310P PromptFlashAttention POC does not support chunked prefill");
         }
+        constexpr uint32_t BOOL_MASK_ALIGNMENT = 32;
+        const uint32_t maskKvLength =
+            (totalLength + BOOL_MASK_ALIGNMENT - 1) / BOOL_MASK_ALIGNMENT * BOOL_MASK_ALIGNMENT;
+        const size_t maskElements =
+            static_cast<size_t>(queryLength) * static_cast<size_t>(maskKvLength);
+        // Padded columns must also be masked.  Clear only the causal prefix in
+        // each row, leaving the future and padding columns set to true.
+        std::vector<uint8_t> hostMask(maskElements, 1);
+        for (uint32_t row = 0; row < queryLength; ++row) {
+            for (uint32_t col = 0; col <= row; ++col) {
+                hostMask[static_cast<size_t>(row) * maskKvLength + col] = 0;
+            }
+        }
+        XTensor &causalMask = rt.GetTensor({queryLength, maskKvLength}, INT8, DBG_LOC);
+        rt.MemcpyH2D(causalMask.ptr, hostMask.data(), maskElements);
+        const std::vector<int64_t> maskDims{queryLength, maskKvLength};
+        AclTensorGuard aclMask(CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL,
+                                            causalMask.ptr));
         std::vector<int64_t> queryLengths{static_cast<int64_t>(queryLength)};
         AclIntArrayGuard actualQueryLengths(
             aclCreateIntArray(queryLengths.data(), queryLengths.size()));
@@ -354,13 +373,14 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
             throw std::runtime_error("aclCreateIntArray returned nullptr");
         }
         CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
-            aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, nullptr,
+            aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(),
             actualQueryLengths.get(), nHeads, scale, 2147483647, 0, const_cast<char *>("BSND"),
             nKvHeads, aclOut.get(), &workspaceSize, &executor));
         workspace = GetWorkspace(rt, workspaceSize);
         CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                             workspaceSize, executor, rt.stream));
         FinishAclnn(rt, workspace);
+        rt.PutTensor(causalMask);
     }
     rt.PutTensor(query);
 }

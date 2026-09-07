@@ -9,7 +9,11 @@
 # ===============================================================================
 from __future__ import absolute_import
 import logging
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import torch
 import math
 import numpy as np
@@ -19,8 +23,6 @@ from xlite._C import Runtime, attention
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 3000)
-torch.npu.set_device(0)
 enable_flash = False
 
 BLOCK_SIZE = 128
@@ -76,6 +78,55 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [511], [1]),
         (1, [2047], [1]),
     ]
+
+# Keep every 310P attention shape diagnosable even when one ACLNN invocation
+# fails or poisons its process.  The parent runs each shape in isolation and
+# prints all failures at the end; a hidden environment variable selects the
+# single child case.
+poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
+if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
+    report_dir = Path("attention_310p_report")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    for index, (batch, cached_lens_list, query_len_list) in enumerate(work):
+        case_name = f"cache{cached_lens_list[0]}-query{query_len_list[0]}"
+        print(f"[ RUN      ] {case_name}", flush=True)
+        log_path = report_dir / f"{case_name}.log"
+        env = dict(os.environ, XLITE_ATTENTION_CASE_INDEX=str(index))
+        with log_path.open("w", encoding="utf-8") as log:
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).resolve())], env=env,
+                    stdout=log, stderr=subprocess.STDOUT, timeout=1200, check=False)
+                status = result.returncode
+            except subprocess.TimeoutExpired:
+                log.write("\nTimeout after 1200 seconds\n")
+                status = 124
+        results.append({"name": case_name, "exit_code": status,
+                        "log": str(log_path.resolve())})
+        print(f"[ {'      OK' if status == 0 else ' FAILED '} ] {case_name}", flush=True)
+        (report_dir / "summary.json").write_text(
+            json.dumps(results, indent=2), encoding="utf-8")
+    failures = [item for item in results if item["exit_code"] != 0]
+    print(f"\nAttention summary: {len(results) - len(failures)} passed, "
+          f"{len(failures)} failed")
+    if failures:
+        print("\nAGGREGATED FAILURES")
+        for item in failures:
+            print(f"\n[{item['name']}] exit={item['exit_code']} log={item['log']}")
+            print(Path(item["log"]).read_text(encoding="utf-8", errors="replace"))
+    print(f"Reports: {report_dir.resolve()}")
+    raise SystemExit(1 if failures else 0)
+
+if poc_case_index is not None:
+    try:
+        selected_index = int(poc_case_index)
+        work = [work[selected_index]]
+    except (ValueError, IndexError):
+        raise SystemExit(f"invalid XLITE_ATTENTION_CASE_INDEX={poc_case_index!r}")
+
+torch.npu.set_device(0)
+rt = Runtime(0, 3000)
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
@@ -276,3 +327,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             logging.error(f'{e}')
             logging.error(f'torch_npu: {output_standard}')
             logging.error(f'xlite: {output_xlite}')
+
+# Destroy the native runtime while Python/NPU modules are still alive.  This
+# avoids misleading NoneType callback noise during interpreter finalization.
+torch.npu.synchronize()
+del rt
