@@ -35,7 +35,9 @@ extern "C" __global__ __aicore__ void xlite_paged_decode_merge_310p(
         float sum = 0.0f;
         for (uint32_t p = 0; p < 4; ++p) {
             if (states[p * PartialFloats + 1] == 0) continue;
-            const float factor = scores[p];
+            // M200's intrinsic type checker rejects const-qualified scalars.
+            // Materialize a plain FP32 scalar, as in the online-softmax alpha path.
+            float factor = scores[p];
             sum += factor * states[p * PartialFloats + 1];
             vmuls(temp, states + p * PartialFloats + 8, factor, 2, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);

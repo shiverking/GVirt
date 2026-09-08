@@ -77,7 +77,10 @@ extern "C" __global__ __aicore__ void xlite_paged_decode_310p(
             vconv_f162f32(kv, kvHalf, tokens * 2, 1, 1, 8, 4);
             pipe_barrier(PIPE_V);
             for (uint32_t t = 0; t < tokens; ++t) {
-                vmuls(temp, kv + t * 128, scores[t], 2, 1, 1, 8, 8);
+                // M200 vmuls requires an unqualified scalar float, not a UB
+                // element expression. The preceding V->S event makes scores visible.
+                float weight = scores[t];
+                vmuls(temp, kv + t * 128, weight, 2, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
                 vadd(acc, acc, temp, 2, 1, 1, 1, 8, 8, 8);
                 pipe_barrier(PIPE_V);
