@@ -73,6 +73,11 @@ void XRuntime::Init(size_t sizeMB)
         if (_pool->Init()) {
             throw std::runtime_error("XRuntime: tensor pool initialization failed");
         }
+#ifdef XLITE_310P_LLM_FP16_POC
+        XTensor &reserve = GetTensor({XlitePaged310P::ReserveBytes}, INT8, DBG_LOC);
+        pagedScratch = reserve.ptr;
+        pagedMetadata = static_cast<uint8_t *>(reserve.ptr) + XlitePaged310P::ScratchBytes;
+#endif
     }
 
     _rankSize = _tpSize * _dpSize;
@@ -110,6 +115,8 @@ void XRuntime::Init(size_t sizeMB)
 #ifdef XLITE_310P_LLM_FP16_POC
     CHECK_ACL(aclrtCreateEventWithFlag(&_inputReadyEvent, ACL_EVENT_SYNC));
     CHECK_ACL(aclrtCreateEventWithFlag(&_outputReadyEvent, ACL_EVENT_SYNC));
+    CHECK_ACL(aclrtCreateEventWithFlag(&_metadataUploadedEvent, ACL_EVENT_SYNC));
+    CHECK_ACL(aclrtMallocHost(&_pagedPinnedHost, XlitePaged310P::MetadataBytes));
 #else
     CHECK_ACL(aclrtCreateEvent(&_event));
 #endif
@@ -220,6 +227,12 @@ XRuntime::~XRuntime(void)
     }
     if (_outputReadyEvent) {
         (void)aclrtDestroyEvent(_outputReadyEvent);
+    }
+    if (_metadataUploadedEvent) {
+        (void)aclrtDestroyEvent(_metadataUploadedEvent);
+    }
+    if (_pagedPinnedHost) {
+        (void)aclrtFreeHost(_pagedPinnedHost);
     }
     if (_causalMaskPinnedHost) {
         (void)aclrtFreeHost(_causalMaskPinnedHost);
@@ -521,6 +534,9 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
         _attnInitialized = true;
     }
+#ifdef XLITE_310P_LLM_FP16_POC
+    WaitMetadataUpload();
+#endif
     // Reset cross-layer topk state per step, first full layer repopulates it.
     if (indexTopK > 0) {
         _dsaTopkValid = false;
@@ -535,7 +551,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     uint32_t queryStart, blockId, id, k;
     size_t size;
 
-    if (batch == 0) {
+    if (batch == 0 || batch > maxBatch || attnMeta.cachedLens.size() != batch) {
         throw std::runtime_error(std::string(__func__) + ":" + std::to_string(__LINE__) +
                                  ": invalid batchSize: " + std::to_string(batch));
     }
@@ -674,7 +690,86 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                 ": invalid attnMeta version: " + std::to_string(attnMeta.version));
     }
+#ifdef XLITE_310P_LLM_FP16_POC
+    PreparePagedDecodeMetadata();
+#endif
 }
+
+void XRuntime::SetDecodeAttentionBackend(const std::string &backend)
+{
+    if (backend != "legacy" && backend != "paged_310p") {
+        throw std::invalid_argument("decode_attention_backend must be legacy or paged_310p");
+    }
+#ifndef XLITE_310P_LLM_FP16_POC
+    if (backend != "legacy") {
+        throw std::runtime_error("this build has no paged_310p backend");
+    }
+#endif
+    if (!_lensHost.empty() && backend != decodeAttentionBackend) {
+        throw std::runtime_error("select decode attention backend before preparing metadata");
+    }
+    decodeAttentionBackend = backend;
+}
+
+#ifdef XLITE_310P_LLM_FP16_POC
+void XRuntime::WaitMetadataUpload()
+{
+    if (_metadataUploadPending && !IsDummyRuntime()) {
+        CHECK_ACL(aclrtSynchronizeEvent(_metadataUploadedEvent));
+        CHECK_ACL(aclrtResetEvent(_metadataUploadedEvent, stream));
+        _metadataUploadPending = false;
+    }
+}
+
+void XRuntime::PreparePagedDecodeMetadata()
+{
+    using namespace XlitePaged310P;
+    if (IsDummyRuntime()) {
+        return;
+    }
+    WaitMetadataUpload();
+    pagedCount = 0;
+    if (decodeAttentionBackend == "paged_310p") {
+        if (_lensHost.size() > MaxBatch || _cachedLensHost.size() != _lensHost.size() ||
+            _maxNumBlocks > MaxBlocks || _maxNumBlocks == 0 ||
+            _blockTablesHost.size() != _lensHost.size() * _maxNumBlocks) {
+            throw std::runtime_error("paged_310p invalid host metadata dimensions");
+        }
+        if (pagedScratch == nullptr) {
+            throw std::runtime_error("paged_310p runtime pool has not been initialized");
+        }
+        auto *meta = static_cast<uint32_t *>(_pagedPinnedHost);
+        std::memset(meta, 0, MetadataBytes);
+        uint32_t row = 0, maxLength = 1;
+        for (uint32_t request = 0; request < _lensHost.size(); ++request) {
+            const uint64_t length = uint64_t(_lensHost[request]) + _cachedLensHost[request];
+            if (_lensHost[request] == 0 || length > 2048 ||
+                (length + 127) / 128 > _maxNumBlocks) {
+                throw std::runtime_error("paged_310p invalid KV length/block table");
+            }
+            std::memcpy(meta + TableOffset + request * MaxBlocks,
+                        _blockTablesHost.data() + request * _maxNumBlocks,
+                        _maxNumBlocks * sizeof(uint32_t));
+            if (_lensHost[request] == 1) {
+                meta[pagedCount * RecordWords] = request;
+                meta[pagedCount * RecordWords + 1] = row;
+                meta[pagedCount * RecordWords + 2] = static_cast<uint32_t>(length);
+                maxLength = std::max(maxLength, static_cast<uint32_t>(length));
+                ++pagedCount;
+            }
+            row += _lensHost[request];
+        }
+        pagedPartitions = maxLength > 512 ? 4 : 1;
+        pagedPartitionLength = ((maxLength + pagedPartitions * 128 - 1) /
+                                 (pagedPartitions * 128)) * 128;
+        CHECK_ACL(aclrtMemcpyAsync(pagedMetadata, MetadataBytes, meta, MetadataBytes,
+                                   ACL_MEMCPY_HOST_TO_DEVICE, stream));
+    }
+    // Also protects the ordinary lens/slot/position staging buffers.
+    CHECK_ACL(aclrtRecordEvent(_metadataUploadedEvent, stream));
+    _metadataUploadPending = true;
+}
+#endif
 
 void XRuntime::Synchronize(void)
 {

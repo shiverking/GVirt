@@ -192,6 +192,8 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_float16_t.cpp
     )
     set(KERNEL_FILES_F16_310P
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/paged_decode_310p.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/paged_decode_merge_310p.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/probe_310p.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/add_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/embed_kernel_float16_t.cpp

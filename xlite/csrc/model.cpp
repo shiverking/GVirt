@@ -2176,6 +2176,9 @@ size_t XModel::DummyRun()
 size_t XModel::GetTensorPoolSize(int dbg)
 {
     size_t size = DummyRun();
+#ifdef XLITE_310P_LLM_FP16_POC
+    size += XlitePaged310P::ReserveBytes;
+#endif
 
     if (_rankId == 0 && dbg) {
         XDebugStream s(_rankId, __func__);

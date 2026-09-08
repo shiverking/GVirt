@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include "base.h"
+#include "paged_decode_310p.h"
 
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
@@ -73,8 +74,17 @@ public:
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
+    void SetDecodeAttentionBackend(const std::string &backend);
+    std::string decodeAttentionBackend = "legacy";
+    uint64_t pagedDecodeRequests = 0, pagedDecodeLaunches = 0, pagedDecodeMergeLaunches = 0;
+    uint64_t legacyDecodeRequests = 0, decodeKvGatherBytes = 0;
 #ifdef XLITE_310P_LLM_FP16_POC
     const uint8_t *CausalMaskHost310P(void);
+    void PreparePagedDecodeMetadata();
+    void WaitMetadataUpload();
+    void *pagedMetadata = nullptr;
+    void *pagedScratch = nullptr;
+    uint32_t pagedCount = 0, pagedPartitions = 1, pagedPartitionLength = 128;
 #endif
     void MemcpyD2H(void *dst, void *src, size_t size);
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
@@ -176,6 +186,8 @@ public:
         _forcedSyncLaunches = 0;
         _forwardBoundarySynchronizations = 0;
         _lastAclnnWorkspace = nullptr;
+        pagedDecodeRequests = pagedDecodeLaunches = pagedDecodeMergeLaunches = 0;
+        legacyDecodeRequests = decodeKvGatherBytes = 0;
     }
 
     [[nodiscard]] virtual bool IsDummyRuntime() const
@@ -312,6 +324,9 @@ protected:
     aclrtEvent _inputReadyEvent = nullptr;
     aclrtEvent _outputReadyEvent = nullptr;
     void *_causalMaskPinnedHost = nullptr;
+    void *_pagedPinnedHost = nullptr;
+    aclrtEvent _metadataUploadedEvent = nullptr;
+    bool _metadataUploadPending = false;
 #endif
     aclrtContext context = nullptr;
     bool _initOutside = false;
