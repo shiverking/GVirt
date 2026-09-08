@@ -99,6 +99,7 @@ def main() -> int:
         parser.error("--async-stress-iters must be non-negative")
     if args.async_stress_iters:
         os.environ["XLITE_310P_STRESS_WORKSPACE_REUSE"] = "1"
+        os.environ["XLITE_310P_ASYNC_MATMUL"] = "1"
     if args.shape:
         run_shape(*args.shape, async_stress_iters=args.async_stress_iters)
         return 0

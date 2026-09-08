@@ -30,18 +30,18 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     defaultMatmulSwizzle = 0;
     disableSwizzleTable = true;
     _forceSyncAclnn = isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ACLNN"));
+    // The physical 310P/CANN 9.1 run proved that heterogeneous ACLNN MatMul
+    // launches cannot currently be consumed safely by following kernels
+    // without a per-MatMul completion point. Correctness is the default;
+    // explicitly opt into the known-unsafe path only for diagnosis.
     _forceSyncMatmul =
-        isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_MATMUL"));
+        !isEnvironmentVariableTrue(std::getenv("XLITE_310P_ASYNC_MATMUL"));
     _forceSyncAttention =
         isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ATTENTION"));
     _stressWorkspaceReuse =
         isEnvironmentVariableTrue(std::getenv("XLITE_310P_STRESS_WORKSPACE_REUSE"));
-    // CANN 9.1 on 310P corrupts heterogeneous ACLNN MatMul chains when their
-    // temporary resources are recycled across an entirely asynchronous model
-    // forward.  Serialize only the public forward hand-off, rather than every
-    // MatMul launch.  Keep full async available as an explicit diagnostic.
     _syncForwardBoundary =
-        !isEnvironmentVariableTrue(std::getenv("XLITE_310P_ASYNC_FORWARD"));
+        isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_FORWARD"));
 #endif
     if (sizeMB != 0) {
         Init(sizeMB);

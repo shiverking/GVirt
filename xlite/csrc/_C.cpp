@@ -2186,7 +2186,7 @@ PYBIND11_MODULE(_C, m)
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
-        info["aclnn_execution"] = "async_ops_forward_boundary_sync";
+        info["aclnn_execution"] = "sync_matmul_correctness_fallback";
         info["cross_stream_handoff"] = "split_acl_event_sync";
 #else
         info["abi"] = 0;

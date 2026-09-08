@@ -47,19 +47,21 @@ ACLNN attention backend therefore performs no per-layer metadata D2H copy.
 Online forward paths exchange ownership with the PyTorch current stream through
 two dedicated `ACL_EVENT_SYNC` events: one for PyTorch-to-Xlite input readiness
 and one for Xlite-to-PyTorch output readiness. The events are not reused in
-opposite directions. CANN 9.1 on 310P did not preserve correctness when a full
-heterogeneous ACLNN MatMul chain was submitted without any synchronization,
-even though same-shape MatMul stress tests passed. The correctness default now
-synchronizes once at each public Decoder/LM Head output hand-off instead of once
-per ACLNN launch. Set `XLITE_310P_ASYNC_FORWARD=1` only to reproduce or profile
-the unsafe fully asynchronous path. Standalone operator tests keep an optional
-final synchronization so that Python can safely inspect their output.
+opposite directions. CANN 9.1 on the physical 310P did not preserve correctness
+when a heterogeneous ACLNN MatMul chain was consumed asynchronously by later
+kernels, even though same-shape MatMul stress tests passed. Synchronizing only
+at the public forward boundary also failed because intermediate results had
+already been consumed. The correctness default therefore synchronizes each
+ACLNN MatMul. Set `XLITE_310P_ASYNC_MATMUL=1` only to reproduce or profile the
+known-unsafe path. `XLITE_310P_FORCE_SYNC_FORWARD=1` remains a diagnostic switch
+but is not enabled by default.
 
 Runtime counters are available through `Runtime.get_stats()` and through the
 vLLM-Ascend Xlite runtime statistics. A normal online decoder run must report
-zero for `attention_metadata_d2h_bytes` and `forced_sync_launches`.
-`forward_boundary_synchronizations` reports the bounded correctness fallback;
-it must be dramatically smaller than `aclnn_launches`.
+`attention_metadata_d2h_bytes` must remain zero. `forced_sync_launches` records
+the MatMul correctness fallback and is expected to be nonzero until the ACLNN
+MatMul backend is replaced by a safely reusable executor or a native 310P Cube
+kernel. `forward_boundary_synchronizations` is zero in the default path.
 
 `op.cpp` currently exposes all launch stubs through one shared host ABI. The
 POC therefore retains those stubs in the build even though only the FP16 dense
