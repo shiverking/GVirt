@@ -2186,7 +2186,7 @@ PYBIND11_MODULE(_C, m)
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
-        info["aclnn_execution"] = "async_single_stream";
+        info["aclnn_execution"] = "async_ops_forward_boundary_sync";
         info["cross_stream_handoff"] = "split_acl_event_sync";
 #else
         info["abi"] = 0;
@@ -2216,9 +2216,12 @@ PYBIND11_MODULE(_C, m)
             stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
             stats["workspace_reuses"] = rt.WorkspaceReuses();
             stats["forced_sync_launches"] = rt.ForcedSyncLaunches();
+            stats["forward_boundary_synchronizations"] =
+                rt.ForwardBoundarySynchronizations();
             stats["force_sync_aclnn"] = rt.ForceSyncAclnn();
             stats["force_sync_matmul"] = rt.ForceSyncMatmul();
             stats["force_sync_attention"] = rt.ForceSyncAttention();
+            stats["sync_forward_boundary"] = rt.SyncForwardBoundary();
             return stats;
         })
         .def("reset_stats", &XRuntime::ResetRuntimeStats)

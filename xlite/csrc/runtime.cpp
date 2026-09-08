@@ -36,6 +36,12 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
         isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ATTENTION"));
     _stressWorkspaceReuse =
         isEnvironmentVariableTrue(std::getenv("XLITE_310P_STRESS_WORKSPACE_REUSE"));
+    // CANN 9.1 on 310P corrupts heterogeneous ACLNN MatMul chains when their
+    // temporary resources are recycled across an entirely asynchronous model
+    // forward.  Serialize only the public forward hand-off, rather than every
+    // MatMul launch.  Keep full async available as an explicit diagnostic.
+    _syncForwardBoundary =
+        !isEnvironmentVariableTrue(std::getenv("XLITE_310P_ASYNC_FORWARD"));
 #endif
     if (sizeMB != 0) {
         Init(sizeMB);
@@ -686,6 +692,10 @@ void XRuntime::EventWaitCurrStream(aclrtStream currStream)
 void XRuntime::EventRecordCurrStream(aclrtStream currStream)
 {
 #ifdef XLITE_310P_LLM_FP16_POC
+    if (_syncForwardBoundary) {
+        _forwardBoundarySynchronizations++;
+        Synchronize();
+    }
     CHECK_ACL(aclrtRecordEvent(_outputReadyEvent, stream));
     CHECK_ACL(aclrtStreamWaitEvent(currStream, _outputReadyEvent));
     CHECK_ACL(aclrtResetEvent(_outputReadyEvent, currStream));

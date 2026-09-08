@@ -47,13 +47,19 @@ ACLNN attention backend therefore performs no per-layer metadata D2H copy.
 Online forward paths exchange ownership with the PyTorch current stream through
 two dedicated `ACL_EVENT_SYNC` events: one for PyTorch-to-Xlite input readiness
 and one for Xlite-to-PyTorch output readiness. The events are not reused in
-opposite directions. Standalone operator tests keep an optional final
-synchronization so that Python can safely inspect their output.
+opposite directions. CANN 9.1 on 310P did not preserve correctness when a full
+heterogeneous ACLNN MatMul chain was submitted without any synchronization,
+even though same-shape MatMul stress tests passed. The correctness default now
+synchronizes once at each public Decoder/LM Head output hand-off instead of once
+per ACLNN launch. Set `XLITE_310P_ASYNC_FORWARD=1` only to reproduce or profile
+the unsafe fully asynchronous path. Standalone operator tests keep an optional
+final synchronization so that Python can safely inspect their output.
 
 Runtime counters are available through `Runtime.get_stats()` and through the
 vLLM-Ascend Xlite runtime statistics. A normal online decoder run must report
-zero for `attention_metadata_d2h_bytes`, `forced_sync_launches`, and internal
-`stream_synchronizations`.
+zero for `attention_metadata_d2h_bytes` and `forced_sync_launches`.
+`forward_boundary_synchronizations` reports the bounded correctness fallback;
+it must be dramatically smaller than `aclnn_launches`.
 
 `op.cpp` currently exposes all launch stubs through one shared host ABI. The
 POC therefore retains those stubs in the build even though only the FP16 dense

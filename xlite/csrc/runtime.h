@@ -121,6 +121,10 @@ public:
     {
         return _stressWorkspaceReuse;
     }
+    [[nodiscard]] bool SyncForwardBoundary(void) const
+    {
+        return _syncForwardBoundary;
+    }
     void RecordAclnnLaunch(void)
     {
         _aclnnLaunches++;
@@ -156,6 +160,10 @@ public:
     {
         return _forcedSyncLaunches;
     }
+    [[nodiscard]] uint64_t ForwardBoundarySynchronizations(void) const
+    {
+        return _forwardBoundarySynchronizations;
+    }
     void ResetRuntimeStats(void)
     {
         _aclnnLaunches = 0;
@@ -163,6 +171,7 @@ public:
         _attentionMetadataD2HBytes = 0;
         _workspaceReuses = 0;
         _forcedSyncLaunches = 0;
+        _forwardBoundarySynchronizations = 0;
         _lastAclnnWorkspace = nullptr;
     }
 
@@ -308,11 +317,13 @@ protected:
     bool _forceSyncMatmul = false;
     bool _forceSyncAttention = false;
     bool _stressWorkspaceReuse = false;
+    bool _syncForwardBoundary = false;
     uint64_t _aclnnLaunches = 0;
     uint64_t _streamSynchronizations = 0;
     uint64_t _attentionMetadataD2HBytes = 0;
     uint64_t _workspaceReuses = 0;
     uint64_t _forcedSyncLaunches = 0;
+    uint64_t _forwardBoundarySynchronizations = 0;
     void *_lastAclnnWorkspace = nullptr;
     XTensorPool *_pool = nullptr;
     uint32_t _rankId;
