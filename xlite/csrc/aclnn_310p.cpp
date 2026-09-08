@@ -381,19 +381,21 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         if (!isDecode) {
             const size_t maskElements =
                 static_cast<size_t>(queryTensorLength) * kvTensorLength;
-            std::vector<uint8_t> hostMask(maskElements, 1);
-            for (uint32_t row = 0; row < queryLength; ++row) {
-                const uint32_t visibleKeys = cachedLength + row + 1;
-                for (uint32_t col = 0; col < visibleKeys; ++col) {
-                    hostMask[static_cast<size_t>(row) * kvTensorLength + col] = 0;
-                }
-            }
-            for (uint32_t row = queryLength; row < queryTensorLength; ++row) {
-                hostMask[static_cast<size_t>(row) * kvTensorLength] = 0;
-            }
             XTensor &causalMask =
                 rt.GetTensor({queryTensorLength, kvTensorLength}, INT8, DBG_LOC);
-            rt.MemcpyH2D(causalMask.ptr, hostMask.data(), maskElements);
+            // This pool address may still be workspace for an earlier queued
+            // MatMul. A synchronous aclrtMemcpy has no rt.stream dependency
+            // and can overwrite that live workspace. Order EVERY write on
+            // rt.stream, with an immutable pinned source that outlives DMA.
+            // Padded query rows are discarded; leave them unmasked to avoid
+            // all-masked softmax rows. Real rows use col <= cachedLength + row.
+            CHECK_ACL(aclrtMemsetAsync(causalMask.ptr, maskElements, 0,
+                                       maskElements, rt.stream));
+            const uint8_t *hostMask = rt.CausalMaskHost310P() +
+                static_cast<size_t>(cachedLength) * XLITE_310P_MAX_SEQ_LEN;
+            CHECK_ACL(aclrtMemcpy2dAsync(
+                causalMask.ptr, kvTensorLength, hostMask, XLITE_310P_MAX_SEQ_LEN,
+                kvTensorLength, queryLength, ACL_MEMCPY_HOST_TO_DEVICE, rt.stream));
             const std::vector<int64_t> maskDims{queryTensorLength, kvTensorLength};
             AclTensorGuard aclMask(CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL,
                                                 causalMask.ptr));

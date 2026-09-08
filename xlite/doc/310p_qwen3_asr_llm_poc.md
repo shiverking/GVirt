@@ -31,14 +31,14 @@ MatMul and attention keep the Xlite ABI but execute through ACLNN. ACLNN
 workspace is borrowed from `XTensorPool`. On 310P, ACLNN work is submitted
 asynchronously to the single Xlite runtime stream and the workspace is returned
 to the pool immediately. Reuse is safe because every later use of that device
-address is ordered on the same stream. Set `XLITE_310P_FORCE_SYNC_ACLNN=1` only
-when diagnosing precision errors or device faults; performance runs must leave
-it unset.
+address is ordered on the same stream. MatMul currently retains the validated
+synchronization fallback by default; select `XLITE_310P_ASYNC_MATMUL=1` to
+exercise asynchronous MatMul after the mask upload ordering fix below.
 
 For asynchronous-lifetime diagnosis, synchronization can be restricted to one
 operator family with `XLITE_310P_FORCE_SYNC_MATMUL=1` or
 `XLITE_310P_FORCE_SYNC_ATTENTION=1`. The global switch takes precedence. These
-switches are diagnostic only and must also be unset in performance runs.
+Explicit force-sync switches override the asynchronous MatMul selection.
 
 Attention metadata is retained on the host and reused by all decoder layers.
 `PrepareAttn()` copies lens, cached lens, query starts, block tables, slot
@@ -47,21 +47,29 @@ ACLNN attention backend therefore performs no per-layer metadata D2H copy.
 Online forward paths exchange ownership with the PyTorch current stream through
 two dedicated `ACL_EVENT_SYNC` events: one for PyTorch-to-Xlite input readiness
 and one for Xlite-to-PyTorch output readiness. The events are not reused in
-opposite directions. CANN 9.1 on the physical 310P did not preserve correctness
-when a heterogeneous ACLNN MatMul chain was consumed asynchronously by later
-kernels, even though same-shape MatMul stress tests passed. Synchronizing only
-at the public forward boundary also failed because intermediate results had
-already been consumed. The correctness default therefore synchronizes each
-ACLNN MatMul. Set `XLITE_310P_ASYNC_MATMUL=1` only to reproduce or profile the
-known-unsafe path. `XLITE_310P_FORCE_SYNC_FORWARD=1` remains a diagnostic switch
-but is not enabled by default.
+opposite directions. The original async model failed on physical 310P, and
+forward-boundary synchronization did not help. Source inspection found an
+unordered write in Prefill Attention: `MemcpyH2D` used synchronous
+`aclrtMemcpy` to upload a mask into TensorPool storage that an earlier queued
+MatMul could still be using as workspace. A synchronous host API return does
+not place that write after work on the Xlite stream. Per-MatMul synchronization
+masked this hazard; the observations do not establish a CANN MatMul defect.
+
+Mask upload now uses `aclrtMemcpy2dAsync` on `rt.stream` from a runtime-owned,
+immutable 2048-by-2048 pinned causal template (4 MiB host memory). A row offset
+of `cachedLength` implements chunked prefill. Padded query rows are unmasked
+and discarded. All writes to the pooled mask are stream ordered, and the host
+template is freed only after the destructor drains the stream. This avoids
+both per-layer host allocation and mutation of host buffers referenced by DMA.
+The validated MatMul synchronization fallback remains the default until the
+fixed async model passes hardware acceptance. `XLITE_310P_FORCE_SYNC_FORWARD=1`
+is optional and disabled by default.
 
 Runtime counters are available through `Runtime.get_stats()` and through the
-vLLM-Ascend Xlite runtime statistics. A normal online decoder run must report
-`attention_metadata_d2h_bytes` must remain zero. `forced_sync_launches` records
-the MatMul correctness fallback and is expected to be nonzero until the ACLNN
-MatMul backend is replaced by a safely reusable executor or a native 310P Cube
-kernel. `forward_boundary_synchronizations` is zero in the default path.
+vLLM-Ascend Xlite runtime statistics. `attention_metadata_d2h_bytes` must remain
+zero. `forced_sync_launches` records the MatMul correctness fallback; when
+async MatMul is explicitly selected and no force flags are set, it is zero.
+`forward_boundary_synchronizations` is zero in the default path.
 
 `op.cpp` currently exposes all launch stubs through one shared host ABI. The
 POC therefore retains those stubs in the build even though only the FP16 dense

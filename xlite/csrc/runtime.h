@@ -73,6 +73,9 @@ public:
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
+#ifdef XLITE_310P_LLM_FP16_POC
+    const uint8_t *CausalMaskHost310P(void);
+#endif
     void MemcpyD2H(void *dst, void *src, size_t size);
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
@@ -308,6 +311,7 @@ protected:
     // before the preceding ACLNN MatMul work is complete.
     aclrtEvent _inputReadyEvent = nullptr;
     aclrtEvent _outputReadyEvent = nullptr;
+    void *_causalMaskPinnedHost = nullptr;
 #endif
     aclrtContext context = nullptr;
     bool _initOutside = false;

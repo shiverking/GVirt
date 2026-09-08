@@ -11,6 +11,9 @@
 #include "sock.h"
 #include "ccl.h"
 #include "auto_tuner.h"
+#ifdef XLITE_310P_LLM_FP16_POC
+#include "aclnn_310p.h"
+#endif
 
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
@@ -30,11 +33,11 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     defaultMatmulSwizzle = 0;
     disableSwizzleTable = true;
     _forceSyncAclnn = isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ACLNN"));
-    // The physical 310P/CANN 9.1 run proved that heterogeneous ACLNN MatMul
-    // launches cannot currently be consumed safely by following kernels
-    // without a per-MatMul completion point. Correctness is the default;
-    // explicitly opt into the known-unsafe path only for diagnosis.
+    // Keep the validated fallback unless async is explicitly selected. The
+    // mask upload ordering fix must pass an end-to-end hardware acceptance
+    // before changing this default; the failure did not establish a CANN bug.
     _forceSyncMatmul =
+        isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_MATMUL")) ||
         !isEnvironmentVariableTrue(std::getenv("XLITE_310P_ASYNC_MATMUL"));
     _forceSyncAttention =
         isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ATTENTION"));
@@ -217,6 +220,9 @@ XRuntime::~XRuntime(void)
     }
     if (_outputReadyEvent) {
         (void)aclrtDestroyEvent(_outputReadyEvent);
+    }
+    if (_causalMaskPinnedHost) {
+        (void)aclrtFreeHost(_causalMaskPinnedHost);
     }
 #endif
     if (notify) {
@@ -873,6 +879,25 @@ void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)
 {
     CHECK_ACL(aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_HOST_TO_DEVICE));
 }
+
+#ifdef XLITE_310P_LLM_FP16_POC
+const uint8_t *XRuntime::CausalMaskHost310P(void)
+{
+    // Immutable for the runtime lifetime: queued H2D copies from any layer or
+    // request can safely reference this storage until the stream is drained
+    // by the destructor. No per-layer host allocation or staging overwrite.
+    constexpr size_t side = XLITE_310P_MAX_SEQ_LEN;
+    if (_causalMaskPinnedHost == nullptr) {
+        CHECK_ACL(aclrtMallocHost(&_causalMaskPinnedHost, side * side));
+        auto *mask = static_cast<uint8_t *>(_causalMaskPinnedHost);
+        std::memset(mask, 1, side * side);
+        for (size_t row = 0; row < side; ++row) {
+            std::memset(mask + row * side, 0, row + 1);
+        }
+    }
+    return static_cast<const uint8_t *>(_causalMaskPinnedHost);
+}
+#endif
 
 void XRuntime::MemcpyD2H(void *dst, void *src, size_t size)
 {

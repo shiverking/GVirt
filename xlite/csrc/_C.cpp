@@ -2188,6 +2188,7 @@ PYBIND11_MODULE(_C, m)
         info["attention_backend"] = "aclnn_per_request";
         info["aclnn_execution"] = "sync_matmul_correctness_fallback";
         info["cross_stream_handoff"] = "split_acl_event_sync";
+        info["attention_mask_upload"] = "immutable_pinned_stream_ordered";
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";
