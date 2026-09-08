@@ -459,6 +459,12 @@ target_compile_definitions(_C PRIVATE
     XLITE_BUILD_SOC="${SOC_VERSION}"
     XLITE_BUILD_KERNEL_SET="${XLITE_KERNEL_SET}"
 )
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    target_compile_definitions(_C PRIVATE
+        XLITE_ARCH_310P=1
+        XLITE_310P_LLM_FP16_POC=1
+    )
+endif()
 
 target_compile_options(_C PRIVATE
     -std=c++17 -O3 -Wall -Werror -fPIC
