@@ -348,7 +348,23 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 cosine = torch.nn.functional.cosine_similarity(
                     output_standard.float().flatten(), output_xlite.float().flatten(), dim=0)
                 if float(cosine.cpu()) < 0.999:
-                    raise AssertionError(f"attention cosine similarity {float(cosine.cpu())} < 0.999")
+                    per_request_cosine = []
+                    request_offset = 0
+                    for request_index, request_len in enumerate(query_len_list):
+                        request_slice = slice(request_offset, request_offset + request_len)
+                        request_cosine = torch.nn.functional.cosine_similarity(
+                            output_standard[request_slice].float().flatten(),
+                            output_xlite[request_slice].float().flatten(),
+                            dim=0,
+                        )
+                        per_request_cosine.append(
+                            f"request{request_index}={float(request_cosine.cpu()):.6f}"
+                        )
+                        request_offset += request_len
+                    raise AssertionError(
+                        f"attention cosine similarity {float(cosine.cpu())} < 0.999; "
+                        + ", ".join(per_request_cosine)
+                    )
                 torch.testing.assert_close(output_standard, output_xlite, atol=1e-2, rtol=1e-2)
             else:
                 torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)

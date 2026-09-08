@@ -375,9 +375,13 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
             const std::vector<int64_t> maskDims{queryTensorLength, kvTensorLength};
             AclTensorGuard aclMask(CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL,
                                                 causalMask.ptr));
+            // The explicit mask already encodes the cached-token offset:
+            // row i may attend through cachedLength + i. nextTokens=0 would
+            // additionally apply PromptFA's unshifted causal window after Q
+            // is padded to the KV bucket, incorrectly hiding cached keys.
             CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
                 aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(), nullptr,
-                nHeads, scale, 2147483647, 0, const_cast<char *>("BSND"), nKvHeads,
+                nHeads, scale, 2147483647, 2147483647, const_cast<char *>("BSND"), nKvHeads,
                 aclOut.get(), &workspaceSize, &executor));
             workspace = GetWorkspace(rt, workspaceSize);
             CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
