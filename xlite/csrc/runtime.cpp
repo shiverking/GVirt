@@ -98,7 +98,12 @@ void XRuntime::Init(size_t sizeMB)
     originAicNum = aicNum;
     originAivNum = aivNum;
 
+#ifdef XLITE_310P_LLM_FP16_POC
+    CHECK_ACL(aclrtCreateEventWithFlag(&_inputReadyEvent, ACL_EVENT_SYNC));
+    CHECK_ACL(aclrtCreateEventWithFlag(&_outputReadyEvent, ACL_EVENT_SYNC));
+#else
     CHECK_ACL(aclrtCreateEvent(&_event));
+#endif
     CHECK_ACL(aclrtCreateNotify(&notify, 0));
     CHECK_ACL(aclrtGetCurrentContext(&context));
 
@@ -200,6 +205,14 @@ XRuntime::~XRuntime(void)
     if (_event) {
         (void)aclrtDestroyEvent(_event);
     }
+#ifdef XLITE_310P_LLM_FP16_POC
+    if (_inputReadyEvent) {
+        (void)aclrtDestroyEvent(_inputReadyEvent);
+    }
+    if (_outputReadyEvent) {
+        (void)aclrtDestroyEvent(_outputReadyEvent);
+    }
+#endif
     if (notify) {
         (void)aclrtDestroyNotify(notify);
     }
@@ -659,16 +672,28 @@ void XRuntime::Synchronize(void)
 
 void XRuntime::EventWaitCurrStream(aclrtStream currStream)
 {
+#ifdef XLITE_310P_LLM_FP16_POC
+    CHECK_ACL(aclrtRecordEvent(_inputReadyEvent, currStream));
+    CHECK_ACL(aclrtStreamWaitEvent(stream, _inputReadyEvent));
+    CHECK_ACL(aclrtResetEvent(_inputReadyEvent, stream));
+#else
     CHECK_ACL(aclrtRecordEvent(_event, currStream));
     CHECK_ACL(aclrtStreamWaitEvent(stream, _event));
     CHECK_ACL(aclrtResetEvent(_event, stream));
+#endif
 }
 
 void XRuntime::EventRecordCurrStream(aclrtStream currStream)
 {
+#ifdef XLITE_310P_LLM_FP16_POC
+    CHECK_ACL(aclrtRecordEvent(_outputReadyEvent, stream));
+    CHECK_ACL(aclrtStreamWaitEvent(currStream, _outputReadyEvent));
+    CHECK_ACL(aclrtResetEvent(_outputReadyEvent, currStream));
+#else
     CHECK_ACL(aclrtRecordEvent(_event, stream));
     CHECK_ACL(aclrtStreamWaitEvent(currStream, _event));
     CHECK_ACL(aclrtResetEvent(_event, currStream));
+#endif
 }
 
 static inline HcclComm HcclCommFor(XRuntime &rt, enum commType type)

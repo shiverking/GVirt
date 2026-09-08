@@ -45,8 +45,10 @@ Attention metadata is retained on the host and reused by all decoder layers.
 mapping, and version-0 positions from page-locked staging buffers. The 310P
 ACLNN attention backend therefore performs no per-layer metadata D2H copy.
 Online forward paths exchange ownership with the PyTorch current stream through
-events. Standalone operator tests keep an optional final synchronization so
-that Python can safely inspect their output.
+two dedicated `ACL_EVENT_SYNC` events: one for PyTorch-to-Xlite input readiness
+and one for Xlite-to-PyTorch output readiness. The events are not reused in
+opposite directions. Standalone operator tests keep an optional final
+synchronization so that Python can safely inspect their output.
 
 Runtime counters are available through `Runtime.get_stats()` and through the
 vLLM-Ascend Xlite runtime statistics. A normal online decoder run must report

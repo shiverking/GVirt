@@ -293,6 +293,13 @@ protected:
     void FiniXcclComm(void);
     uint32_t _devid;
     aclrtEvent _event = nullptr;
+#ifdef XLITE_310P_LLM_FP16_POC
+    // Keep the two cross-stream directions independent. Reusing one event for
+    // alternating record/wait/reset chains can release the PyTorch consumer
+    // before the preceding ACLNN MatMul work is complete.
+    aclrtEvent _inputReadyEvent = nullptr;
+    aclrtEvent _outputReadyEvent = nullptr;
+#endif
     aclrtContext context = nullptr;
     bool _initOutside = false;
     bool _inited = false;
