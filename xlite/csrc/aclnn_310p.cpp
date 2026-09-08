@@ -290,10 +290,14 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         XTensor &query = ExtractQuery(rt, qkv, queryOffset, queryLength,
                                       nHeads, nKvHeads, headDim);
 
-        const uint32_t queryTensorLength =
-            isDecode ? queryLength : ROUND_UP(queryLength, blockSize);
         const uint32_t kvTensorLength =
             isDecode ? totalLength : ROUND_UP(totalLength, blockSize);
+        // CANN 9.1 PromptFlashAttention on 310P rejects the GQA chunked-
+        // prefill tiling when padded S1 and S2 differ (561103). Pad Q to the
+        // total-KV bucket as well. The mask retains chunk semantics and only
+        // the real query rows are copied back, so cached tokens do not create
+        // synthetic query outputs.
+        const uint32_t queryTensorLength = isDecode ? queryLength : kvTensorLength;
         XTensor *paddedQuery = nullptr;
         XTensor *paddedOutput = nullptr;
         void *queryData = query.ptr;
