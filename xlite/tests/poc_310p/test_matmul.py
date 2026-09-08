@@ -22,7 +22,7 @@ PROJECTIONS = (
 M_VALUES = (1, 8, 127, 128, 129)
 
 
-def run_shape(m: int, n: int, k: int) -> None:
+def run_shape(m: int, n: int, k: int, async_stress_iters: int = 0) -> None:
     import torch
     import torch_npu  # noqa: F401: register the NPU backend
     import torch.nn.functional as F
@@ -41,8 +41,11 @@ def run_shape(m: int, n: int, k: int) -> None:
     # Xlite owns a separate ACL stream: complete producers, including the
     # sentinel fill, before calling the native binding.
     torch.npu.synchronize()
+    runtime.reset_stats()
+    iterations = async_stress_iters or 1
     started = time.perf_counter()
-    matmul(runtime, x, weight, output, False, False)
+    for _ in range(iterations):
+        matmul(runtime, x, weight, output, False, False)
     torch.npu.synchronize()
     elapsed_ms = (time.perf_counter() - started) * 1000
 
@@ -58,12 +61,22 @@ def run_shape(m: int, n: int, k: int) -> None:
         "m": m, "n": n, "k": k,
         "max_abs_error": (actual - expected).abs().max().item(),
         "cosine": cosine,
-        "cold_call_ms": elapsed_ms,
+        "cold_call_ms": elapsed_ms if iterations == 1 else None,
+        "async_stress_iters": iterations,
+        "runtime_stats": runtime.get_stats(),
         "torch_peak_allocated_bytes": torch.npu.max_memory_allocated(),
         "memory_note": "Torch allocator only; excludes native Xlite TensorPool",
     }), flush=True)
     # Compare on CPU to avoid the device-side isclose double-tolerance warning.
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    if async_stress_iters:
+        stats = runtime.get_stats()
+        if stats["aclnn_launches"] != async_stress_iters:
+            raise AssertionError(f"unexpected async MatMul launch count: {stats}")
+        if stats["stream_synchronizations"] != 0:
+            raise AssertionError(f"async MatMul synchronized its runtime stream: {stats}")
+        if async_stress_iters > 1 and stats["workspace_reuses"] == 0:
+            raise AssertionError(f"async MatMul did not reuse ACLNN workspace: {stats}")
 
 
 def main() -> int:
@@ -79,9 +92,19 @@ def main() -> int:
         help="Run only failures recorded in REPORT_DIR/summary.json")
     parser.add_argument("--shape", type=int, nargs=3, metavar=("M", "N", "K"),
                         help=argparse.SUPPRESS)
+    parser.add_argument("--async-stress-iters", type=int, default=0,
+                        help="Queue repeated MatMuls and synchronize only once at the end")
     args = parser.parse_args()
+    if args.async_stress_iters < 0:
+        parser.error("--async-stress-iters must be non-negative")
+    if args.async_stress_iters:
+        os.environ["XLITE_310P_STRESS_WORKSPACE_REUSE"] = "1"
     if args.shape:
-        run_shape(*args.shape)
+        run_shape(*args.shape, async_stress_iters=args.async_stress_iters)
+        return 0
+    if args.async_stress_iters:
+        # A real decode projection shape keeps the 1000-call check practical.
+        run_shape(20, 2048, 2048, async_stress_iters=args.async_stress_iters)
         return 0
     cases = [(f"{name}-m{m}", m, n, k)
              for name, n, k in PROJECTIONS for m in M_VALUES]

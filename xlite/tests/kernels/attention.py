@@ -96,12 +96,20 @@ def case_name(batch: int, cached_lens: list[int], query_lens: list[int]) -> str:
 parser = argparse.ArgumentParser(description="Xlite attention correctness test")
 parser.add_argument("--rerun-failed", action="store_true",
                     help="310P FP16: rerun failures from attention_310p_report/summary.json")
+parser.add_argument("--async-stress-iters", type=int, default=0,
+                    help="310P FP16: queue this many calls before one final synchronization")
 test_args = parser.parse_args()
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
 if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
     report_dir = Path("attention_310p_report")
     report_dir.mkdir(parents=True, exist_ok=True)
     selected_indices = list(range(len(work)))
+    if test_args.async_stress_iters:
+        if test_args.async_stress_iters <= 0:
+            parser.error("--async-stress-iters must be positive")
+        # One ordinary decode and one batch-20 decode exercise workspace reuse
+        # without turning the stress check into the full correctness sweep.
+        selected_indices = [6, 13]
     if test_args.rerun_failed:
         summary_path = report_dir / "summary.json"
         if not summary_path.is_file():
@@ -127,6 +135,9 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
         print(f"[ RUN      ] {current_case_name}", flush=True)
         log_path = report_dir / f"{current_case_name}.log"
         env = dict(os.environ, XLITE_ATTENTION_CASE_INDEX=str(index))
+        if test_args.async_stress_iters:
+            env["XLITE_ATTENTION_ASYNC_STRESS_ITERS"] = str(test_args.async_stress_iters)
+            env["XLITE_310P_STRESS_WORKSPACE_REUSE"] = "1"
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 result = subprocess.run(
@@ -324,10 +335,30 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 v_cache_xlite[cache_block_idx, :current_seq_len] = full_v[:, seq_start:seq_end]
 
         torch.npu.synchronize()
-        attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
-                  output_xlite, query_start_loc, query_lens, cached_lens,
-                  block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, max_num_blocks, enable_flash)
+        if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+            rt.set_host_attention_metadata(
+                query_len_list, cached_lens_list,
+                block_tables_array.reshape(-1).tolist(), max_num_blocks)
+        stress_iterations = int(os.getenv("XLITE_ATTENTION_ASYNC_STRESS_ITERS", "1"))
+        rt.reset_stats()
+        for _ in range(stress_iterations):
+            attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
+                      output_xlite, query_start_loc, query_lens, cached_lens,
+                      block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE,
+                      batch, max_num_blocks, enable_flash,
+                      synchronize=stress_iterations == 1)
         torch.npu.synchronize()
+        if stress_iterations > 1:
+            stats = rt.get_stats()
+            if stats["stream_synchronizations"] != 0:
+                raise AssertionError(f"async attention synchronized its runtime stream: {stats}")
+            if stats["aclnn_launches"] != stress_iterations * batch:
+                raise AssertionError(f"unexpected async attention launch count: {stats}")
+            if stats["attention_metadata_d2h_bytes"] != 0:
+                raise AssertionError(f"async attention copied metadata D2H: {stats}")
+            if stats["workspace_reuses"] == 0:
+                raise AssertionError(f"async attention did not reuse ACLNN workspace: {stats}")
+            print(f"async_attention_stats={stats}", flush=True)
         if torch.isnan(output_xlite).any():
             raise AssertionError("attention output still contains the no-op sentinel")
 

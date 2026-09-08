@@ -138,8 +138,8 @@ python tests/kernels/attention.py --async-stress-iters 1000
 
 XLITE_310P_FORCE_SYNC_ACLNN=1 \
   python tests/poc_310p/test_matmul.py --shape 20 2048 2048
-XLITE_310P_FORCE_SYNC_ACLNN=1 \
-  python tests/kernels/attention.py --rerun-failed
+XLITE_310P_FORCE_SYNC_ACLNN=1 XLITE_ATTENTION_CASE_INDEX=6 \
+  python tests/kernels/attention.py
 ```
 
 The two stress options set the test-only
