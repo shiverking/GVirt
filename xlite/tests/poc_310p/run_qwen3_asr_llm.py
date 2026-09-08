@@ -81,6 +81,8 @@ def _load_tensor_file(path: Path) -> torch.Tensor:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--matmul-optimization", choices=("legacy", "p3_aclnn"), default="legacy")
+    parser.add_argument("--matmul-policy", type=Path)
     parser.add_argument("--decode-attention-backend", choices=("legacy", "paged_310p"), default="legacy")
     parser.add_argument("--prompt", default="Transcribe the supplied audio embedding.")
     parser.add_argument("--input-mode", choices=("tokens", "synthetic", "file"), default="tokens")
@@ -120,6 +122,9 @@ def main() -> int:
         model = Llama(model_args)
     model.load_weights(args.checkpoint)
     model.xlite_rt.set_decode_attention_backend(args.decode_attention_backend)
+    from xlite.p3 import configure
+    matmul_policy = configure(model.xlite_rt, args.matmul_optimization, args.matmul_policy)
+    print(f"MatMul policy: {matmul_policy}", flush=True)
 
     non_fp16_parameters = [name for name, value in model.named_parameters()
                            if value.dtype != torch.float16]
@@ -243,6 +248,7 @@ def main() -> int:
     final_memory = int(torch.npu.memory_allocated())
 
     report = {
+        "matmul_policy": matmul_policy,
         "device": device_name,
         "dtype": "float16",
         "weight_load": model.weight_load_report,
