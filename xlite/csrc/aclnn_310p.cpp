@@ -25,6 +25,11 @@
 
 namespace {
 
+enum class AclnnOpKind {
+    Matmul,
+    Attention,
+};
+
 class AclTensorGuard {
 public:
     explicit AclTensorGuard(aclTensor *tensor) : tensor_(tensor) {}
@@ -92,13 +97,17 @@ static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize)
     return &workspace;
 }
 
-static void FinishAclnn(XRuntime &rt, XTensor *workspace)
+static void FinishAclnn(XRuntime &rt, XTensor *workspace, AclnnOpKind opKind)
 {
     rt.RecordAclnnLaunch();
     // ACLNN work and TensorPool reuse are ordered on the single Xlite stream.
     // Keep the old correctness-first synchronization available for diagnosis,
     // but do not serialize every operation in the serving path.
-    if (rt.ForceSyncAclnn()) {
+    const bool forceSync =
+        rt.ForceSyncAclnn() ||
+        (opKind == AclnnOpKind::Matmul && rt.ForceSyncMatmul()) ||
+        (opKind == AclnnOpKind::Attention && rt.ForceSyncAttention());
+    if (forceSync) {
         rt.RecordForcedSync();
         rt.Synchronize();
     }
@@ -221,7 +230,7 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         XTensor *workspace = GetWorkspace(rt, workspaceSize);
         CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
                               executor, rt.stream));
-        FinishAclnn(rt, workspace);
+        FinishAclnn(rt, workspace, AclnnOpKind::Matmul);
     };
 
     if (!transpose && n > static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK)) {
@@ -399,7 +408,7 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
             workspace = GetWorkspace(rt, workspaceSize);
             CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                                 workspaceSize, executor, rt.stream));
-            FinishAclnn(rt, workspace);
+            FinishAclnn(rt, workspace, AclnnOpKind::Attention);
             rt.PutTensor(causalMask);
         } else {
             CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
@@ -409,7 +418,7 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
             workspace = GetWorkspace(rt, workspaceSize);
             CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                                 workspaceSize, executor, rt.stream));
-            FinishAclnn(rt, workspace);
+            FinishAclnn(rt, workspace, AclnnOpKind::Attention);
         }
         if (paddedOutput != nullptr) {
             const size_t validOutputBytes =

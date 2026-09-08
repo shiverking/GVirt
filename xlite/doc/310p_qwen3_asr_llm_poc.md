@@ -35,6 +35,11 @@ address is ordered on the same stream. Set `XLITE_310P_FORCE_SYNC_ACLNN=1` only
 when diagnosing precision errors or device faults; performance runs must leave
 it unset.
 
+For asynchronous-lifetime diagnosis, synchronization can be restricted to one
+operator family with `XLITE_310P_FORCE_SYNC_MATMUL=1` or
+`XLITE_310P_FORCE_SYNC_ATTENTION=1`. The global switch takes precedence. These
+switches are diagnostic only and must also be unset in performance runs.
+
 Attention metadata is retained on the host and reused by all decoder layers.
 `PrepareAttn()` copies lens, cached lens, query starts, block tables, slot
 mapping, and version-0 positions from page-locked staging buffers. The 310P

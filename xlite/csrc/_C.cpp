@@ -2215,6 +2215,9 @@ PYBIND11_MODULE(_C, m)
             stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
             stats["workspace_reuses"] = rt.WorkspaceReuses();
             stats["forced_sync_launches"] = rt.ForcedSyncLaunches();
+            stats["force_sync_aclnn"] = rt.ForceSyncAclnn();
+            stats["force_sync_matmul"] = rt.ForceSyncMatmul();
+            stats["force_sync_attention"] = rt.ForceSyncAttention();
             return stats;
         })
         .def("reset_stats", &XRuntime::ResetRuntimeStats)

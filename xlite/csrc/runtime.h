@@ -109,6 +109,14 @@ public:
     {
         return _forceSyncAclnn;
     }
+    [[nodiscard]] bool ForceSyncMatmul(void) const
+    {
+        return _forceSyncMatmul;
+    }
+    [[nodiscard]] bool ForceSyncAttention(void) const
+    {
+        return _forceSyncAttention;
+    }
     [[nodiscard]] bool StressWorkspaceReuse(void) const
     {
         return _stressWorkspaceReuse;
@@ -290,6 +298,8 @@ protected:
     bool _inited = false;
     bool _graphCommEnabled = true;
     bool _forceSyncAclnn = false;
+    bool _forceSyncMatmul = false;
+    bool _forceSyncAttention = false;
     bool _stressWorkspaceReuse = false;
     uint64_t _aclnnLaunches = 0;
     uint64_t _streamSynchronizations = 0;

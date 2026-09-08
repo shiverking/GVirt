@@ -30,6 +30,10 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     defaultMatmulSwizzle = 0;
     disableSwizzleTable = true;
     _forceSyncAclnn = isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ACLNN"));
+    _forceSyncMatmul =
+        isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_MATMUL"));
+    _forceSyncAttention =
+        isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ATTENTION"));
     _stressWorkspaceReuse =
         isEnvironmentVariableTrue(std::getenv("XLITE_310P_STRESS_WORKSPACE_REUSE"));
 #endif
