@@ -2,6 +2,7 @@
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include <cmath>
+#include <cstring>
 #include <sstream>
 #include "ascend.h"
 #include "base.h"
@@ -28,6 +29,9 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     }
     defaultMatmulSwizzle = 0;
     disableSwizzleTable = true;
+    _forceSyncAclnn = isEnvironmentVariableTrue(std::getenv("XLITE_310P_FORCE_SYNC_ACLNN"));
+    _stressWorkspaceReuse =
+        isEnvironmentVariableTrue(std::getenv("XLITE_310P_STRESS_WORKSPACE_REUSE"));
 #endif
     if (sizeMB != 0) {
         Init(sizeMB);
@@ -137,6 +141,11 @@ void XRuntime::Init(size_t sizeMB)
 
 XRuntime::~XRuntime(void)
 {
+    // All allocations below may still be referenced by work queued on the
+    // runtime stream.  Drain it before destroying or freeing any resource.
+    if (stream) {
+        (void)aclrtSynchronizeStream(stream);
+    }
     FiniXcclComm();
 
     if (_tpSize > 1 && _tpComm) {
@@ -149,10 +158,6 @@ XRuntime::~XRuntime(void)
         HcclCommDestroy(_epComm);
     }
 
-    delete _pool;
-    if (_event) {
-        (void)aclrtDestroyEvent(_event);
-    }
     for (auto &e : _agGraphs) {
         if (e.modelRI) {
             (void)aclmdlRIDestroy(e.modelRI);
@@ -167,14 +172,6 @@ XRuntime::~XRuntime(void)
         }
     }
     _rsGraphs.clear();
-    if (notify) {
-        (void)aclrtDestroyNotify(notify);
-    }
-    if (stream) {
-        (void)aclrtDestroyStream(stream);
-    }
-    (void)aclrtResetDevice(static_cast<int32_t>(_devid));
-
     if (_attnInitialized) {
         (void)aclrtFree(_position.ptr);
         (void)aclrtFree(_slotMapping.ptr);
@@ -186,7 +183,26 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_agSendBuf.ptr);
         (void)aclrtFree(_agRecvBuf.ptr);
         (void)aclrtFree(_dsaTopkBuffer.ptr);
+#ifdef XLITE_310P_LLM_FP16_POC
+        (void)aclrtFreeHost(_positionPinnedHost.ptr);
+        (void)aclrtFreeHost(_slotMappingPinnedHost.ptr);
+        (void)aclrtFreeHost(_cachedLensPinnedHost.ptr);
+        (void)aclrtFreeHost(_lensPinnedHost.ptr);
+        (void)aclrtFreeHost(_queryStartLocPinnedHost.ptr);
+        (void)aclrtFreeHost(_blockTablesPinnedHost.ptr);
+#endif
     }
+    delete _pool;
+    if (_event) {
+        (void)aclrtDestroyEvent(_event);
+    }
+    if (notify) {
+        (void)aclrtDestroyNotify(notify);
+    }
+    if (stream) {
+        (void)aclrtDestroyStream(stream);
+    }
+    (void)aclrtResetDevice(static_cast<int32_t>(_devid));
 
     if (!_initOutside) {
         (void)aclFinalize();
@@ -381,6 +397,25 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
 
+#ifdef XLITE_310P_LLM_FP16_POC
+    auto allocPinned = [](XTensor &tensor, std::vector<size_t> shape, enum XDtype dtype) {
+        size_t numel = 1;
+        for (size_t dim : shape) {
+            numel *= dim;
+        }
+        void *hostPtr = nullptr;
+        CHECK_ACL(aclrtMallocHost(&hostPtr, numel * XDtypeBit(dtype) / 8));
+        tensor.Init(std::move(shape), dtype, hostPtr);
+    };
+    allocPinned(_positionPinnedHost, {maxBatchedTokens}, INT64);
+    allocPinned(_slotMappingPinnedHost, {maxBatchedTokens}, INT32);
+    allocPinned(_cachedLensPinnedHost, {maxBatch}, INT32);
+    allocPinned(_lensPinnedHost, {maxBatch}, INT32);
+    allocPinned(_queryStartLocPinnedHost, {maxBatch}, INT32);
+    allocPinned(_blockTablesPinnedHost,
+                {maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32);
+#endif
+
     size = _moeEpSize * _moeEpSize * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMallocHost(&ptr, size));
     _tokensPerEpGroupAllEpHost.Init({_moeEpSize * _moeEpSize}, INT32, ptr);
@@ -520,11 +555,22 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     size = batch * XDtypeBit(INT32) / 8;
-    CHECK_ACL(
-        aclrtMemcpyAsync(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE, stream));
-    CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLens.data(), size,
+#ifdef XLITE_310P_LLM_FP16_POC
+    std::memcpy(_lensPinnedHost.ptr, lens.data(), size);
+    std::memcpy(_cachedLensPinnedHost.ptr, cachedLens.data(), size);
+    std::memcpy(_queryStartLocPinnedHost.ptr, queryStartLoc.data(), size);
+    void *lensSrc = _lensPinnedHost.ptr;
+    void *cachedLensSrc = _cachedLensPinnedHost.ptr;
+    void *queryStartLocSrc = _queryStartLocPinnedHost.ptr;
+#else
+    void *lensSrc = lens.data();
+    void *cachedLensSrc = cachedLens.data();
+    void *queryStartLocSrc = queryStartLoc.data();
+#endif
+    CHECK_ACL(aclrtMemcpyAsync(_lens.ptr, size, lensSrc, size, ACL_MEMCPY_HOST_TO_DEVICE, stream));
+    CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLensSrc, size,
                                ACL_MEMCPY_HOST_TO_DEVICE, stream));
-    CHECK_ACL(aclrtMemcpyAsync(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
+    CHECK_ACL(aclrtMemcpyAsync(_queryStartLoc.ptr, size, queryStartLocSrc, size,
                                ACL_MEMCPY_HOST_TO_DEVICE, stream));
 
     position.resize(batchedTokens);
@@ -550,7 +596,13 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
     }
     size = batchedTokens * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpyAsync(_slotMapping.ptr, size, slotMapping.data(), size,
+#ifdef XLITE_310P_LLM_FP16_POC
+    std::memcpy(_slotMappingPinnedHost.ptr, slotMapping.data(), size);
+    void *slotMappingSrc = _slotMappingPinnedHost.ptr;
+#else
+    void *slotMappingSrc = slotMapping.data();
+#endif
+    CHECK_ACL(aclrtMemcpyAsync(_slotMapping.ptr, size, slotMappingSrc, size,
                                ACL_MEMCPY_HOST_TO_DEVICE, stream));
     _attnSlotMapping = _slotMapping;
 
@@ -562,16 +614,29 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
     _blockTablesHost = blockTables;
     size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
+#ifdef XLITE_310P_LLM_FP16_POC
+    std::memcpy(_blockTablesPinnedHost.ptr, blockTables.data(), size);
+    void *blockTablesSrc = _blockTablesPinnedHost.ptr;
+#else
+    void *blockTablesSrc = blockTables.data();
+#endif
+    CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTablesSrc, size,
                                ACL_MEMCPY_HOST_TO_DEVICE, stream));
     _attnBlockTables = _blockTables;
     switch (attnMeta.version) {
-        case 0:
+        case 0: {
             size = batchedTokens * XDtypeBit(INT64) / 8;
-            CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, position.data(), size,
+#ifdef XLITE_310P_LLM_FP16_POC
+            std::memcpy(_positionPinnedHost.ptr, position.data(), size);
+            void *positionSrc = _positionPinnedHost.ptr;
+#else
+            void *positionSrc = position.data();
+#endif
+            CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, positionSrc, size,
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnPosition = _position;
             break;
+        }
         case 1:
             _attnPosition = attnMeta.vllmPosition;
             break;
@@ -580,19 +645,11 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                 ": invalid attnMeta version: " + std::to_string(attnMeta.version));
     }
-#ifdef XLITE_310P_LLM_FP16_POC
-    // The metadata copies above use local std::vector storage as the source of
-    // asynchronous H2D transfers.  Keep that storage alive until the copies
-    // complete.  Repeated POC forwards otherwise allow a subsequent call to
-    // reuse the host memory before the device has consumed lens, cached_lens,
-    // block tables, or slot mappings.  The 310P backend is correctness-first,
-    // so the synchronization cost is intentional.
-    Synchronize();
-#endif
 }
 
 void XRuntime::Synchronize(void)
 {
+    _streamSynchronizations++;
     CHECK_ACL(aclrtSynchronizeStream(stream));
 }
 

@@ -105,6 +105,58 @@ public:
     int64_t GetTensorOffset(XTensor &t);
 
     void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
+    [[nodiscard]] bool ForceSyncAclnn(void) const
+    {
+        return _forceSyncAclnn;
+    }
+    [[nodiscard]] bool StressWorkspaceReuse(void) const
+    {
+        return _stressWorkspaceReuse;
+    }
+    void RecordAclnnLaunch(void)
+    {
+        _aclnnLaunches++;
+    }
+    void RecordAclnnWorkspace(void *ptr)
+    {
+        if (ptr != nullptr && ptr == _lastAclnnWorkspace) {
+            _workspaceReuses++;
+        }
+        _lastAclnnWorkspace = ptr;
+    }
+    void RecordForcedSync(void)
+    {
+        _forcedSyncLaunches++;
+    }
+    [[nodiscard]] uint64_t AclnnLaunches(void) const
+    {
+        return _aclnnLaunches;
+    }
+    [[nodiscard]] uint64_t StreamSynchronizations(void) const
+    {
+        return _streamSynchronizations;
+    }
+    [[nodiscard]] uint64_t AttentionMetadataD2HBytes(void) const
+    {
+        return _attentionMetadataD2HBytes;
+    }
+    [[nodiscard]] uint64_t WorkspaceReuses(void) const
+    {
+        return _workspaceReuses;
+    }
+    [[nodiscard]] uint64_t ForcedSyncLaunches(void) const
+    {
+        return _forcedSyncLaunches;
+    }
+    void ResetRuntimeStats(void)
+    {
+        _aclnnLaunches = 0;
+        _streamSynchronizations = 0;
+        _attentionMetadataD2HBytes = 0;
+        _workspaceReuses = 0;
+        _forcedSyncLaunches = 0;
+        _lastAclnnWorkspace = nullptr;
+    }
 
     [[nodiscard]] virtual bool IsDummyRuntime() const
     {
@@ -191,6 +243,17 @@ public:
     // continues to consume the device-side tensors below.
     std::vector<uint32_t> _lensHost;
     std::vector<uint32_t> _blockTablesHost;
+#ifdef XLITE_310P_LLM_FP16_POC
+    // Stable, page-locked sources for asynchronous attention-metadata H2D copies.
+    // The public host vectors above remain the source of truth for the ACLNN
+    // correctness backend and are shared by every layer in one forward.
+    XTensor _positionPinnedHost;
+    XTensor _slotMappingPinnedHost;
+    XTensor _cachedLensPinnedHost;
+    XTensor _lensPinnedHost;
+    XTensor _queryStartLocPinnedHost;
+    XTensor _blockTablesPinnedHost;
+#endif
     uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;
@@ -226,6 +289,14 @@ protected:
     bool _initOutside = false;
     bool _inited = false;
     bool _graphCommEnabled = true;
+    bool _forceSyncAclnn = false;
+    bool _stressWorkspaceReuse = false;
+    uint64_t _aclnnLaunches = 0;
+    uint64_t _streamSynchronizations = 0;
+    uint64_t _attentionMetadataD2HBytes = 0;
+    uint64_t _workspaceReuses = 0;
+    uint64_t _forcedSyncLaunches = 0;
+    void *_lastAclnnWorkspace = nullptr;
     XTensorPool *_pool = nullptr;
     uint32_t _rankId;
     uint32_t _tpSize;
