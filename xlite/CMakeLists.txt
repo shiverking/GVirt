@@ -438,6 +438,14 @@ pybind11_add_module(
     csrc/_C.cpp
 )
 
+# Build metadata is queried from the Python extension, therefore these
+# definitions must be present on _C itself (PRIVATE definitions on the linked
+# xlite target do not propagate).
+target_compile_definitions(_C PRIVATE
+    XLITE_BUILD_SOC="${SOC_VERSION}"
+    XLITE_BUILD_KERNEL_SET="${XLITE_KERNEL_SET}"
+)
+
 target_compile_options(_C PRIVATE
     -std=c++17 -O3 -Wall -Werror -fPIC
 )

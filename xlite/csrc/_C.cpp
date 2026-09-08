@@ -14,6 +14,13 @@
 
 namespace py = pybind11;
 
+#ifndef XLITE_BUILD_SOC
+#define XLITE_BUILD_SOC "unknown"
+#endif
+#ifndef XLITE_BUILD_KERNEL_SET
+#define XLITE_BUILD_KERNEL_SET "unknown"
+#endif
+
 struct CModelAttnMeta {
     std::vector<uint32_t> lens;
     std::vector<uint32_t> cachedLens;
