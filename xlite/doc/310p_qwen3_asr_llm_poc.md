@@ -28,9 +28,25 @@ runtime/model initialization instead of entering an unverified kernel path.
 The build stops at configure time if the target CANN does not provide
 `aclnnMatmul`, `aclnnPromptFlashAttention`, or `aclnnIncreFlashAttention` headers.
 MatMul and attention keep the Xlite ABI but execute through ACLNN. ACLNN
-workspace is borrowed from `XTensorPool`; the correctness backend synchronizes
-before returning it. This synchronization is intentional and is not a
-performance design.
+workspace is borrowed from `XTensorPool`. On 310P, ACLNN work is submitted
+asynchronously to the single Xlite runtime stream and the workspace is returned
+to the pool immediately. Reuse is safe because every later use of that device
+address is ordered on the same stream. Set `XLITE_310P_FORCE_SYNC_ACLNN=1` only
+when diagnosing precision errors or device faults; performance runs must leave
+it unset.
+
+Attention metadata is retained on the host and reused by all decoder layers.
+`PrepareAttn()` copies lens, cached lens, query starts, block tables, slot
+mapping, and version-0 positions from page-locked staging buffers. The 310P
+ACLNN attention backend therefore performs no per-layer metadata D2H copy.
+Online forward paths exchange ownership with the PyTorch current stream through
+events. Standalone operator tests keep an optional final synchronization so
+that Python can safely inspect their output.
+
+Runtime counters are available through `Runtime.get_stats()` and through the
+vLLM-Ascend Xlite runtime statistics. A normal online decoder run must report
+zero for `attention_metadata_d2h_bytes`, `forced_sync_launches`, and internal
+`stream_synchronizations`.
 
 `op.cpp` currently exposes all launch stubs through one shared host ABI. The
 POC therefore retains those stubs in the build even though only the FP16 dense
@@ -112,6 +128,25 @@ cache.
 Gate 5 uses the same runner with `--num-layers 1`; the full acceptance script
 runs that comparison before the five full-model text cases and the real-audio
 case.
+
+The P1 asynchronous workspace checks can be run independently after the normal
+operator sweep:
+
+```bash
+python tests/poc_310p/test_matmul.py --async-stress-iters 1000
+python tests/kernels/attention.py --async-stress-iters 1000
+
+XLITE_310P_FORCE_SYNC_ACLNN=1 \
+  python tests/poc_310p/test_matmul.py --shape 20 2048 2048
+XLITE_310P_FORCE_SYNC_ACLNN=1 \
+  python tests/kernels/attention.py --rerun-failed
+```
+
+The two stress options set the test-only
+`XLITE_310P_STRESS_WORKSPACE_REUSE=1` switch. After every ACLNN launch, the
+released workspace is immediately reacquired and overwritten on the same
+runtime stream. This verifies stream-ordered reuse and must not be enabled in
+serving.
 
 ## Known unverified items
 

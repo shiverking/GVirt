@@ -1389,7 +1389,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                at::Tensor &output, at::Tensor &queryStartLoc, at::Tensor &lens,
                at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads,
                uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock,
-               bool enableFlashAttention, uint32_t tileSizeOfCachedKV)
+               bool enableFlashAttention, uint32_t tileSizeOfCachedKV, bool synchronize)
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
@@ -1408,7 +1408,9 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _queryStartLoc, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch,
                          maxNumBlock);
-        rt.Synchronize();
+        if (synchronize) {
+            rt.Synchronize();
+        }
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV},
@@ -1423,7 +1425,9 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
         XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, lastMax, lastSum, sync,
                               _output, _queryStartLoc, _lens, _cachedLens, _blockTables, nHeads,
                               nKvHeads, headDim, blockSize, batch, maxNumBlock, tileSizeOfCachedKV);
-        rt.Synchronize();
+        if (synchronize) {
+            rt.Synchronize();
+        }
         rt.PutTensor(sync);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
@@ -2182,6 +2186,7 @@ PYBIND11_MODULE(_C, m)
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
+        info["aclnn_execution"] = "async_single_stream";
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";
@@ -2203,6 +2208,32 @@ PYBIND11_MODULE(_C, m)
         .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
         .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
         .def("set_current_context", &XRuntime::SetCurrentContext)
+        .def("get_stats", [](const XRuntime &rt) {
+            py::dict stats;
+            stats["aclnn_launches"] = rt.AclnnLaunches();
+            stats["stream_synchronizations"] = rt.StreamSynchronizations();
+            stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
+            stats["workspace_reuses"] = rt.WorkspaceReuses();
+            stats["forced_sync_launches"] = rt.ForcedSyncLaunches();
+            return stats;
+        })
+        .def("reset_stats", &XRuntime::ResetRuntimeStats)
+        .def("set_host_attention_metadata",
+             [](XRuntime &rt, const std::vector<uint32_t> &lens,
+                const std::vector<uint32_t> &cachedLens,
+                const std::vector<uint32_t> &blockTables, uint32_t maxNumBlocks) {
+                 if (lens.empty() || lens.size() != cachedLens.size() || maxNumBlocks == 0 ||
+                     blockTables.size() != lens.size() * maxNumBlocks) {
+                     throw std::invalid_argument("invalid host attention metadata");
+                 }
+                 rt._lensHost = lens;
+                 rt._cachedLensHost = cachedLens;
+                 rt._blockTablesHost = blockTables;
+                 rt._batch = static_cast<uint32_t>(lens.size());
+                 rt._maxNumBlocks = maxNumBlocks;
+             },
+             py::arg("lens"), py::arg("cached_lens"), py::arg("block_tables"),
+             py::arg("max_num_blocks"))
         .def("configure_swizzle", &XRuntime::ConfigureSwizzle, py::arg("swizzle"),
              py::arg("use_swizzle_table"));
 
@@ -2521,7 +2552,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
           py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
           py::arg("max_num_block"), py::arg("enable_flash_attention") = false,
-          py::arg("tile_size_of_cached_kv") = 8192);
+          py::arg("tile_size_of_cached_kv") = 8192, py::arg("synchronize") = true);
     m.def("add_and_rmsnorm", &AddAndRMSNorm, py::arg("rt"), py::arg("in_"), py::arg("add_in_out"),
           py::arg("norm"), py::arg("out"), py::arg("norm_eps"));
     m.def("softmax_topk", &SoftmaxTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),

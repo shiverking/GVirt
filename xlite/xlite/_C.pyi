@@ -91,6 +91,21 @@ class Runtime:
             None: Context is updated on the calling thread.
         """
 
+    def get_stats(self) -> dict[str, int]:
+        """Return cumulative ACLNN launch, synchronization and metadata-copy counters."""
+
+    def reset_stats(self) -> None:
+        """Reset cumulative runtime counters used by 310P performance diagnostics."""
+
+    def set_host_attention_metadata(
+        self,
+        lens: Sequence[int],
+        cached_lens: Sequence[int],
+        block_tables: Sequence[int],
+        max_num_blocks: int,
+    ) -> None:
+        """Seed host metadata for standalone 310P attention diagnostics."""
+
     def configure_swizzle(self, swizzle: int, use_swizzle_table: bool) -> None:
         """Configure swizzle parameters for matrix multiplication
 
@@ -1400,6 +1415,7 @@ def attention(
     max_num_block: int,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
+    synchronize: bool = True,
 ) -> None:
     """Run paged attention for cached KV tensors.
 
@@ -1421,6 +1437,7 @@ def attention(
         max_num_block (int): Maximum number of blocks per request.
         enable_flash_attention (bool): Whether to use flash attention kernels.
         tile_size_of_cached_kv (int): Tile size for cached KV in flash attention.
+        synchronize (bool): Synchronize before returning from this standalone diagnostic binding.
 
     Returns:
         None: `output` is written in place.

@@ -87,22 +87,43 @@ static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize)
         throw std::runtime_error("ACLNN workspace request " + std::to_string(workspaceSize) +
                                  " bytes exceeds the 512 MiB reserved 310P TensorPool budget");
     }
-    return &rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
+    XTensor &workspace = rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
+    rt.RecordAclnnWorkspace(workspace.ptr);
+    return &workspace;
 }
 
 static void FinishAclnn(XRuntime &rt, XTensor *workspace)
 {
-    // Correctness POC: synchronize before ACL descriptor destruction and before
-    // returning workspace storage to TensorPool. Performance work may remove this.
-    CHECK_ACL(aclrtSynchronizeStream(rt.stream));
+    rt.RecordAclnnLaunch();
+    // ACLNN work and TensorPool reuse are ordered on the single Xlite stream.
+    // Keep the old correctness-first synchronization available for diagnosis,
+    // but do not serialize every operation in the serving path.
+    if (rt.ForceSyncAclnn()) {
+        rt.RecordForcedSync();
+        rt.Synchronize();
+    }
     if (workspace != nullptr) {
+        void *workspacePtr = workspace->ptr;
+        const size_t workspaceBytes = workspace->bytes;
         rt.PutTensor(*workspace);
+        if (rt.StressWorkspaceReuse()) {
+            XTensor &probe = rt.GetTensor({workspaceBytes}, INT8, DBG_LOC);
+            if (probe.ptr != workspacePtr) {
+                throw std::runtime_error(
+                    "310P workspace stress probe did not reuse the released allocation");
+            }
+            CHECK_ACL(aclrtMemsetAsync(probe.ptr, probe.bytes, 0xa5, probe.bytes, rt.stream));
+            rt.PutTensor(probe);
+        }
     }
 }
 
 static void ReadAttentionMetadata(XRuntime &rt, XTensor &lens, XTensor &cachedLens,
-                                  XTensor &blockTables, uint32_t maxNumBlock, uint32_t batch)
+                                   XTensor &blockTables, uint32_t maxNumBlock, uint32_t batch)
 {
+    (void)lens;
+    (void)cachedLens;
+    (void)blockTables;
     if (batch == 0 || batch > XLITE_310P_MAX_BATCH) {
         throw std::runtime_error("Ascend310P attention requires batch in [1, " +
                                  std::to_string(XLITE_310P_MAX_BATCH) + "]");
@@ -110,19 +131,12 @@ static void ReadAttentionMetadata(XRuntime &rt, XTensor &lens, XTensor &cachedLe
     if (maxNumBlock == 0) {
         throw std::runtime_error("Ascend310P attention requires a non-empty block table");
     }
-    if (lens.numel < batch || cachedLens.numel < batch ||
-        blockTables.numel < static_cast<size_t>(batch) * maxNumBlock) {
-        throw std::runtime_error("Ascend310P attention metadata tensor is smaller than batch");
+    if (rt._lensHost.size() != batch || rt._cachedLensHost.size() != batch ||
+        rt._blockTablesHost.size() != static_cast<size_t>(batch) * maxNumBlock ||
+        rt._maxNumBlocks != maxNumBlock) {
+        throw std::runtime_error(
+            "Ascend310P host attention metadata does not match the prepared batch");
     }
-    rt.Synchronize();
-    rt._lensHost.resize(batch);
-    rt._cachedLensHost.resize(batch);
-    rt._blockTablesHost.resize(static_cast<size_t>(batch) * maxNumBlock);
-    rt.MemcpyD2H(rt._lensHost.data(), lens.ptr, static_cast<size_t>(batch) * sizeof(uint32_t));
-    rt.MemcpyD2H(rt._cachedLensHost.data(), cachedLens.ptr,
-                 static_cast<size_t>(batch) * sizeof(uint32_t));
-    rt.MemcpyD2H(rt._blockTablesHost.data(), blockTables.ptr,
-                 static_cast<size_t>(batch) * maxNumBlock * sizeof(uint32_t));
 }
 
 static std::vector<uint32_t> GetRequestBlocks(const XRuntime &rt, uint32_t request,
@@ -229,7 +243,6 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                 static_cast<size_t>(currentN) * sizeof(uint16_t), static_cast<size_t>(m),
                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
-        CHECK_ACL(aclrtSynchronizeStream(rt.stream));
         rt.PutTensor(chunkOutput);
         return;
     }
@@ -407,7 +420,6 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                                                        sizeof(uint16_t),
                                        paddedOutput->ptr, validOutputBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            CHECK_ACL(aclrtSynchronizeStream(rt.stream));
             rt.PutTensor(*paddedOutput);
             rt.PutTensor(*paddedQuery);
         }
