@@ -175,6 +175,7 @@ def main() -> int:
         lambda: model.forward_naive_with_inputs_embeds(
             inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
     )
+    model.xlite_rt.reset_stats()
     (xlite_logits, xlite_hidden), xlite_prefill_ms = _sync_ms(
         lambda: model.forward_xlite_with_inputs_embeds(
             inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
@@ -266,6 +267,7 @@ def main() -> int:
         "peak_memory_bytes": int(torch.npu.max_memory_allocated()),
         "stability_iterations": args.stability_iters,
         "memory_growth_bytes": final_memory - initial_memory,
+        "xlite_runtime_stats": dict(model.xlite_rt.get_stats()),
         "acceptance": {
             "hidden_cosine_gte_0_999": hidden_cosine >= 0.999,
             "logits_cosine_gte_0_999": logits_cosine >= 0.999,

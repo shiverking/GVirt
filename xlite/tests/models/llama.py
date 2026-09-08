@@ -425,7 +425,11 @@ class Llama(nn.Module):
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
         self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, [self.freqs_cis], h, stream)
-        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits)
+        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits, stream)
+        # Mirror online sampling: enqueue a PyTorch-current-stream consumer
+        # immediately after Xlite records its completion event.  A later
+        # device-wide test synchronization must not hide a broken hand-off.
+        logits = logits.clone()
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
@@ -456,7 +460,11 @@ class Llama(nn.Module):
         logits_indices = torch.tensor([seqlen - 1], dtype=torch.int32, device=inputs_embeds.device)
         logits = torch.empty(world_size, batch, self.args.vocab_size // world_size,
                              dtype=torch.float16, device=inputs_embeds.device)
-        self.xlite_model.forward_get_logits(self.xlite_rt, hidden, logits_indices, logits)
+        self.xlite_model.forward_get_logits(
+            self.xlite_rt, hidden, logits_indices, logits, stream)
+        # Exercise the same event boundary used by vLLM Sampling instead of
+        # relying on the POC runner's later torch.npu.synchronize().
+        logits = logits.clone()
         logits = logits.permute(1, 0, 2).reshape(batch, self.args.vocab_size)
         selected_hidden = hidden[logits_indices.long()]
         return (logits, selected_hidden) if return_hidden else logits
