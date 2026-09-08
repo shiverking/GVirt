@@ -14,6 +14,7 @@
 #include "aclrtlaunch_all.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -55,10 +56,10 @@ private:
 
 static aclTensor *CreateTensor(const std::vector<int64_t> &dims, const std::vector<int64_t> &strides,
                                aclDataType dtype, void *data,
-                               const std::vector<int64_t> &storageDims = {})
+                               const std::vector<int64_t> &storageDims = {}, int64_t offset = 0)
 {
     const std::vector<int64_t> &storage = storageDims.empty() ? dims : storageDims;
-    aclTensor *tensor = aclCreateTensor(dims.data(), dims.size(), dtype, strides.data(), 0,
+    aclTensor *tensor = aclCreateTensor(dims.data(), dims.size(), dtype, strides.data(), offset,
                                         ACL_FORMAT_ND, storage.data(), storage.size(), data);
     if (tensor == nullptr) {
         throw std::runtime_error("aclCreateTensor returned nullptr");
@@ -189,6 +190,102 @@ static XTensor &ExtractQuery(XRuntime &rt, XTensor &qkv, size_t rowOffset, uint3
 
 }  // namespace
 
+namespace {
+std::string MatmulPurpose(int64_t n, int64_t k)
+{
+    if (n == 151936 && k == 2048) return "lm_head";
+    if (n == 4096 && k == 2048) return "qkv";
+    if (n == 2048 && k == 2048) return "o";
+    if (n == 12288 && k == 2048) return "gate_up";
+    if (n == 2048 && k == 6144) return "down";
+    return "other";
+}
+
+// Diagnostic-only timing: no event allocation or extra waits in serving mode.
+class MatmulTimer {
+public:
+    explicit MatmulTimer(bool enabled) : enabled_(enabled) {}
+    ~MatmulTimer()
+    {
+        if (begin_) (void)aclrtDestroyEvent(begin_);
+        if (end_) (void)aclrtDestroyEvent(end_);
+    }
+    void Start(aclrtStream stream)
+    {
+        if (!enabled_) return;
+        CHECK_ACL(aclrtCreateEvent(&begin_));
+        CHECK_ACL(aclrtCreateEvent(&end_));
+        CHECK_ACL(aclrtRecordEvent(begin_, stream));
+    }
+    double End(aclrtStream stream)
+    {
+        if (!enabled_) return 0;
+        CHECK_ACL(aclrtRecordEvent(end_, stream));
+        CHECK_ACL(aclrtSynchronizeEvent(end_));
+        float elapsed = 0;
+        CHECK_ACL(aclrtEventElapsedTime(&elapsed, begin_, end_));
+        return elapsed;
+    }
+private:
+    bool enabled_;
+    aclrtEvent begin_ = nullptr, end_ = nullptr;
+};
+
+void RunP3Matmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
+                 const XMatmulPlan &plan, XMatmulStats &stats)
+{
+    using Clock = std::chrono::steady_clock;
+    auto prepared = rt.matmulDiagnostics ? Clock::now() : Clock::time_point{};
+    AclTensorGuard aclIn(CreateTensor(plan.inputDims, plan.inputStrides, ACL_FLOAT16, in.ptr));
+    XTensor *temporary = nullptr;
+    const bool direct = plan.direct || plan.chunks.size() == 1;
+    if (!direct) {
+        temporary = &rt.GetTensor({in.shape[0], static_cast<size_t>(plan.chunkSize)}, FP16, DBG_LOC);
+    }
+    try {
+        for (const auto &chunk : plan.chunks) {
+            AclTensorGuard aclWeight(CreateTensor(chunk.weightDims, chunk.weightStrides, ACL_FLOAT16,
+                static_cast<uint16_t *>(weight.ptr) + chunk.offset * in.shape[1], chunk.weightStorage));
+            AclTensorGuard aclOut(CreateTensor(chunk.outputDims, chunk.outputStrides, ACL_FLOAT16,
+                direct ? out.ptr : temporary->ptr, chunk.outputStorage, direct ? chunk.offset : 0));
+            uint64_t bytes = 0;
+            aclOpExecutor *executor = nullptr;
+            CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn.get(), aclWeight.get(), aclOut.get(), 0,
+                                                 &bytes, &executor));
+            stats.workspacePeak = std::max(stats.workspacePeak, bytes);
+            XTensor *workspace = GetWorkspace(rt, bytes);
+            if (rt.matmulDiagnostics) {
+                stats.hostPrepareMs += std::chrono::duration<double, std::milli>(Clock::now() - prepared).count();
+            }
+            MatmulTimer timer(rt.matmulDiagnostics);
+            timer.Start(rt.stream);
+            try {
+                CHECK_ACL(aclnnMatmul(workspace ? workspace->ptr : nullptr, bytes, executor, rt.stream));
+                ++stats.chunks;
+                stats.deviceMs += timer.End(rt.stream);
+                stats.forcedSyncs += rt.ForceSyncAclnn() || rt.ForceSyncMatmul();
+                FinishAclnn(rt, workspace, AclnnOpKind::Matmul);
+            } catch (...) {
+                if (workspace) rt.PutTensor(*workspace);
+                throw;
+            }
+            if (!direct) {
+                const size_t width = static_cast<size_t>(chunk.outputDims[1]) * sizeof(uint16_t);
+                CHECK_ACL(aclrtMemcpy2dAsync(static_cast<uint16_t *>(out.ptr) + chunk.offset,
+                    out.shape[1] * sizeof(uint16_t), temporary->ptr, width, width, in.shape[0],
+                    ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+                stats.copyBytes += width * in.shape[0];
+            }
+            if (rt.matmulDiagnostics) prepared = Clock::now();
+        }
+    } catch (...) {
+        if (temporary) rt.PutTensor(*temporary);
+        throw;
+    }
+    if (temporary) rt.PutTensor(*temporary);
+}
+}  // namespace
+
 void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
                           bool weightNZ, const XTensor &bias, const XTensor &deqScale,
                           bool transpose)
@@ -211,9 +308,21 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         throw std::runtime_error("aclnnMatmul Ascend310P shape mismatch");
     }
 
+    auto &stats = rt.matmulStats[MatmulPurpose(n, k)];
+    ++stats.calls;
+    if (rt.matmulOptimization == "p3_aclnn" && !transpose) {
+        const auto entry = rt.matmulPlans.find({m, n, k});
+        if (entry != rt.matmulPlans.end() && entry->second.enabled) {
+            ++stats.optimizedCalls;
+            RunP3Matmul(rt, in, weight, out, entry->second, stats);
+            return;
+        }
+    }
     const auto runMatmul = [&](int64_t currentN, void *weightData, void *outputData,
                                const std::vector<int64_t> &weightStorage,
                                const std::vector<int64_t> &weightStrides) {
+        const auto started = rt.matmulDiagnostics ? std::chrono::steady_clock::now() :
+                                                   std::chrono::steady_clock::time_point{};
         const std::vector<int64_t> inDims{m, k};
         const std::vector<int64_t> weightDims{k, currentN};
         const std::vector<int64_t> outDims{m, currentN};
@@ -229,8 +338,18 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn.get(), aclWeight.get(), aclOut.get(), 0,
                                               &workspaceSize, &executor));
         XTensor *workspace = GetWorkspace(rt, workspaceSize);
+        stats.workspacePeak = std::max(stats.workspacePeak, workspaceSize);
+        if (rt.matmulDiagnostics) {
+            stats.hostPrepareMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+        }
+        MatmulTimer timer(rt.matmulDiagnostics);
+        timer.Start(rt.stream);
         CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
                               executor, rt.stream));
+        ++stats.chunks;
+        stats.deviceMs += timer.End(rt.stream);
+        stats.forcedSyncs += rt.ForceSyncAclnn() || rt.ForceSyncMatmul();
         FinishAclnn(rt, workspace, AclnnOpKind::Matmul);
     };
 
@@ -252,6 +371,7 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                 static_cast<size_t>(currentN) * sizeof(uint16_t),
                 static_cast<size_t>(currentN) * sizeof(uint16_t), static_cast<size_t>(m),
                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            stats.copyBytes += static_cast<uint64_t>(currentN) * m * sizeof(uint16_t);
         }
         rt.PutTensor(chunkOutput);
         return;

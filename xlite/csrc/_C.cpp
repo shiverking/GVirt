@@ -2184,6 +2184,9 @@ PYBIND11_MODULE(_C, m)
         info["abi"] = 1;
         info["cache_layout"] = "BSHD";
         info["paged_decode_310p"] = true;
+        info["p3_aclnn"] = true;
+        info["p3_plan_abi"] = 1;
+        info["p3_build_id"] = __DATE__ " " __TIME__;
         info["paged_decode_scratch_bytes"] = XlitePaged310P::ScratchBytes;
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
@@ -2226,6 +2229,23 @@ PYBIND11_MODULE(_C, m)
             stats["force_sync_attention"] = rt.ForceSyncAttention();
             stats["sync_forward_boundary"] = rt.SyncForwardBoundary();
             stats["decode_attention_backend"] = rt.decodeAttentionBackend;
+            stats["matmul_optimization"] = rt.matmulOptimization;
+            stats["matmul_diagnostics"] = rt.matmulDiagnostics;
+            py::dict projections;
+            for (const auto &entry : rt.matmulStats) {
+                py::dict item;
+                const auto &s = entry.second;
+                item["calls"] = s.calls;
+                item["optimized_calls"] = s.optimizedCalls;
+                item["chunks"] = s.chunks;
+                item["copy_bytes"] = s.copyBytes;
+                item["workspace_peak_bytes"] = s.workspacePeak;
+                item["forced_syncs"] = s.forcedSyncs;
+                item["host_prepare_ms"] = s.hostPrepareMs;
+                item["device_ms"] = s.deviceMs;
+                projections[py::str(entry.first)] = item;
+            }
+            stats["matmul_projections"] = projections;
             stats["paged_decode_requests"] = rt.pagedDecodeRequests;
             stats["paged_decode_kernel_launches"] = rt.pagedDecodeLaunches;
             stats["paged_decode_merge_launches"] = rt.pagedDecodeMergeLaunches;
@@ -2235,6 +2255,9 @@ PYBIND11_MODULE(_C, m)
         })
         .def("reset_stats", &XRuntime::ResetRuntimeStats)
         .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend)
+        .def("set_matmul_optimization", &XRuntime::SetMatmulOptimization)
+        .def("set_matmul_plan", &XRuntime::SetMatmulPlan)
+        .def_readwrite("matmul_diagnostics", &XRuntime::matmulDiagnostics)
         .def("set_host_attention_metadata",
              [](XRuntime &rt, const std::vector<uint32_t> &lens,
                 const std::vector<uint32_t> &cachedLens,

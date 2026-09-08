@@ -2178,6 +2178,10 @@ size_t XModel::GetTensorPoolSize(int dbg)
     size_t size = DummyRun();
 #ifdef XLITE_310P_LLM_FP16_POC
     size += XlitePaged310P::ReserveBytes;
+    // P3 may use a 49152-column packed LM Head tile for M<=20 rather than
+    // legacy's 12288. Workspace stays capped at 512 MiB; reserve only the
+    // additional output staging (20*(49152-12288)*2 < 2 MiB).
+    size += 2ULL * 1024 * 1024;
 #endif
 
     if (_rankId == 0 && dbg) {

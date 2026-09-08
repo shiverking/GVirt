@@ -697,6 +697,9 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 
 void XRuntime::SetDecodeAttentionBackend(const std::string &backend)
 {
+    if (backend != "legacy" && matmulOptimization == "p3_aclnn") {
+        throw std::invalid_argument("P3 requires legacy attention");
+    }
     if (backend != "legacy" && backend != "paged_310p") {
         throw std::invalid_argument("decode_attention_backend must be legacy or paged_310p");
     }
@@ -709,6 +712,51 @@ void XRuntime::SetDecodeAttentionBackend(const std::string &backend)
         throw std::runtime_error("select decode attention backend before preparing metadata");
     }
     decodeAttentionBackend = backend;
+}
+
+void XRuntime::SetMatmulPlan(int64_t m, int64_t n, int64_t k, int64_t chunk,
+                            bool direct, bool enabled)
+{
+    const bool knownShape = (k == 2048 && (n == 2048 || n == 4096 || n == 12288 || n == 151936)) ||
+                            (k == 6144 && n == 2048);
+    if (m < 1 || m > 20 || !knownShape ||
+        (chunk != 12288 && chunk != 24576 && chunk != 49152 && chunk != 151936)) {
+        throw std::invalid_argument("invalid P3 MatMul plan");
+    }
+    XMatmulPlan plan;
+    plan.enabled = enabled;
+    plan.direct = direct;
+    plan.chunkSize = chunk;
+    plan.inputDims = {m, k};
+    plan.inputStrides = {k, 1};
+    for (int64_t offset = 0; offset < n; offset += chunk) {
+        int64_t width = std::min(chunk, n - offset);
+        plan.chunks.push_back({offset, {k, width}, {width, k}, {1, k}, {m, width},
+                               {direct ? n : width, 1}, {m, direct ? n : width}});
+    }
+    matmulPlans[{m, n, k}] = std::move(plan);
+}
+
+void XRuntime::SetMatmulOptimization(const std::string &mode)
+{
+    if (mode != "legacy" && mode != "p3_aclnn") {
+        throw std::invalid_argument("matmul_optimization must be legacy or p3_aclnn");
+    }
+#ifndef XLITE_310P_LLM_FP16_POC
+    if (mode != "legacy") throw std::runtime_error("this build has no P3 ACLNN backend");
+#endif
+    if (mode == "p3_aclnn" && decodeAttentionBackend != "legacy") {
+        throw std::invalid_argument("P3 requires legacy attention");
+    }
+    matmulOptimization = mode;
+    if (mode == "p3_aclnn" && matmulPlans.empty()) {
+        for (int64_t m = 1; m <= 20; ++m) {
+            for (auto shape : {std::pair<int64_t, int64_t>{4096, 2048}, {2048, 2048},
+                               {12288, 2048}, {2048, 6144}, {151936, 2048}}) {
+                SetMatmulPlan(m, shape.first, shape.second, 12288, m == 1, true);
+            }
+        }
+    }
 }
 
 #ifdef XLITE_310P_LLM_FP16_POC

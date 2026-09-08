@@ -7,6 +7,9 @@
 #include <cstdint>
 #include "base.h"
 #include "paged_decode_310p.h"
+#include "matmul_plan.h"
+#include <map>
+#include <tuple>
 
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
@@ -75,6 +78,12 @@ public:
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
     void SetDecodeAttentionBackend(const std::string &backend);
+    void SetMatmulOptimization(const std::string &mode);
+    void SetMatmulPlan(int64_t m, int64_t n, int64_t k, int64_t chunk, bool direct, bool enabled);
+    std::string matmulOptimization = "legacy";
+    bool matmulDiagnostics = false;
+    std::map<std::tuple<int64_t, int64_t, int64_t>, XMatmulPlan> matmulPlans;
+    std::map<std::string, XMatmulStats> matmulStats;
     std::string decodeAttentionBackend = "legacy";
     uint64_t pagedDecodeRequests = 0, pagedDecodeLaunches = 0, pagedDecodeMergeLaunches = 0;
     uint64_t legacyDecodeRequests = 0, decodeKvGatherBytes = 0;
@@ -188,6 +197,7 @@ public:
         _lastAclnnWorkspace = nullptr;
         pagedDecodeRequests = pagedDecodeLaunches = pagedDecodeMergeLaunches = 0;
         legacyDecodeRequests = decodeKvGatherBytes = 0;
+        matmulStats.clear();
     }
 
     [[nodiscard]] virtual bool IsDummyRuntime() const
