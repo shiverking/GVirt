@@ -2183,6 +2183,8 @@ PYBIND11_MODULE(_C, m)
 #ifdef XLITE_310P_LLM_FP16_POC
         info["abi"] = 1;
         info["cache_layout"] = "BSHD";
+        info["paged_decode_310p"] = true;
+        info["paged_decode_scratch_bytes"] = XlitePaged310P::ScratchBytes;
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
@@ -2223,9 +2225,16 @@ PYBIND11_MODULE(_C, m)
             stats["force_sync_matmul"] = rt.ForceSyncMatmul();
             stats["force_sync_attention"] = rt.ForceSyncAttention();
             stats["sync_forward_boundary"] = rt.SyncForwardBoundary();
+            stats["decode_attention_backend"] = rt.decodeAttentionBackend;
+            stats["paged_decode_requests"] = rt.pagedDecodeRequests;
+            stats["paged_decode_kernel_launches"] = rt.pagedDecodeLaunches;
+            stats["paged_decode_merge_launches"] = rt.pagedDecodeMergeLaunches;
+            stats["legacy_decode_requests"] = rt.legacyDecodeRequests;
+            stats["decode_kv_gather_bytes"] = rt.decodeKvGatherBytes;
             return stats;
         })
         .def("reset_stats", &XRuntime::ResetRuntimeStats)
+        .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend)
         .def("set_host_attention_metadata",
              [](XRuntime &rt, const std::vector<uint32_t> &lens,
                 const std::vector<uint32_t> &cachedLens,
@@ -2239,6 +2248,9 @@ PYBIND11_MODULE(_C, m)
                  rt._blockTablesHost = blockTables;
                  rt._batch = static_cast<uint32_t>(lens.size());
                  rt._maxNumBlocks = maxNumBlocks;
+#ifdef XLITE_310P_LLM_FP16_POC
+                 rt.PreparePagedDecodeMetadata();
+#endif
              },
              py::arg("lens"), py::arg("cached_lens"), py::arg("block_tables"),
              py::arg("max_num_blocks"))

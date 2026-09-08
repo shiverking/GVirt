@@ -81,6 +81,7 @@ def _load_tensor_file(path: Path) -> torch.Tensor:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--decode-attention-backend", choices=("legacy", "paged_310p"), default="legacy")
     parser.add_argument("--prompt", default="Transcribe the supplied audio embedding.")
     parser.add_argument("--input-mode", choices=("tokens", "synthetic", "file"), default="tokens")
     parser.add_argument("--embeds-file", type=Path)
@@ -118,6 +119,7 @@ def main() -> int:
     with torch.device("npu"):
         model = Llama(model_args)
     model.load_weights(args.checkpoint)
+    model.xlite_rt.set_decode_attention_backend(args.decode_attention_backend)
 
     non_fp16_parameters = [name for name, value in model.named_parameters()
                            if value.dtype != torch.float16]

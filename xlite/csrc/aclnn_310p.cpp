@@ -11,6 +11,7 @@
 #pragma GCC diagnostic ignored "-Wcpp"
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "aclnn_310p.h"
+#include "aclrtlaunch_all.h"
 
 #include <algorithm>
 #include <cmath>
@@ -295,6 +296,43 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         throw std::runtime_error("Ascend310P attention QKV/output is smaller than lens sum");
     }
 
+    const bool paged = rt.decodeAttentionBackend == "paged_310p";
+    if (paged) {
+        uint32_t decodeCount = 0;
+        for (uint32_t request = 0; request < batch; ++request) {
+            if (rt._lensHost[request] != 1) {
+                continue;
+            }
+            const uint64_t length = uint64_t(rt._cachedLensHost[request]) + 1;
+            const uint32_t validBlocks = (length + blockSize - 1) / blockSize;
+            if (length > XLITE_310P_MAX_SEQ_LEN || validBlocks > maxNumBlock) {
+                throw std::runtime_error("paged_310p invalid valid KV length");
+            }
+            for (uint32_t block = 0; block < validBlocks; ++block) {
+                if (rt._blockTablesHost[request * maxNumBlock + block] >= kCache.shape[0]) {
+                    throw std::runtime_error("paged_310p physical block outside cache");
+                }
+            }
+            ++decodeCount;
+        }
+        if (decodeCount != rt.pagedCount || rt.pagedMetadata == nullptr) {
+            throw std::runtime_error("paged_310p metadata must be prepared before attention");
+        }
+        if (decodeCount != 0) {
+            CHECK_ACL(aclrtlaunch_xlite_paged_decode_310p(
+                rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, rt.pagedMetadata,
+                rt.pagedScratch, output.ptr, decodeCount, rt.pagedPartitions,
+                rt.pagedPartitionLength));
+            rt.pagedDecodeRequests += decodeCount;
+            ++rt.pagedDecodeLaunches;
+            if (rt.pagedPartitions == 4) {
+                CHECK_ACL(aclrtlaunch_xlite_paged_decode_merge_310p(
+                    rt.aicNum, rt.stream, rt.pagedMetadata, rt.pagedScratch, output.ptr,
+                    decodeCount));
+                ++rt.pagedDecodeMergeLaunches;
+            }
+        }
+    }
     size_t queryOffset = 0;
     const size_t tokenKvBytes = static_cast<size_t>(nKvHeads) * headDim * sizeof(uint16_t);
     const size_t blockKvBytes = static_cast<size_t>(blockSize) * tokenKvBytes;
@@ -302,6 +340,14 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         const uint32_t queryLength = rt._lensHost[request];
         const uint32_t cachedLength = rt._cachedLensHost[request];
         const uint32_t totalLength = queryLength + cachedLength;
+        if (paged && queryLength == 1) {
+            queryOffset += queryLength;
+            continue;
+        }
+        if (queryLength == 1) {
+            ++rt.legacyDecodeRequests;
+            rt.decodeKvGatherBytes += static_cast<uint64_t>(totalLength) * tokenKvBytes * 2;
+        }
         if (queryLength == 0 || totalLength > XLITE_310P_MAX_SEQ_LEN) {
             throw std::runtime_error("Ascend310P attention request length is outside [1, " +
                                      std::to_string(XLITE_310P_MAX_SEQ_LEN) + "]");

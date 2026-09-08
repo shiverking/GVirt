@@ -94,14 +94,31 @@ def case_name(batch: int, cached_lens: list[int], query_lens: list[int]) -> str:
 # prints all failures at the end; a hidden environment variable selects the
 # single child case.
 parser = argparse.ArgumentParser(description="Xlite attention correctness test")
+parser.add_argument("--decode-attention-backend", choices=("legacy", "paged_310p"), default="legacy")
 parser.add_argument("--rerun-failed", action="store_true",
                     help="310P FP16: rerun failures from attention_310p_report/summary.json")
 parser.add_argument("--async-stress-iters", type=int, default=0,
                     help="310P FP16: queue this many calls before one final synchronization")
 test_args = parser.parse_args()
+if test_args.decode_attention_backend == "paged_310p":
+    os.environ["XLITE_TEST_FP16_ONLY"] = "1"
+    models = [model for model in models if model[0] == "qwen3_asr_1.7B_TP1"]
+    work = [(1, [length - 1], [1]) for length in (1, 16, 127, 128, 129, 512, 2048)]
+    work += [
+        (2, [2047, 0], [1, 1]),
+        (8, [2047, 0, 511, 15, 128, 126, 127, 63], [1] * 8),
+        (20, [2047, 0, 511, 15, 128] * 4, [1] * 20),
+        (20, [0, 15, 126, 127, 128] * 4, [1] * 20),
+        (4, [2047, 128, 15, 64], [1, 65, 1, 129]),
+        (4, [64, 15, 128, 2047], [129, 1, 65, 1]),
+    ]
+    # Every new-path case checks repeated scratch reuse, not just the last output.
+    if not test_args.async_stress_iters:
+        test_args.async_stress_iters = 4
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
 if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
-    report_dir = Path("attention_310p_report")
+    report_dir = Path("attention_paged_310p_report" if test_args.decode_attention_backend == "paged_310p"
+                      else "attention_310p_report")
     report_dir.mkdir(parents=True, exist_ok=True)
     selected_indices = list(range(len(work)))
     if test_args.async_stress_iters:
@@ -109,7 +126,8 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
             parser.error("--async-stress-iters must be positive")
         # One ordinary decode and one batch-20 decode exercise workspace reuse
         # without turning the stress check into the full correctness sweep.
-        selected_indices = [6, 13]
+        if test_args.decode_attention_backend == "legacy":
+            selected_indices = [6, 13]
     if test_args.rerun_failed:
         summary_path = report_dir / "summary.json"
         if not summary_path.is_file():
@@ -141,7 +159,8 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 result = subprocess.run(
-                    [sys.executable, str(Path(__file__).resolve())], env=env,
+                    [sys.executable, str(Path(__file__).resolve()), "--decode-attention-backend",
+                     test_args.decode_attention_backend], env=env,
                     stdout=log, stderr=subprocess.STDOUT, timeout=1200, check=False)
                 status = result.returncode
             except subprocess.TimeoutExpired:
@@ -171,7 +190,8 @@ if poc_case_index is not None:
         raise SystemExit(f"invalid XLITE_ATTENTION_CASE_INDEX={poc_case_index!r}")
 
 torch.npu.set_device(0)
-rt = Runtime(0, 3000)
+rt = Runtime(0, 768 if test_args.decode_attention_backend == "paged_310p" else 3000)
+rt.set_decode_attention_backend(test_args.decode_attention_backend)
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
@@ -239,8 +259,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 (total_query_len, n_heads * head_dim), torch.nan, dtype=test_dtype)
 
             kvcache_block_num = max_num_blocks * batch
-            k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, n_kv_heads, head_dim)
-            v_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, n_kv_heads, head_dim)
+            k_cache_xlite = torch.full((kvcache_block_num, BLOCK_SIZE, n_kv_heads, head_dim), 123.0)
+            v_cache_xlite = torch.full_like(k_cache_xlite, -123.0)
 
             query_lens = torch.tensor(query_len_list, dtype=torch.int32).flatten()
             cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
@@ -334,21 +354,99 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 k_cache_xlite[cache_block_idx, :current_seq_len] = full_k[:, seq_start:seq_end]
                 v_cache_xlite[cache_block_idx, :current_seq_len] = full_v[:, seq_start:seq_end]
 
+        cache_before = (k_cache_xlite.clone(), v_cache_xlite.clone())
         torch.npu.synchronize()
         if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
             rt.set_host_attention_metadata(
                 query_len_list, cached_lens_list,
                 block_tables_array.reshape(-1).tolist(), max_num_blocks)
         stress_iterations = int(os.getenv("XLITE_ATTENTION_ASYNC_STRESS_ITERS", "1"))
+        retained = []
+        for iteration in range(stress_iterations):
+            order = list(range(batch)) if iteration % 2 == 0 else list(reversed(range(batch)))
+            rows = []
+            for request in order:
+                start = sum(query_len_list[:request])
+                rows.extend(range(start, start + query_len_list[request]))
+            frame_q = qkv_xlite[rows].contiguous()
+            frame_ref = output_standard[rows].contiguous()
+            frame_lens = [query_len_list[i] for i in order]
+            frame_cached = [cached_lens_list[i] for i in order]
+            frame_table = block_tables_array[order].copy()
+            frame_starts = np.cumsum(frame_lens) - frame_lens
+            guard = torch.full((total_query_len + 2, n_heads * head_dim), 123.0,
+                               dtype=test_dtype, device="npu")
+            guard[1:-1].fill_(torch.nan)
+            device_meta = [torch.tensor(value, dtype=torch.int32, device="npu") for value in
+                           (frame_starts.tolist(), frame_lens, frame_cached, frame_table.reshape(-1).tolist())]
+            retained.append((frame_q, frame_ref, frame_lens, frame_cached, frame_table, guard, device_meta))
+        torch.npu.synchronize()
         rt.reset_stats()
-        for _ in range(stress_iterations):
-            attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
-                      output_xlite, query_start_loc, query_lens, cached_lens,
-                      block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE,
+        for frame_q, frame_ref, frame_lens, frame_cached, frame_table, guard, device_meta in retained:
+            if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
+                rt.set_host_attention_metadata(frame_lens, frame_cached, frame_table.reshape(-1).tolist(), max_num_blocks)
+            attention(rt, frame_q, k_cache_xlite, v_cache_xlite,
+                      guard[1:-1], *device_meta, n_heads, n_kv_heads, head_dim, BLOCK_SIZE,
                       batch, max_num_blocks, enable_flash,
                       synchronize=stress_iterations == 1)
         torch.npu.synchronize()
-        if stress_iterations > 1:
+        for frame in retained:
+            reference, guard = frame[1], frame[5]
+            actual = guard[1:-1]
+            assert torch.isfinite(actual).all(), "nonfinite/unwritten attention output"
+            assert torch.all(guard[0] == 123) and torch.all(guard[-1] == 123), "output guard overwritten"
+            cosine = torch.nn.functional.cosine_similarity(reference.float().flatten(), actual.float().flatten(), dim=0)
+            max_error = (reference.float() - actual.float()).abs().max()
+            print(f"retained output cosine={float(cosine.cpu()):.9f} max_abs_error={float(max_error.cpu()):.6g}")
+            assert float(cosine.cpu()) >= 0.999, "retained async output differs"
+            offset = 0
+            for length in frame[2]:
+                per_request = torch.nn.functional.cosine_similarity(
+                    reference[offset:offset + length].float().flatten(),
+                    actual[offset:offset + length].float().flatten(), dim=0)
+                assert float(per_request.cpu()) >= 0.999, f"request at row {offset} differs"
+                offset += length
+        output_xlite = retained[0][5][1:-1]
+        assert torch.equal(k_cache_xlite, cache_before[0]), "attention modified K cache"
+        assert torch.equal(v_cache_xlite, cache_before[1]), "attention modified V cache"
+        if test_args.decode_attention_backend == "paged_310p":
+            stats = rt.get_stats()
+            decode_count = sum(length == 1 for length in query_len_list)
+            assert stats["paged_decode_requests"] == stress_iterations * decode_count, stats
+            assert stats["paged_decode_kernel_launches"] == stress_iterations, stats
+            expected_merges = stress_iterations if max(cached_lens_list[i] + 1 for i in range(batch)
+                                                       if query_len_list[i] == 1) > 512 else 0
+            assert stats["paged_decode_merge_launches"] == expected_merges, stats
+            assert stats["legacy_decode_requests"] == stats["decode_kv_gather_bytes"] == 0, stats
+            assert stats["attention_metadata_d2h_bytes"] == 0, stats
+            assert stats["stream_synchronizations"] == 0, stats
+            print(f"paged_decode_stats={stats}")
+            # Reuse the SAME cache allocations with a different physical ownership
+            # map, after prior consumers have finished. Unused slots stay poisoned.
+            k_cache_xlite.copy_(cache_before[0].flip(0))
+            v_cache_xlite.copy_(cache_before[1].flip(0))
+            reused_table = kvcache_block_num - 1 - block_tables_array
+            reused_device_table = torch.tensor(reused_table.reshape(-1).tolist(), dtype=torch.int32, device="npu")
+            reused_output = torch.full_like(output_xlite, torch.nan)
+            expected_k, expected_v = k_cache_xlite.clone(), v_cache_xlite.clone()
+            torch.npu.synchronize()
+            rt.set_host_attention_metadata(query_len_list, cached_lens_list,
+                                           reused_table.reshape(-1).tolist(), max_num_blocks)
+            attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite, reused_output,
+                      query_start_loc, query_lens, cached_lens, reused_device_table,
+                      n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, max_num_blocks,
+                      enable_flash)
+            torch.npu.synchronize()
+            assert torch.isfinite(reused_output).all(), "block reuse produced nonfinite output"
+            offset = 0
+            for length in query_len_list:
+                reuse_cosine = torch.nn.functional.cosine_similarity(
+                    output_standard[offset:offset + length].float().flatten(),
+                    reused_output[offset:offset + length].float().flatten(), dim=0)
+                assert float(reuse_cosine.cpu()) >= 0.999, "reassigned physical block output differs"
+                offset += length
+            assert torch.equal(k_cache_xlite, expected_k) and torch.equal(v_cache_xlite, expected_v)
+        elif stress_iterations > 1:
             stats = rt.get_stats()
             if stats["stream_synchronizations"] != 0:
                 raise AssertionError(f"async attention synchronized its runtime stream: {stats}")
@@ -396,7 +494,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                         f"attention cosine similarity {float(cosine.cpu())} < 0.999; "
                         + ", ".join(per_request_cosine)
                     )
-                torch.testing.assert_close(output_standard, output_xlite, atol=1e-2, rtol=1e-2)
+                if test_args.decode_attention_backend == "legacy":
+                    torch.testing.assert_close(output_standard, output_xlite, atol=1e-2, rtol=1e-2)
             else:
                 torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
