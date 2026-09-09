@@ -214,6 +214,10 @@ public:
     {
         ++_nativeAtbCacheWrites;
     }
+    void RecordNativeAtbStagingBytes(uint64_t bytes)
+    {
+        _nativeAtbStagingBytes += bytes;
+    }
 #endif
     [[nodiscard]] bool ForceSyncAttention(void) const
     {
@@ -271,6 +275,10 @@ public:
     [[nodiscard]] uint64_t NativeAtbCacheWrites(void) const
     {
         return _nativeAtbCacheWrites;
+    }
+    [[nodiscard]] uint64_t NativeAtbStagingBytes(void) const
+    {
+        return _nativeAtbStagingBytes;
     }
 #endif
 
@@ -460,6 +468,7 @@ protected:
     uint64_t _nativeAtbDecodeRequests = 0;
     uint64_t _nativeAtbDecodeLaunches = 0;
     uint64_t _nativeAtbCacheWrites = 0;
+    uint64_t _nativeAtbStagingBytes = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;

@@ -205,6 +205,14 @@ private:
     XModel *_model = nullptr;
     std::vector<std::vector<XTensor>> _kv;
     std::vector<std::vector<at::Tensor>> _nativeKv310P;
+    at::Tensor _nativeQkvStage310P;
+    at::Tensor _nativeOutputStage310P;
+    at::Tensor _nativeSlotStage310P;
+    at::Tensor _nativeBlockTableStage310P;
+    at::Tensor _nativeTotalLensStage310P;
+    uint64_t _nativeMaxTokens310P = 0;
+    uint64_t _nativeMaxBatch310P = 0;
+    uint64_t _nativeMaxBlocks310P = 0;
     std::vector<XTensor> _deepstackInputEmbeds;
     void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                  std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
@@ -309,6 +317,11 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     uint32_t numMoeLayers = c.nLayers - c.nDenseLayers;
     uint32_t nRE = numMoeLayers * nLocalRoutedExperts;
     uint32_t tpRank = rankId % c.defTpSize;
+#ifdef XLITE_ARCH_310P
+    _nativeMaxTokens310P = c.maxBatchedTokens;
+    _nativeMaxBatch310P = c.maxBatch;
+    _nativeMaxBlocks310P = (c.maxSeqLen + 127) / 128;
+#endif
 
     if (c.nRoutedExperts % c.moeEpSize != 0) {
         {
@@ -810,6 +823,19 @@ void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache
         }
     }
     _nativeKv310P = kvCache;
+    const auto fp16Options = kvCache[0][0].options().dtype(at::kHalf);
+    const auto intOptions = kvCache[0][0].options().dtype(at::kInt);
+    _nativeQkvStage310P = at::empty(
+        {static_cast<int64_t>(_nativeMaxTokens310P), 32, 128}, fp16Options);
+    _nativeOutputStage310P = at::empty(
+        {static_cast<int64_t>(_nativeMaxTokens310P), 16, 128}, fp16Options);
+    _nativeSlotStage310P =
+        at::empty({static_cast<int64_t>(_nativeMaxTokens310P)}, intOptions);
+    _nativeBlockTableStage310P = at::empty(
+        {static_cast<int64_t>(_nativeMaxBatch310P),
+         static_cast<int64_t>(_nativeMaxBlocks310P)}, intOptions);
+    _nativeTotalLensStage310P =
+        at::empty({static_cast<int64_t>(_nativeMaxBatch310P)}, intOptions);
 #else
     (void)kvCache;
     throw std::runtime_error("native 310P KV cache is unavailable in this build");
@@ -818,10 +844,9 @@ void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache
 
 #ifdef XLITE_ARCH_310P
 namespace {
-at::Tensor MakeNpuView(void *ptr, at::IntArrayRef sizes, at::IntArrayRef strides,
-                       const at::TensorOptions &options)
+size_t TorchTensorBytes(const at::Tensor &tensor)
 {
-    return at::from_blob(ptr, sizes, strides, [](void *) {}, options);
+    return static_cast<size_t>(tensor.numel()) * tensor.element_size();
 }
 
 void CallAtbBoxed(const char *name, c10::Stack &stack)
@@ -861,19 +886,33 @@ bool _CModel::RunNativeAtbAttention310P(
     at::Tensor &nativeK = _nativeKv310P[layer][0];
     at::Tensor &nativeV = _nativeKv310P[layer][1];
     const int64_t tokens = static_cast<int64_t>(qkv.shape[0]);
-    const int64_t rowStride = static_cast<int64_t>(nHeads + 2 * nKvHeads) * headDim;
-    const auto fp16Options = nativeK.options().dtype(at::kHalf);
-    const auto intOptions = nativeK.options().dtype(at::kInt);
-    at::Tensor query = MakeNpuView(qkv.ptr, {tokens, nHeads, headDim},
-                                   {rowStride, headDim, 1}, fp16Options);
-    auto *qkvBytes = static_cast<uint8_t *>(qkv.ptr);
-    at::Tensor key = MakeNpuView(qkvBytes + nHeads * headDim * sizeof(uint16_t),
-                                 {tokens, nKvHeads, headDim}, {rowStride, headDim, 1},
-                                 fp16Options);
-    at::Tensor value = MakeNpuView(
-        qkvBytes + (nHeads + nKvHeads) * headDim * sizeof(uint16_t),
-        {tokens, nKvHeads, headDim}, {rowStride, headDim, 1}, fp16Options);
-    at::Tensor slots = MakeNpuView(slotMapping.ptr, {tokens}, {1}, intOptions);
+    if (tokens > static_cast<int64_t>(_nativeMaxTokens310P) ||
+        batch > _nativeMaxBatch310P || blockTables.shape.size() != 2 ||
+        blockTables.shape[1] > _nativeMaxBlocks310P) {
+        throw std::runtime_error("native_atb staging capacity exceeded");
+    }
+    CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeQkvStage310P),
+                               TorchTensorBytes(_nativeQkvStage310P), qkv.ptr, qkv.bytes,
+                               ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    rt.RecordNativeAtbStagingBytes(qkv.bytes);
+    at::Tensor packed = _nativeQkvStage310P.narrow(0, 0, tokens);
+    at::Tensor query = packed.narrow(1, 0, nHeads);
+    at::Tensor key = packed.narrow(1, nHeads, nKvHeads);
+    at::Tensor value = packed.narrow(1, nHeads + nKvHeads, nKvHeads);
+    if (layer == 0) {
+        CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeSlotStage310P),
+                                   TorchTensorBytes(_nativeSlotStage310P), slotMapping.ptr,
+                                   slotMapping.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeBlockTableStage310P),
+                                   TorchTensorBytes(_nativeBlockTableStage310P), blockTables.ptr,
+                                   blockTables.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeTotalLensStage310P),
+                                   TorchTensorBytes(_nativeTotalLensStage310P), totalLens.ptr,
+                                   totalLens.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        rt.RecordNativeAtbStagingBytes(
+            slotMapping.bytes + blockTables.bytes + totalLens.bytes);
+    }
+    at::Tensor slots = _nativeSlotStage310P.narrow(0, 0, tokens);
 
     c10::Stack reshapeStack;
     reshapeStack.emplace_back(key);
@@ -890,14 +929,10 @@ bool _CModel::RunNativeAtbAttention310P(
     if (tokens != batch) {
         throw std::runtime_error("native_atb decode requires exactly one query token per request");
     }
-    at::Tensor table = MakeNpuView(blockTables.ptr,
-                                   {static_cast<int64_t>(blockTables.shape[0]),
-                                    static_cast<int64_t>(blockTables.shape[1])},
-                                   {static_cast<int64_t>(blockTables.shape[1]), 1}, intOptions);
-    at::Tensor lengths = MakeNpuView(totalLens.ptr, {static_cast<int64_t>(batch)}, {1}, intOptions);
-    at::Tensor out = MakeNpuView(output.ptr, {tokens, nHeads, headDim},
-                                 {static_cast<int64_t>(nHeads * headDim), headDim, 1},
-                                 fp16Options);
+    at::Tensor table = _nativeBlockTableStage310P.narrow(0, 0, batch).narrow(
+        1, 0, static_cast<int64_t>(blockTables.shape[1]));
+    at::Tensor lengths = _nativeTotalLensStage310P.narrow(0, 0, batch);
+    at::Tensor out = _nativeOutputStage310P.narrow(0, 0, tokens);
     c10::Stack pagedStack;
     pagedStack.emplace_back(query);
     pagedStack.emplace_back(nativeK);
@@ -911,6 +946,9 @@ bool _CModel::RunNativeAtbAttention310P(
     pagedStack.emplace_back(out);
     pagedStack.emplace_back(c10::IValue());
     CallAtbBoxed("paged", pagedStack);
+    CHECK_ACL(aclrtMemcpyAsync(output.ptr, output.bytes, TensorPtr(out), TorchTensorBytes(out),
+                               ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    rt.RecordNativeAtbStagingBytes(output.bytes);
     rt.RecordNativeAtbAttention(batch);
     return true;
 }
@@ -2691,6 +2729,7 @@ PYBIND11_MODULE(_C, m)
         stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
         stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
         stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
+        stats["native_atb_staging_copy_bytes"] = rt.NativeAtbStagingBytes();
         return stats;
     });
 #endif
@@ -2752,6 +2791,7 @@ PYBIND11_MODULE(_C, m)
             stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
             stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
             stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
+            stats["native_atb_staging_copy_bytes"] = rt.NativeAtbStagingBytes();
 #endif
             return stats;
         })
