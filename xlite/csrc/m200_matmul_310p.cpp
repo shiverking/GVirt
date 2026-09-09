@@ -4,36 +4,19 @@
 #include "m200_matmul_310p.h"
 
 #include <algorithm>
-#include <cstring>
-#include <memory>
 #include <stdexcept>
-#include <tuple>
 #include <unordered_map>
 #include <vector>
 
 #include "aclrtlaunch_all.h"
 #include "ascend.h"
-#include "kernel_tiling/kernel_tiling.h"
-#include "tiling/platform/platform_ascendc.h"
-#include "tiling/tiling_api.h"
-
-using namespace matmul_tiling;
+#include "m200_tiling_310p_c.h"
 
 namespace {
 
 constexpr uint32_t kMaxDecodeBatch = 20;
 constexpr uint32_t kLmHeadN = 151936;
 constexpr uint32_t kLmHeadChunkN = 12288;
-
-uint32_t CeilDiv(uint32_t value, uint32_t divisor)
-{
-    return (value + divisor - 1) / divisor;
-}
-
-uint32_t AlignUp(uint32_t value, uint32_t alignment)
-{
-    return CeilDiv(value, alignment) * alignment;
-}
 
 bool IsAsrProjection(uint32_t n, uint32_t k)
 {
@@ -62,45 +45,16 @@ uint64_t TilingKey(uint32_t m, uint32_t n, uint32_t k)
 
 TilingEntry BuildTiling(uint32_t m, uint32_t n, uint32_t k)
 {
-    auto platform = platform_ascendc::PlatformAscendCManager::GetInstance(XLITE_BUILD_SOC);
-    const uint32_t availableCores = platform->GetCoreNumAic();
-    if (availableCores == 0) {
-        throw std::runtime_error("Ascend310P reported zero Cube cores");
-    }
-    const uint32_t targetCores = std::min(availableCores, CeilDiv(n, 256U));
-    const uint32_t singleCoreN = AlignUp(CeilDiv(n, targetCores), 256U);
-    const uint32_t requestedCores = CeilDiv(n, singleCoreN);
-
-    MultiCoreMatmulTiling tilingApi(*platform);
-    tilingApi.SetAType(TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16, false);
-    tilingApi.SetBType(TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16, true);
-    tilingApi.SetCType(TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16);
-    tilingApi.SetOrgShape(m, n, k);
-    tilingApi.SetShape(m, n, k);
-    tilingApi.SetSingleShape(32, singleCoreN, -1);
-    tilingApi.SetDim(requestedCores);
-    tilingApi.SetBias(false);
-    tilingApi.SetBufferSpace(-1, -1, -1);
-
-    optiling::TCubeTiling tiling;
-    if (tilingApi.GetTiling(tiling) == -1) {
-        throw std::runtime_error("Ascend310P M200 MatMul tiling failed");
-    }
     TilingEntry result;
-    result.usedCores = static_cast<uint32_t>(tiling.get_usedCoreNum());
-    if (result.usedCores == 0 || result.usedCores > availableCores) {
-        throw std::runtime_error("Ascend310P M200 MatMul generated an invalid core count");
+    result.host.resize(4096);
+    size_t written = 0;
+    char error[256] = {};
+    if (XliteM200BuildTiling310P(m, n, k, result.host.data(), result.host.size(), &written,
+                                 &result.usedCores, &result.systemWorkspaceBytes,
+                                 error, sizeof(error)) != 0) {
+        throw std::runtime_error(std::string("Ascend310P M200 tiling: ") + error);
     }
-    uint64_t ubBytes = 0;
-    platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubBytes);
-    result.systemWorkspaceBytes = static_cast<uint64_t>(platform->GetLibApiWorkSpaceSize());
-    const uint32_t tilingBytes = tiling.GetDataSize();
-    if (tilingBytes > sizeof(optiling::TCubeTiling)) {
-        throw std::runtime_error("Ascend310P TCubeTiling exceeds its ABI storage");
-    }
-    result.host.resize(sizeof(optiling::TCubeTiling) + sizeof(uint64_t), 0);
-    tiling.SaveToBuffer(result.host.data(), tilingBytes);
-    std::memcpy(result.host.data() + sizeof(optiling::TCubeTiling), &ubBytes, sizeof(ubBytes));
+    result.host.resize(written);
     return result;
 }
 

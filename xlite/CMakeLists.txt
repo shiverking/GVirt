@@ -258,6 +258,25 @@ if(XLITE_BUILD_ARCH_310P)
         CUSTOM_ASCEND310P
         HAVE_WORKSPACE
         HAVE_TILING)
+    # CANN's host tiling libraries use the legacy libstdc++ ABI, while Torch
+    # may use the new ABI. Keep them behind a pure-C shared-library boundary so
+    # their usage requirements cannot alter libxlite.so's C++ symbol ABI.
+    add_library(xlite_m200_tiling_310p SHARED
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/m200_tiling_310p_c.cpp)
+    target_include_directories(xlite_m200_tiling_310p PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/include)
+    target_compile_features(xlite_m200_tiling_310p PRIVATE cxx_std_17)
+    target_compile_options(xlite_m200_tiling_310p PRIVATE
+        -O2 -Wall -Werror -D_GLIBCXX_USE_CXX11_ABI=0)
+    target_compile_definitions(xlite_m200_tiling_310p PRIVATE
+        SOC_VERSION="${SOC_VERSION}")
+    target_link_libraries(xlite_m200_tiling_310p PRIVATE
+        host_intf_pub
+        tiling_api
+        register
+        platform
+        ascendalog
+        dl)
 endif()
 
 # Bundle all generated aclrtlaunch_*.h headers into one merged header so
@@ -436,12 +455,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         xlite_kernels_f16_310p_${RUN_MODE}
         xlite_kernels_baseline_310p_${RUN_MODE}
         xlite_kernels_m200_matmul_310p_${RUN_MODE}
-        host_intf_pub
-        tiling_api
-        register
-        platform
-        ascendalog
-        dl
+        xlite_m200_tiling_310p
         ${XLITE_NNOPBASE_LIBRARY}
         ${XLITE_OPAPI_LIBRARY}
     )
@@ -532,6 +546,7 @@ if(XLITE_BUILD_ARCH_310P)
         xlite_kernels_f16_310p_${RUN_MODE}
         xlite_kernels_baseline_310p_${RUN_MODE}
         xlite_kernels_m200_matmul_310p_${RUN_MODE}
+        xlite_m200_tiling_310p
         LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
     )
 endif()
