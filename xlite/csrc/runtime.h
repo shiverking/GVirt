@@ -4,7 +4,9 @@
 #ifndef _XLITE_RUNTIME_H_
 #define _XLITE_RUNTIME_H_
 
+#include <array>
 #include <cstdint>
+#include <string>
 #include "base.h"
 
 #define XLITE_DEFAULT_PORT 10266
@@ -71,6 +73,13 @@ enum commType {
     MAX_COMM_TYPE,
 };
 
+#ifdef XLITE_ARCH_310P
+enum class XMatmulBackend310P {
+    ACLNN,
+    M200_ASR,
+};
+#endif
+
 class XRuntime
 {
 public:
@@ -126,6 +135,28 @@ public:
     int64_t GetTensorOffset(XTensor &t);
 
     void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
+#ifdef XLITE_ARCH_310P
+    void SetMatmulBackend310P(const std::string &backend);
+    [[nodiscard]] const char *MatmulBackend310PName(void) const;
+    [[nodiscard]] bool UseM200Matmul310P(void) const
+    {
+        return _matmulBackend310P == XMatmulBackend310P::M200_ASR;
+    }
+    void RecordM200Matmul310P(uint32_t m)
+    {
+        ++m200MatmulRequests;
+        if (m < m200MatmulRequestsByM.size()) {
+            ++m200MatmulRequestsByM[m];
+        }
+    }
+    void RecordAclnnMatmul310P(uint32_t m)
+    {
+        ++aclnnMatmulRequests;
+        if (m < aclnnMatmulRequestsByM.size()) {
+            ++aclnnMatmulRequestsByM[m];
+        }
+    }
+#endif
     void RecordAttentionAclnnLaunch(void)
     {
         ++_attentionAclnnLaunches;
@@ -224,6 +255,8 @@ public:
     uint64_t m200MatmulRequests = 0;
     uint64_t m200MatmulKernelLaunches = 0;
     uint64_t aclnnMatmulRequests = 0;
+    std::array<uint64_t, 21> m200MatmulRequestsByM{};
+    std::array<uint64_t, 21> aclnnMatmulRequestsByM{};
 #endif
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
@@ -312,6 +345,9 @@ public:
     uint64_t maxTokensDp = 1;
 
 protected:
+#ifdef XLITE_ARCH_310P
+    XMatmulBackend310P _matmulBackend310P = XMatmulBackend310P::M200_ASR;
+#endif
     int GetNodeIps(void);
     int InitHcclComm(void);
     int InitXcclComm(void);

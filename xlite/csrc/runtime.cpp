@@ -263,6 +263,27 @@ XRuntime::~XRuntime(void)
     }
 }
 
+#ifdef XLITE_ARCH_310P
+void XRuntime::SetMatmulBackend310P(const std::string &backend)
+{
+    if (backend == "m200_asr" || backend == "auto") {
+        _matmulBackend310P = XMatmulBackend310P::M200_ASR;
+        return;
+    }
+    if (backend == "aclnn") {
+        _matmulBackend310P = XMatmulBackend310P::ACLNN;
+        return;
+    }
+    throw std::invalid_argument(
+        "Ascend310P matmul backend must be one of: m200_asr, aclnn");
+}
+
+const char *XRuntime::MatmulBackend310PName(void) const
+{
+    return _matmulBackend310P == XMatmulBackend310P::M200_ASR ? "m200_asr" : "aclnn";
+}
+#endif
+
 int XRuntime::GetNodeIps(void)
 {
     const char *envDevs = std::getenv("XLITE_DEVS_PER_NODE");

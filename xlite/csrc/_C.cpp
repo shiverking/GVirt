@@ -2411,7 +2411,9 @@ PYBIND11_MODULE(_C, m)
         info["attention_metadata"] = "host_retained_pinned";
         info["attention_execution"] = "async_single_stream";
         info["cross_stream_handoff"] = "split_acl_event_sync";
-        info["matmul_backend"] = "m200_asr_decode_with_aclnn_fallback";
+        info["matmul_backend"] = "runtime_selectable";
+        info["matmul_backends"] = py::make_tuple("m200_asr", "aclnn");
+        info["default_matmul_backend"] = "m200_asr";
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn";
 #else
@@ -2427,6 +2429,19 @@ PYBIND11_MODULE(_C, m)
         stats["m200_requests"] = rt.m200MatmulRequests;
         stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
         stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+        stats["matmul_backend"] = rt.MatmulBackend310PName();
+        py::dict m200ByM;
+        py::dict aclnnByM;
+        for (size_t batch = 1; batch < rt.m200MatmulRequestsByM.size(); ++batch) {
+            if (rt.m200MatmulRequestsByM[batch] != 0) {
+                m200ByM[py::int_(batch)] = rt.m200MatmulRequestsByM[batch];
+            }
+            if (rt.aclnnMatmulRequestsByM[batch] != 0) {
+                aclnnByM[py::int_(batch)] = rt.aclnnMatmulRequestsByM[batch];
+            }
+        }
+        stats["m200_requests_by_m"] = m200ByM;
+        stats["aclnn_requests_by_m"] = aclnnByM;
         stats["stream_synchronizations"] = rt.StreamSynchronizations();
         stats["prepare_attn_synchronizations"] = rt.PrepareAttnSynchronizations();
         stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
@@ -2452,12 +2467,29 @@ PYBIND11_MODULE(_C, m)
         .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
         .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
         .def("set_current_context", &XRuntime::SetCurrentContext)
+#ifdef XLITE_ARCH_310P
+        .def("set_matmul_backend_310p", &XRuntime::SetMatmulBackend310P,
+             py::arg("backend"))
+#endif
         .def("get_stats", [](const XRuntime &rt) {
             py::dict stats;
 #ifdef XLITE_ARCH_310P
             stats["m200_requests"] = rt.m200MatmulRequests;
             stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
             stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+            stats["matmul_backend"] = rt.MatmulBackend310PName();
+            py::dict m200ByM;
+            py::dict aclnnByM;
+            for (size_t batch = 1; batch < rt.m200MatmulRequestsByM.size(); ++batch) {
+                if (rt.m200MatmulRequestsByM[batch] != 0) {
+                    m200ByM[py::int_(batch)] = rt.m200MatmulRequestsByM[batch];
+                }
+                if (rt.aclnnMatmulRequestsByM[batch] != 0) {
+                    aclnnByM[py::int_(batch)] = rt.aclnnMatmulRequestsByM[batch];
+                }
+            }
+            stats["m200_requests_by_m"] = m200ByM;
+            stats["aclnn_requests_by_m"] = aclnnByM;
 #endif
             stats["stream_synchronizations"] = rt.StreamSynchronizations();
             stats["prepare_attn_synchronizations"] = rt.PrepareAttnSynchronizations();

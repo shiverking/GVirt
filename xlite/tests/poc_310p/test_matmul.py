@@ -33,6 +33,8 @@ def run_shape(m: int, n: int, k: int) -> None:
     torch.npu.config.allow_internal_format = False
     torch.manual_seed(310)
     runtime = Runtime(0, 768)  # ACLNN workspace budget is at most 512 MiB.
+    backend = os.environ.get("XLITE_TEST_MATMUL_BACKEND", "m200_asr")
+    runtime.set_matmul_backend_310p(backend)
     x = torch.randn(m, k, dtype=torch.float16, device="npu:0")
     weight = torch.randn(n, k, dtype=torch.float16, device="npu:0")
     output = torch.full((m, n), torch.nan, dtype=torch.float16, device="npu:0")
@@ -66,7 +68,7 @@ def run_shape(m: int, n: int, k: int) -> None:
     }), flush=True)
     # Compare on CPU to avoid the device-side isclose double-tolerance warning.
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
-    use_m200 = m <= 20 and n != 151936
+    use_m200 = backend == "m200_asr" and m <= 20 and n != 151936
     if use_m200:
         expected_launches = 13 if n == 151936 else 1
         if (backend_stats["m200_requests"] != 1 or
@@ -84,6 +86,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-dir", type=Path, default=Path("matmul_310p_report"))
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per shape")
+    parser.add_argument("--backend", choices=("m200_asr", "aclnn"), default="m200_asr",
+                        help="Force one 310P MatMul backend in every selected case")
     parser.add_argument("--list", action="store_true", help="List shapes without loading NPU")
     parser.add_argument(
         "--case", action="append", default=[], metavar="NAME",
@@ -127,7 +131,8 @@ def main() -> int:
         parser.error("--timeout must be positive")
     args.report_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    env = dict(os.environ, XLITE_TEST_FP16_ONLY="1")
+    env = dict(os.environ, XLITE_TEST_FP16_ONLY="1",
+               XLITE_TEST_MATMUL_BACKEND=args.backend)
     for name, m, n, k in cases:
         print(f"[ RUN      ] {name} M={m} N={n} K={k}", flush=True)
         log_path = args.report_dir / f"{name}.log"

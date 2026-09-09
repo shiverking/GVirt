@@ -727,7 +727,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         return;
     }
 #ifdef XLITE_ARCH_310P
-    if (XliteM200Matmul310PSupported(in, weight, out, weightNZ, bias, deqScale, transpose)) {
+    if (rt.UseM200Matmul310P() &&
+        XliteM200Matmul310PSupported(in, weight, out, weightNZ, bias, deqScale, transpose)) {
         XliteM200Matmul310P(rt, in, weight, out);
         return;
     }

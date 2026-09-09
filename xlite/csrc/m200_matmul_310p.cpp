@@ -141,10 +141,10 @@ bool XliteM200Matmul310PSupported(const XTensor &in, const XTensor &weight,
 
 void XliteM200Matmul310P(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out)
 {
-    ++rt.m200MatmulRequests;
     const uint32_t m = static_cast<uint32_t>(in.shape[0]);
     const uint32_t k = static_cast<uint32_t>(in.shape[1]);
     const uint32_t n = static_cast<uint32_t>(weight.shape[0]);
+    rt.RecordM200Matmul310P(m);
     if (n != kLmHeadN) {
         Launch(rt, in.ptr, weight.ptr, out.ptr, m, n, k);
         return;
