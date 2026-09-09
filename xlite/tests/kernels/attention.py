@@ -334,7 +334,7 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         torch.npu.synchronize()
         if hasattr(rt, "set_host_attention_metadata"):
             rt.set_host_attention_metadata(
-                query_lens_list,
+                query_len_list,
                 cached_lens_list,
                 block_tables_array.reshape(-1).tolist(),
                 int(block_tables_array.shape[1]),
