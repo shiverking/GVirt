@@ -6,6 +6,10 @@ set(SOC_VERSION "Ascend310P3" CACHE STRING "target SoC")
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
     CACHE STRING "Ascend CANN package path")
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(NOT SOC_VERSION STREQUAL "Ascend310P3")
     message(FATAL_ERROR "The Xlite M200 Cube probe only supports SOC_VERSION=Ascend310P3")
 endif()
@@ -45,4 +49,3 @@ target_link_libraries(xlite_m200_cube_probe_runner PRIVATE
     platform
     ascendalog
     dl)
-
