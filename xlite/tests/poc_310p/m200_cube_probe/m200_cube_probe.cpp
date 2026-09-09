@@ -48,7 +48,7 @@ __aicore__ inline void CalcOffsets(uint32_t blockIdx, const TCubeTiling &tiling,
 extern "C" __global__ __aicore__ void xlite_m200_cube_probe(
     GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tilingGm)
 {
-#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 2002)
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
 #error "xlite_m200_cube_probe must be compiled for the real M200 architecture"
 #endif
     using AType = half;
@@ -94,4 +94,3 @@ extern "C" __global__ __aicore__ void xlite_m200_cube_probe(
     mm.IterateAll(cGlobal[offsetC]);
     mm.End();
 }
-
