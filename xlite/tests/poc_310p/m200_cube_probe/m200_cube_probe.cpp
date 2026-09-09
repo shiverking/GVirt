@@ -36,7 +36,8 @@ __aicore__ inline void CalcOffsets(uint32_t blockIdx, const TCubeTiling &tiling,
     const uint32_t mIndex = blockIdx % mBlocks;
     const uint32_t nIndex = blockIdx / mBlocks;
     offsetA = mIndex * tiling.Ka * tiling.singleCoreM;
-    offsetB = nIndex * tiling.singleCoreN;
+    // B is physically [N,K] and logically transposed by Matmul.
+    offsetB = nIndex * tiling.singleCoreN * tiling.Kb;
     offsetC = mIndex * tiling.N * tiling.singleCoreM + nIndex * tiling.singleCoreN;
     tailM = tiling.M - mIndex * tiling.singleCoreM;
     tailM = tailM < tiling.singleCoreM ? tailM : tiling.singleCoreM;
@@ -91,7 +92,7 @@ extern "C" __global__ __aicore__ void xlite_m200_cube_probe(
 
     mm.SetOrgShape(tiling.M, tiling.N, tiling.Ka, tiling.Kb);
     mm.SetTensorA(aGlobal[offsetA], false);
-    mm.SetTensorB(bGlobal[offsetB], false);
+    mm.SetTensorB(bGlobal[offsetB], true);
     mm.SetTail(tailM, tailN);
     mm.IterateAll(cGlobal[offsetC]);
     mm.End();

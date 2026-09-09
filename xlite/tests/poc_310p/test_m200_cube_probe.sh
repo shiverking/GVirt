@@ -6,6 +6,8 @@ source_dir="${script_dir}/m200_cube_probe"
 build_dir=${XLITE_M200_PROBE_BUILD_DIR:-/tmp/xlite_m200_cube_probe_build_release}
 cann_path=${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
 jobs=${XLITE_BUILD_JOBS:-8}
+warmup=${XLITE_M200_PROBE_WARMUP:-3}
+iterations=${XLITE_M200_PROBE_ITERATIONS:-10}
 
 echo "[ M200 CUBE PROBE ] source=${source_dir}"
 echo "[ M200 CUBE PROBE ] build=${build_dir}"
@@ -27,22 +29,37 @@ fi
 
 export LD_LIBRARY_PATH="${build_dir}/lib:${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
-for m in 1 20; do
-    echo "[ RUN      ] m200-cube-m${m}"
-    log="${build_dir}/m200-cube-m${m}.log"
-    "${build_dir}/xlite_m200_cube_probe_runner" "${m}" >"${log}" 2>&1
-    status=$?
-    if [[ ${status} -eq 0 ]]; then
-        echo "[       OK ] m200-cube-m${m}"
-        cat "${log}"
-    else
-        failures+=("m200-cube-m${m}:${status}:${log}")
-        echo "[  FAILED  ] m200-cube-m${m} (recorded; continuing)"
-    fi
+cases=(
+    "qkv:4096:2048"
+    "o:2048:2048"
+    "gate-up:12288:2048"
+    "down:2048:6144"
+    "lm-head:151936:2048"
+)
+m_values=(1 8 20)
+total=$((${#cases[@]} * ${#m_values[@]}))
+for spec in "${cases[@]}"; do
+    IFS=: read -r projection n k <<<"${spec}"
+    for m in "${m_values[@]}"; do
+        name="${projection}-m${m}"
+        echo "[ RUN      ] ${name} M=${m} N=${n} K=${k}"
+        log="${build_dir}/${name}.log"
+        "${build_dir}/xlite_m200_cube_probe_runner" \
+            "${projection}" "${m}" "${n}" "${k}" "${warmup}" "${iterations}" \
+            >"${log}" 2>&1
+        status=$?
+        if [[ ${status} -eq 0 ]]; then
+            echo "[       OK ] ${name}"
+            cat "${log}"
+        else
+            failures+=("${name}:${status}:${log}")
+            echo "[  FAILED  ] ${name} (recorded; continuing)"
+        fi
+    done
 done
 
 echo
-echo "M200 Cube probe summary: $((2 - ${#failures[@]})) passed, ${#failures[@]} failed"
+echo "M200 Cube probe summary: $((total - ${#failures[@]})) passed, ${#failures[@]} failed"
 if [[ ${#failures[@]} -ne 0 ]]; then
     echo
     echo "================================================================================"
