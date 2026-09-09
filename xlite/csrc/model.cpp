@@ -1855,7 +1855,17 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
 
 void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XTensor &output)
 {
-    uint32_t batch = rt._batch;
+    if (input.shape.size() != 2 || indices.shape.size() != 1 || output.shape.size() != 3 ||
+        input.shape[1] != _c.hiddenSize) {
+        throw std::runtime_error("ForwardGetLogits received invalid input, indices, or output shape");
+    }
+    // Logits can be invoked independently by vLLM's memory-profile sampler,
+    // before PrepareAttn has populated rt._batch. The number of sampled rows is
+    // an LM-head property and is fully described by indices/output.
+    const uint32_t batch = static_cast<uint32_t>(output.shape[1]);
+    if (batch == 0 || indices.numel != batch || batch > input.shape[0]) {
+        throw std::runtime_error("ForwardGetLogits sample count does not match indices/output");
+    }
     XTensor localOutput({output.shape[1], output.shape[2]}, output.dtype, output.ptr);
 
     if (batch < input.shape[0]) {
