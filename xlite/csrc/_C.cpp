@@ -2408,12 +2408,23 @@ PYBIND11_MODULE(_C, m)
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
+        info["matmul_backend"] = "m200_asr_decode_with_aclnn_fallback";
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";
 #endif
         return info;
     });
+
+#ifdef XLITE_310P_LLM_FP16_POC
+    m.def("get_310p_matmul_stats", [](XRuntime &rt) {
+        py::dict stats;
+        stats["m200_requests"] = rt.m200MatmulRequests;
+        stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
+        stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+        return stats;
+    });
+#endif
 
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>(),

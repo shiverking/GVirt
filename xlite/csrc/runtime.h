@@ -172,6 +172,13 @@ public:
     uint32_t originAicNum;
     uint32_t originAivNum;
     uint32_t reportedAivNum;
+#ifdef XLITE_ARCH_310P
+    // Opaque state owned by the ASR-only M200 Cube MatMul backend.
+    void *_m200MatmulState = nullptr;
+    uint64_t m200MatmulRequests = 0;
+    uint64_t m200MatmulKernelLaunches = 0;
+    uint64_t aclnnMatmulRequests = 0;
+#endif
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
     HcclComm _epComm = nullptr;

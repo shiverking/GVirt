@@ -13,6 +13,7 @@
 #include "trace/trace.h"
 #ifdef XLITE_ARCH_310P
 #include "aclnn_310p.h"
+#include "m200_matmul_310p.h"
 
 // Implemented in the Bisheng host object emitted from the isolated official
 // Add baseline translation unit.
@@ -726,6 +727,10 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         return;
     }
 #ifdef XLITE_ARCH_310P
+    if (XliteM200Matmul310PSupported(in, weight, out, weightNZ, bias, deqScale, transpose)) {
+        XliteM200Matmul310P(rt, in, weight, out);
+        return;
+    }
     XliteAclnn310PMatmul(rt, in, weight, out, weightNZ, bias, deqScale, transpose);
     return;
 #else

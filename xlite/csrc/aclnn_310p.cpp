@@ -169,6 +169,7 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                           bool weightNZ, const XTensor &bias, const XTensor &deqScale,
                           bool transpose)
 {
+    ++rt.aclnnMatmulRequests;
     ValidateFp16("aclnnMatmul", {&in, &weight, &out});
     if (weightNZ || bias.ptr != nullptr || deqScale.ptr != nullptr) {
         throw std::runtime_error(

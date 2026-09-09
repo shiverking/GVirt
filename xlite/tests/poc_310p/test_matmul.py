@@ -19,14 +19,14 @@ PROJECTIONS = (
     ("down", 2048, 6144),
     ("lm-head", 151936, 2048),
 )
-M_VALUES = (1, 8, 127, 128, 129)
+M_VALUES = (1, 8, 20, 127, 128, 129)
 
 
 def run_shape(m: int, n: int, k: int) -> None:
     import torch
     import torch_npu  # noqa: F401: register the NPU backend
     import torch.nn.functional as F
-    from xlite._C import Runtime, matmul
+    from xlite._C import Runtime, get_310p_matmul_stats, matmul
 
     torch.npu.set_device(0)
     # The native ACL descriptors assume ND storage, not Torch internal NZ.
@@ -45,6 +45,7 @@ def run_shape(m: int, n: int, k: int) -> None:
     matmul(runtime, x, weight, output, False, False)
     torch.npu.synchronize()
     elapsed_ms = (time.perf_counter() - started) * 1000
+    backend_stats = dict(get_310p_matmul_stats(runtime))
 
     actual = output.cpu().float()
     expected = reference.cpu().float()
@@ -61,9 +62,21 @@ def run_shape(m: int, n: int, k: int) -> None:
         "cold_call_ms": elapsed_ms,
         "torch_peak_allocated_bytes": torch.npu.max_memory_allocated(),
         "memory_note": "Torch allocator only; excludes native Xlite TensorPool",
+        "backend_stats": backend_stats,
     }), flush=True)
     # Compare on CPU to avoid the device-side isclose double-tolerance warning.
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    if m <= 20:
+        expected_launches = 13 if n == 151936 else 1
+        if (backend_stats["m200_requests"] != 1 or
+                backend_stats["m200_kernel_launches"] != expected_launches or
+                backend_stats["aclnn_requests"] != 0):
+            raise AssertionError(
+                f"supported ASR shape did not exclusively use M200 Cube: {backend_stats}")
+    elif (backend_stats["m200_requests"] != 0 or
+          backend_stats["aclnn_requests"] != 1):
+        raise AssertionError(
+            f"long-prefill shape did not use ACLNN fallback: {backend_stats}")
 
 
 def main() -> int:

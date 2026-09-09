@@ -10,6 +10,9 @@
 #include "sock.h"
 #include "ccl.h"
 #include "auto_tuner.h"
+#ifdef XLITE_ARCH_310P
+#include "m200_matmul_310p.h"
+#endif
 
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
@@ -137,6 +140,9 @@ void XRuntime::Init(size_t sizeMB)
 
 XRuntime::~XRuntime(void)
 {
+#ifdef XLITE_ARCH_310P
+    XliteM200Matmul310PDestroy(*this);
+#endif
     FiniXcclComm();
 
     if (_tpSize > 1 && _tpComm) {

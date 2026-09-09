@@ -221,6 +221,9 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     set(KERNEL_FILES_310P_BASELINE
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/official_add_probe_310p.cpp
     )
+    set(KERNEL_FILES_310P_M200_MATMUL
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/m200_matmul_float16.cpp
+    )
     list(REMOVE_ITEM KERNEL_FILES_F16
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_float16_t.cpp
@@ -249,6 +252,12 @@ if(XLITE_BUILD_ARCH_310P)
     ascendc_library(xlite_kernels_baseline_310p_${RUN_MODE} SHARED ${KERNEL_FILES_310P_BASELINE})
     ascendc_compile_definitions(xlite_kernels_baseline_310p_${RUN_MODE}
         PRIVATE XLITE_ARCH_310P=1)
+    ascendc_library(xlite_kernels_m200_matmul_310p_${RUN_MODE} SHARED
+        ${KERNEL_FILES_310P_M200_MATMUL})
+    ascendc_compile_definitions(xlite_kernels_m200_matmul_310p_${RUN_MODE} PRIVATE
+        CUSTOM_ASCEND310P
+        HAVE_WORKSPACE
+        HAVE_TILING)
 endif()
 
 # Bundle all generated aclrtlaunch_*.h headers into one merged header so
@@ -265,6 +274,7 @@ if(XLITE_BUILD_ARCH_310P)
     list(APPEND _XLITE_KERNEL_TARGETS
         xlite_kernels_f16_310p_${RUN_MODE}
         xlite_kernels_baseline_310p_${RUN_MODE}
+        xlite_kernels_m200_matmul_310p_${RUN_MODE}
     )
 endif()
 add_custom_command(
@@ -303,6 +313,8 @@ if(NOT _xlite_dbg_enabled)
         ascendc_compile_definitions(xlite_kernels_f16_310p_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
         ascendc_compile_definitions(xlite_kernels_baseline_310p_${RUN_MODE}
             PRIVATE ASCENDC_DUMP=0)
+        ascendc_compile_definitions(xlite_kernels_m200_matmul_310p_${RUN_MODE}
+            PRIVATE ASCENDC_DUMP=0)
     endif()
 endif()
 
@@ -323,7 +335,9 @@ add_library(xlite SHARED
 )
 
 if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
-    target_sources(xlite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_310p.cpp)
+    target_sources(xlite PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_310p.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/m200_matmul_310p.cpp)
     target_compile_definitions(xlite PRIVATE
         XLITE_ARCH_310P=1
         XLITE_310P_LLM_FP16_POC=1
@@ -421,6 +435,13 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     target_link_libraries(xlite PRIVATE
         xlite_kernels_f16_310p_${RUN_MODE}
         xlite_kernels_baseline_310p_${RUN_MODE}
+        xlite_kernels_m200_matmul_310p_${RUN_MODE}
+        host_intf_pub
+        tiling_api
+        register
+        platform
+        ascendalog
+        dl
         ${XLITE_NNOPBASE_LIBRARY}
         ${XLITE_OPAPI_LIBRARY}
     )
@@ -510,6 +531,7 @@ if(XLITE_BUILD_ARCH_310P)
     install(TARGETS
         xlite_kernels_f16_310p_${RUN_MODE}
         xlite_kernels_baseline_310p_${RUN_MODE}
+        xlite_kernels_m200_matmul_310p_${RUN_MODE}
         LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
     )
 endif()
