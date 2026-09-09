@@ -313,7 +313,7 @@ public:
     XTensor _queryStartLocPinnedHost;
     XTensor _blockTablesPinnedHost;
 #endif
-    uint32_t _batch;
+    uint32_t _batch = 0;
     uint32_t _maxTotalLens;
     uint32_t _tileSizeOfCachedKV;
     XTensor

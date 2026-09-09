@@ -1855,8 +1855,19 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
 
 void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XTensor &output)
 {
-    uint32_t batch = rt._batch;
-    XTensor localOutput({output.shape[1], output.shape[2]}, output.dtype, output.ptr);
+    if (input.shape.size() != 2 || indices.shape.size() != 1 || output.shape.size() != 3 ||
+        input.shape[1] != _c.hiddenSize) {
+        throw std::runtime_error("ForwardGetLogits received invalid input, indices, or output shape");
+    }
+    // Logits can be invoked independently by vLLM's memory-profile sampler,
+    // before PrepareAttn has populated rt._batch. DummyRun also reserves an
+    // output with maxBatch capacity while selecting fewer rows. Therefore the
+    // actual M comes from indices; output.shape[1] is only its capacity.
+    const uint32_t batch = static_cast<uint32_t>(indices.numel);
+    if (batch == 0 || batch > output.shape[1] || batch > input.shape[0]) {
+        throw std::runtime_error("ForwardGetLogits sample count exceeds input/output capacity");
+    }
+    XTensor localOutput({batch, output.shape[2]}, output.dtype, output.ptr);
 
     if (batch < input.shape[0]) {
         XTensor &x = rt.GetTensor({batch, _c.hiddenSize}, input.dtype, DBG_LOC);
