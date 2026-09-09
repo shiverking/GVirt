@@ -33,7 +33,7 @@ struct TilingEntry {
 };
 
 struct M200MatmulState {
-    void *systemWorkspace = nullptr;
+    std::vector<void *> systemWorkspaces;
     uint64_t systemWorkspaceBytes = 0;
     std::unordered_map<uint64_t, TilingEntry> tilings;
 };
@@ -82,23 +82,36 @@ TilingEntry &GetTiling(XRuntime &rt, uint32_t m, uint32_t n, uint32_t k)
     CHECK_ACL(aclrtMemcpy(entry.device, entry.host.size(), entry.host.data(), entry.host.size(),
                          ACL_MEMCPY_HOST_TO_DEVICE));
     if (state.systemWorkspaceBytes < entry.systemWorkspaceBytes) {
-        if (state.systemWorkspace != nullptr) {
+        if (!state.systemWorkspaces.empty()) {
             CHECK_ACL(aclrtSynchronizeStream(rt.stream));
-            CHECK_ACL(aclrtFree(state.systemWorkspace));
+            for (void *workspace : state.systemWorkspaces) {
+                CHECK_ACL(aclrtFree(workspace));
+            }
+            state.systemWorkspaces.clear();
         }
-        CHECK_ACL(aclrtMalloc(&state.systemWorkspace, entry.systemWorkspaceBytes,
-                             ACL_MEM_MALLOC_NORMAL_ONLY));
         state.systemWorkspaceBytes = entry.systemWorkspaceBytes;
     }
     return entry;
 }
 
-void Launch(XRuntime &rt, void *a, void *b, void *c, uint32_t m, uint32_t n, uint32_t k)
+void EnsureWorkspaceSlots(M200MatmulState &state, uint32_t slots)
+{
+    while (state.systemWorkspaces.size() < slots) {
+        void *workspace = nullptr;
+        CHECK_ACL(aclrtMalloc(&workspace, state.systemWorkspaceBytes,
+                             ACL_MEM_MALLOC_NORMAL_ONLY));
+        state.systemWorkspaces.push_back(workspace);
+    }
+}
+
+void Launch(XRuntime &rt, void *a, void *b, void *c, uint32_t m, uint32_t n, uint32_t k,
+            uint32_t workspaceSlot = 0)
 {
     TilingEntry &tiling = GetTiling(rt, m, n, k);
     M200MatmulState &state = GetState(rt);
+    EnsureWorkspaceSlots(state, workspaceSlot + 1);
     ACLRT_LAUNCH_KERNEL(xlite_m200_matmul_float16)
-    (tiling.usedCores, rt.stream, a, b, c, state.systemWorkspace, tiling.device);
+    (tiling.usedCores, rt.stream, a, b, c, state.systemWorkspaces[workspaceSlot], tiling.device);
     ++rt.m200MatmulKernelLaunches;
 }
 
@@ -149,7 +162,7 @@ void XliteM200Matmul310P(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &ou
         void *outputData = m == 1
             ? static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset)
             : chunkOutputs[chunkIndex]->ptr;
-        Launch(rt, in.ptr, weightData, outputData, m, currentN, k);
+        Launch(rt, in.ptr, weightData, outputData, m, currentN, k, chunkIndex);
         if (m > 1) {
             void *destination = static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset);
             CHECK_ACL(aclrtMemcpy2dAsync(destination, static_cast<size_t>(n) * sizeof(uint16_t),
@@ -179,8 +192,10 @@ void XliteM200Matmul310PDestroy(XRuntime &rt)
             (void)aclrtFree(item.second.device);
         }
     }
-    if (state->systemWorkspace != nullptr) {
-        (void)aclrtFree(state->systemWorkspace);
+    for (void *workspace : state->systemWorkspaces) {
+        if (workspace != nullptr) {
+            (void)aclrtFree(workspace);
+        }
     }
     delete state;
     rt._m200MatmulState = nullptr;
