@@ -52,6 +52,7 @@ extern "C" __global__ __aicore__ void xlite_m200_cube_probe(
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
 #error "xlite_m200_cube_probe must be compiled for the real M200 architecture"
 #endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
     using AType = half;
     using BType = half;
     using CType = half;

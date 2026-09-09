@@ -15,7 +15,14 @@ cmake -S "${source_dir}" -B "${build_dir}" \
     -DRUN_MODE=npu \
     -DSOC_VERSION=Ascend310P3 \
     -DASCEND_CANN_PACKAGE_PATH="${cann_path}" || exit $?
-cmake --build "${build_dir}" --parallel "${jobs}" || exit $?
+if ! cmake --build "${build_dir}" --parallel "${jobs}"; then
+    merge_rule="${build_dir}/CMakeFiles/xlite_m200_cube_probe_kernel_merge_obj.dir/build.make"
+    if [[ -f "${merge_rule}" ]]; then
+        echo "[ M200 CUBE PROBE ] merge_obj rule (diagnostic):"
+        sed -n '65,78p' "${merge_rule}"
+    fi
+    exit 1
+fi
 
 export LD_LIBRARY_PATH="${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
@@ -48,4 +55,3 @@ if [[ ${#failures[@]} -ne 0 ]]; then
     done
     exit 1
 fi
-
