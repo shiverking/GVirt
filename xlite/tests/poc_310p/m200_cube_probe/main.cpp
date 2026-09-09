@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +20,7 @@ constexpr uint16_t kHalfPointFive = 0x3800;
 constexpr uint16_t kHalfPointTwoFive = 0x3400;
 constexpr uint16_t kHalfMinusPointFive = 0xb800;
 constexpr uint16_t kHalfNan = 0x7e00;
+constexpr uint32_t kLmHeadChunkN = 12288;
 
 void Check(aclError status, const char *operation)
 {
@@ -73,11 +75,19 @@ void Run(const std::string &name, uint32_t m, uint32_t n, uint32_t k, uint32_t w
     if (iterations == 0) {
         throw std::invalid_argument("iterations must be positive");
     }
-    const auto tiling = GenerateM200CubeProbeTiling(m, n, k);
+    const uint32_t allocatedN = std::min(n, kLmHeadChunkN);
+    const uint32_t fullChunks = n / allocatedN;
+    const uint32_t tailN = n % allocatedN;
+    const uint32_t launchesPerIteration = fullChunks + (tailN == 0 ? 0U : 1U);
+    const auto tiling = GenerateM200CubeProbeTiling(m, allocatedN, k);
+    M200CubeProbeTiling tailTiling;
+    if (tailN != 0) {
+        tailTiling = GenerateM200CubeProbeTiling(m, tailN, k);
+    }
     std::vector<uint16_t> a(static_cast<size_t>(m) * k);
     // Match the Xlite linear weight layout [N,K].
-    std::vector<uint16_t> b(static_cast<size_t>(n) * k);
-    std::vector<uint16_t> c(static_cast<size_t>(m) * n, kHalfNan);
+    std::vector<uint16_t> b(static_cast<size_t>(allocatedN) * k);
+    std::vector<uint16_t> c(static_cast<size_t>(m) * allocatedN, kHalfNan);
     for (uint32_t row = 0; row < m; ++row) {
         const uint16_t value = (row & 1U) == 0 ? kHalfOne : kHalfPointFive;
         for (uint32_t col = 0; col < k; ++col) {
@@ -86,7 +96,7 @@ void Run(const std::string &name, uint32_t m, uint32_t n, uint32_t k, uint32_t w
     }
     static constexpr uint16_t bPattern[] = {
         kHalfPointTwoFive, kHalfPointFive, kHalfOne, kHalfMinusPointFive};
-    for (uint32_t output = 0; output < n; ++output) {
+    for (uint32_t output = 0; output < allocatedN; ++output) {
         const uint16_t value = bPattern[output & 3U];
         for (uint32_t inner = 0; inner < k; ++inner) {
             b[static_cast<size_t>(output) * k + inner] = value;
@@ -98,6 +108,7 @@ void Run(const std::string &name, uint32_t m, uint32_t n, uint32_t k, uint32_t w
     DeviceBuffer cDevice(c.size() * sizeof(uint16_t));
     DeviceBuffer workspace(tiling.systemWorkspaceBytes);
     DeviceBuffer tilingDevice(tiling.bytes.size());
+    DeviceBuffer tailTilingDevice(tailTiling.bytes.empty() ? 1 : tailTiling.bytes.size());
     Check(aclrtMemcpy(aDevice.ptr, a.size() * sizeof(uint16_t), a.data(),
                      a.size() * sizeof(uint16_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy A");
     Check(aclrtMemcpy(bDevice.ptr, b.size() * sizeof(uint16_t), b.data(),
@@ -106,16 +117,28 @@ void Run(const std::string &name, uint32_t m, uint32_t n, uint32_t k, uint32_t w
                      c.size() * sizeof(uint16_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy sentinel C");
     Check(aclrtMemcpy(tilingDevice.ptr, tiling.bytes.size(), tiling.bytes.data(),
                      tiling.bytes.size(), ACL_MEMCPY_HOST_TO_DEVICE), "copy tiling");
+    if (!tailTiling.bytes.empty()) {
+        Check(aclrtMemcpy(tailTilingDevice.ptr, tailTiling.bytes.size(), tailTiling.bytes.data(),
+                         tailTiling.bytes.size(), ACL_MEMCPY_HOST_TO_DEVICE), "copy tail tiling");
+    }
 
     aclrtStream stream = nullptr;
     Check(aclrtCreateStream(&stream), "aclrtCreateStream");
+    const auto launchProjection = [&]() {
+        for (uint32_t chunk = 0; chunk < fullChunks; ++chunk) {
+            Launch(tiling, stream, aDevice, bDevice, cDevice, workspace, tilingDevice);
+        }
+        if (tailN != 0) {
+            Launch(tailTiling, stream, aDevice, bDevice, cDevice, workspace, tailTilingDevice);
+        }
+    };
     for (uint32_t i = 0; i < warmup; ++i) {
-        Launch(tiling, stream, aDevice, bDevice, cDevice, workspace, tilingDevice);
+        launchProjection();
     }
     Check(aclrtSynchronizeStream(stream), "warmup synchronize");
     const auto started = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < iterations; ++i) {
-        Launch(tiling, stream, aDevice, bDevice, cDevice, workspace, tilingDevice);
+        launchProjection();
     }
     Check(aclrtSynchronizeStream(stream), "benchmark synchronize");
     const auto stopped = std::chrono::steady_clock::now();
@@ -125,10 +148,11 @@ void Run(const std::string &name, uint32_t m, uint32_t n, uint32_t k, uint32_t w
 
     size_t mismatches = 0;
     size_t sentinels = 0;
+    const uint32_t verifiedN = tailN == 0 ? allocatedN : tailN;
     for (uint32_t row = 0; row < m; ++row) {
         const float aValue = (row & 1U) == 0 ? 1.0F : 0.5F;
-        for (uint32_t col = 0; col < n; ++col) {
-            const auto actual = c[static_cast<size_t>(row) * n + col];
+        for (uint32_t col = 0; col < verifiedN; ++col) {
+            const auto actual = c[static_cast<size_t>(row) * verifiedN + col];
             const auto expected = HalfBits(aValue * PatternValue(col) * static_cast<float>(k));
             sentinels += actual == kHalfNan;
             mismatches += actual != expected;
@@ -147,7 +171,9 @@ void Run(const std::string &name, uint32_t m, uint32_t n, uint32_t k, uint32_t w
     std::cout << std::fixed << std::setprecision(6)
               << "M200 Cube probe PASS: name=" << name << ", M=" << m << ", N=" << n
               << ", K=" << k << ", cores=" << tiling.usedCores << ", warmup=" << warmup
-              << ", iterations=" << iterations << ", average_ms=" << averageMs
+              << ", iterations=" << iterations << ", launches_per_iteration="
+              << launchesPerIteration << ", chunk_n=" << allocatedN
+              << ", average_ms=" << averageMs
               << ", tflops=" << tflops
               << ", local_workspace=" << tiling.localWorkspaceBytes
               << ", system_workspace=" << tiling.systemWorkspaceBytes << std::endl;

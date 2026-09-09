@@ -23,7 +23,8 @@ uint32_t AlignUp(uint32_t value, uint32_t alignment)
 
 bool IsAsrProjection(uint32_t n, uint32_t k)
 {
-    return (n == 256 && k == 2048) || (n == 4096 && k == 2048) ||
+    return (n == 256 && k == 2048) || (n == 4480 && k == 2048) ||
+           (n == 4096 && k == 2048) ||
            (n == 2048 && k == 2048) || (n == 12288 && k == 2048) ||
            (n == 2048 && k == 6144) || (n == 151936 && k == 2048);
 }

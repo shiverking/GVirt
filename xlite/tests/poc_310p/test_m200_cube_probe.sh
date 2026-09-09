@@ -8,6 +8,20 @@ cann_path=${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
 jobs=${XLITE_BUILD_JOBS:-8}
 warmup=${XLITE_M200_PROBE_WARMUP:-3}
 iterations=${XLITE_M200_PROBE_ITERATIONS:-10}
+requested_projections=("$@")
+
+should_run_projection() {
+    if [[ ${#requested_projections[@]} -eq 0 ]]; then
+        return 0
+    fi
+    local requested
+    for requested in "${requested_projections[@]}"; do
+        if [[ "${requested}" == "$1" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 echo "[ M200 CUBE PROBE ] source=${source_dir}"
 echo "[ M200 CUBE PROBE ] build=${build_dir}"
@@ -37,10 +51,14 @@ cases=(
     "lm-head:151936:2048"
 )
 m_values=(1 8 20)
-total=$((${#cases[@]} * ${#m_values[@]}))
+total=0
 for spec in "${cases[@]}"; do
     IFS=: read -r projection n k <<<"${spec}"
+    if ! should_run_projection "${projection}"; then
+        continue
+    fi
     for m in "${m_values[@]}"; do
+        total=$((total + 1))
         name="${projection}-m${m}"
         echo "[ RUN      ] ${name} M=${m} N=${n} K=${k}"
         log="${build_dir}/${name}.log"
@@ -57,6 +75,11 @@ for spec in "${cases[@]}"; do
         fi
     done
 done
+
+if [[ ${total} -eq 0 ]]; then
+    echo "No matching projection; choose from: qkv o gate-up down lm-head" >&2
+    exit 2
+fi
 
 echo
 echo "M200 Cube probe summary: $((total - ${#failures[@]})) passed, ${#failures[@]} failed"
