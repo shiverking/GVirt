@@ -32,7 +32,7 @@ M200CubeProbeTiling GenerateM200CubeProbeTiling(uint32_t m, uint32_t n, uint32_t
     }
 
     M200CubeProbeTiling result;
-    result.usedCores = tiling.usedCoreNum;
+    result.usedCores = static_cast<uint32_t>(tiling.get_usedCoreNum());
     if (result.usedCores != 1) {
         throw std::runtime_error("M200 Cube probe expected exactly one used core");
     }
