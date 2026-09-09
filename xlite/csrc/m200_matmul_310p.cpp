@@ -15,6 +15,10 @@
 namespace {
 
 constexpr uint32_t kMaxDecodeBatch = 20;
+// Random-weight validation found localized corruption for the chunked LM Head
+// at M=20. Keep the verified M=1..8 range on Cube and use ACLNN above it until
+// a dedicated multi-row chunk-output kernel is available.
+constexpr uint32_t kMaxLmHeadCubeBatch = 8;
 constexpr uint32_t kLmHeadN = 151936;
 constexpr uint32_t kLmHeadChunkN = 12288;
 
@@ -117,7 +121,8 @@ bool XliteM200Matmul310PSupported(const XTensor &in, const XTensor &weight,
     const uint32_t m = static_cast<uint32_t>(in.shape[0]);
     const uint32_t k = static_cast<uint32_t>(in.shape[1]);
     const uint32_t n = static_cast<uint32_t>(weight.shape[0]);
-    return m >= 1 && m <= kMaxDecodeBatch && weight.shape[1] == k &&
+    const bool safeLmHeadBatch = n != kLmHeadN || m <= kMaxLmHeadCubeBatch;
+    return m >= 1 && m <= kMaxDecodeBatch && safeLmHeadBatch && weight.shape[1] == k &&
            out.shape[0] == m && out.shape[1] == n && IsAsrProjection(n, k);
 }
 
