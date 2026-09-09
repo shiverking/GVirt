@@ -17,6 +17,7 @@ namespace {
 constexpr uint32_t kMaxDecodeBatch = 20;
 constexpr uint32_t kLmHeadN = 151936;
 constexpr uint32_t kLmHeadChunkN = 12288;
+constexpr uint32_t kLmHeadRowGroup = 8;
 
 bool IsAsrProjection(uint32_t n, uint32_t k)
 {
@@ -145,33 +146,51 @@ void XliteM200Matmul310P(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &ou
         return;
     }
 
-    std::vector<XTensor *> chunkOutputs;
-    if (m > 1) {
-        const uint32_t chunks = (n + kLmHeadChunkN - 1) / kLmHeadChunkN;
-        chunkOutputs.reserve(chunks);
+    if (m == 1) {
+        uint32_t launchIndex = 0;
         for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
             const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
-            chunkOutputs.push_back(&rt.GetTensor({m, currentN}, FP16, DBG_LOC));
+            void *weightData = static_cast<void *>(
+                static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset) * k);
+            void *outputData = static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset);
+            Launch(rt, in.ptr, weightData, outputData, 1, currentN, k, launchIndex++);
+        }
+        return;
+    }
+
+    const uint32_t rowGroups = (m + kLmHeadRowGroup - 1) / kLmHeadRowGroup;
+    const uint32_t columnChunks = (n + kLmHeadChunkN - 1) / kLmHeadChunkN;
+    std::vector<XTensor *> chunkOutputs;
+    chunkOutputs.reserve(static_cast<size_t>(rowGroups) * columnChunks);
+    for (uint32_t rowStart = 0; rowStart < m; rowStart += kLmHeadRowGroup) {
+        const uint32_t groupM = std::min(kLmHeadRowGroup, m - rowStart);
+        for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
+            const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
+            chunkOutputs.push_back(&rt.GetTensor({groupM, currentN}, FP16, DBG_LOC));
         }
     }
-    uint32_t chunkIndex = 0;
-    for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
-        const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
-        void *weightData = static_cast<void *>(
-            static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset) * k);
-        void *outputData = m == 1
-            ? static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset)
-            : chunkOutputs[chunkIndex]->ptr;
-        Launch(rt, in.ptr, weightData, outputData, m, currentN, k, chunkIndex);
-        if (m > 1) {
-            void *destination = static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset);
+
+    uint32_t launchIndex = 0;
+    for (uint32_t rowStart = 0; rowStart < m; rowStart += kLmHeadRowGroup) {
+        const uint32_t groupM = std::min(kLmHeadRowGroup, m - rowStart);
+        void *inputData = static_cast<void *>(
+            static_cast<uint16_t *>(in.ptr) + static_cast<size_t>(rowStart) * k);
+        for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
+            const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
+            void *weightData = static_cast<void *>(
+                static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset) * k);
+            XTensor *chunkOutput = chunkOutputs[launchIndex];
+            Launch(rt, inputData, weightData, chunkOutput->ptr, groupM, currentN, k,
+                   launchIndex);
+            void *destination = static_cast<void *>(
+                static_cast<uint16_t *>(out.ptr) + static_cast<size_t>(rowStart) * n + offset);
             CHECK_ACL(aclrtMemcpy2dAsync(destination, static_cast<size_t>(n) * sizeof(uint16_t),
-                                         chunkOutputs[chunkIndex]->ptr,
+                                         chunkOutput->ptr,
                                          static_cast<size_t>(currentN) * sizeof(uint16_t),
-                                         static_cast<size_t>(currentN) * sizeof(uint16_t), m,
+                                         static_cast<size_t>(currentN) * sizeof(uint16_t), groupM,
                                          ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            ++launchIndex;
         }
-        ++chunkIndex;
     }
     for (XTensor *chunkOutput : chunkOutputs) {
         rt.PutTensor(*chunkOutput);
