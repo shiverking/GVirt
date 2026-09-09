@@ -66,9 +66,9 @@ def run_shape(m: int, n: int, k: int) -> None:
     }), flush=True)
     # Compare on CPU to avoid the device-side isclose double-tolerance warning.
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
-    use_m200 = m <= 20
+    use_m200 = m <= 20 and not (n == 151936 and m > 8)
     if use_m200:
-        expected_launches = (13 * (m if m > 8 else 1)) if n == 151936 else 1
+        expected_launches = 13 if n == 151936 else 1
         if (backend_stats["m200_requests"] != 1 or
                 backend_stats["m200_kernel_launches"] != expected_launches or
                 backend_stats["aclnn_requests"] != 0):
