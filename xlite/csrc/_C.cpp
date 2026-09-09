@@ -1271,7 +1271,24 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         InitXTensor(_deepstackInputEmbeds[i], deepstackInput[i]);
     }
 
-    if (currStream != 0 && rt.taskId == 0) {
+    bool nativeAtb = false;
+#ifdef XLITE_ARCH_310P
+    nativeAtb = rt.UseNativeAtbDecodeAttention310P();
+    if (nativeAtb) {
+        if (currStream == 0) {
+            throw std::runtime_error(
+                "native_atb requires the current PyTorch NPU stream from the ASR runner");
+        }
+        if (_nativeKv310P.size() != _kv.size()) {
+            throw std::runtime_error(
+                "native_atb requires one registered 5D/NZ K/V cache pair per decoder layer");
+        }
+        if (rt.multiTaskParallel) {
+            throw std::runtime_error("native_atb does not support Xlite multi-task parallelism");
+        }
+    }
+#endif
+    if (currStream != 0 && rt.taskId == 0 && !nativeAtb) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
@@ -1280,8 +1297,34 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         rt.NotifyWaitPeerStream();
     }
 
-    _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis,
-                                    _inputIds, _output);
+    aclrtStream savedStream = rt.stream;
+#ifdef XLITE_ARCH_310P
+    if (nativeAtb) {
+        currAclStream = reinterpret_cast<aclrtStream>(currStream);
+        rt.stream = currAclStream;
+        rt.nativeAtbAttentionCallback =
+            [this, &rt](XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &out,
+                        XTensor &slots, XTensor &tables, XTensor &totalLens, uint32_t nHeads,
+                        uint32_t nKvHeads, uint32_t headDim, uint32_t batch) {
+                return RunNativeAtbAttention310P(rt, qkv, kCache, vCache, out, slots, tables,
+                                                 totalLens, nHeads, nKvHeads, headDim, batch);
+            };
+    }
+#endif
+    try {
+        _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds,
+                                        _freqsCis, _inputIds, _output);
+    } catch (...) {
+#ifdef XLITE_ARCH_310P
+        rt.nativeAtbAttentionCallback = {};
+#endif
+        rt.stream = savedStream;
+        throw;
+    }
+#ifdef XLITE_ARCH_310P
+    rt.nativeAtbAttentionCallback = {};
+#endif
+    rt.stream = savedStream;
 
     if (rt.multiTaskParallel) {
         if (rt.taskId == 0) {
@@ -1294,9 +1337,9 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         }
     }
 
-    if (currStream != 0) {
+    if (currStream != 0 && !nativeAtb) {
         rt.EventRecordCurrStream(currAclStream);
-    } else {
+    } else if (currStream == 0) {
         rt.Synchronize();
     }
 }
