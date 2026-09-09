@@ -11,7 +11,7 @@ using namespace matmul;
 
 namespace {
 
-__aicore__ inline uint32_t CeilDiv(uint32_t a, uint32_t b)
+__aicore__ inline uint32_t XliteCeilDiv(uint32_t a, uint32_t b)
 {
     return (a + b - 1) / b;
 }
@@ -32,7 +32,7 @@ __aicore__ inline void CalcOffsets(uint32_t blockIdx, const TCubeTiling &tiling,
                                    uint32_t &offsetC, uint32_t &tailM,
                                    uint32_t &tailN)
 {
-    const uint32_t mBlocks = CeilDiv(tiling.M, tiling.singleCoreM);
+    const uint32_t mBlocks = XliteCeilDiv(tiling.M, tiling.singleCoreM);
     const uint32_t mIndex = blockIdx % mBlocks;
     const uint32_t nIndex = blockIdx / mBlocks;
     offsetA = mIndex * tiling.Ka * tiling.singleCoreM;
@@ -62,8 +62,8 @@ extern "C" __global__ __aicore__ void xlite_m200_cube_probe(
     TCubeTiling tiling;
     uint64_t localMemSize = 0;
     CopyTiling(&tiling, localMemSize, tilingGm);
-    const uint32_t totalBlocks = CeilDiv(tiling.M, tiling.singleCoreM) *
-                                 CeilDiv(tiling.N, tiling.singleCoreN);
+    const uint32_t totalBlocks = XliteCeilDiv(tiling.M, tiling.singleCoreM) *
+                                 XliteCeilDiv(tiling.N, tiling.singleCoreN);
     if (GetBlockIdx() >= tiling.usedCoreNum || GetBlockIdx() >= totalBlocks) {
         return;
     }
