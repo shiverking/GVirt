@@ -43,8 +43,11 @@ M200CubeProbeTiling GenerateM200CubeProbeTiling(uint32_t m, uint32_t n, uint32_t
     if (availableCores == 0) {
         throw std::runtime_error("Ascend310P reported zero Cube cores");
     }
-    const uint32_t requestedCores = std::min(availableCores, CeilDiv(n, 256U));
-    const uint32_t singleCoreN = AlignUp(CeilDiv(n, requestedCores), 256U);
+    const uint32_t targetCores = std::min(availableCores, CeilDiv(n, 256U));
+    const uint32_t singleCoreN = AlignUp(CeilDiv(n, targetCores), 256U);
+    // Alignment can reduce the number of non-empty N partitions.  Launch only
+    // those partitions; an extra core would start beyond N and underflow tailN.
+    const uint32_t requestedCores = CeilDiv(n, singleCoreN);
     MultiCoreMatmulTiling tilingApi(*platform);
     tilingApi.SetAType(TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16, false);
     // Xlite linear weights are stored as [N,K].  The logical multiplication is

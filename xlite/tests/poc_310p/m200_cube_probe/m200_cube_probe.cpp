@@ -62,7 +62,9 @@ extern "C" __global__ __aicore__ void xlite_m200_cube_probe(
     TCubeTiling tiling;
     uint64_t localMemSize = 0;
     CopyTiling(&tiling, localMemSize, tilingGm);
-    if (GetBlockIdx() >= tiling.usedCoreNum) {
+    const uint32_t totalBlocks = CeilDiv(tiling.M, tiling.singleCoreM) *
+                                 CeilDiv(tiling.N, tiling.singleCoreN);
+    if (GetBlockIdx() >= tiling.usedCoreNum || GetBlockIdx() >= totalBlocks) {
         return;
     }
 
