@@ -628,8 +628,18 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             }
         } else if (useNorm && outFp32) {
             if (output) {
+#if defined(XLITE_ARCH_310P)
+                // M200 has no *_align_b16/DataCopyPad path.  The ASR-only
+                // shapes handled by this build (Q/K head 128 and hidden 2048)
+                // produce an integral number of 32-byte DMA blocks.
+                const uint32_t outBytes = total_dim * sizeof(float);
+                assert(outBytes % BLOCK_SIZE == 0);
+                copy_ubuf_to_gm(gm_out_float, out_float[outCurr], 0, 1,
+                                outBytes / BLOCK_SIZE, 0, 0);
+#else
                 copy_ubuf_to_gm_align_b16(gm_out_float, out_float[outCurr], 0, 1,
                                           total_dim * sizeof(float), 0, 0, 0, 0);
+#endif
             }
         } else {
             if (output) {
