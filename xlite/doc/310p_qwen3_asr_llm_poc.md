@@ -1,6 +1,9 @@
 # Ascend 310P Qwen3-ASR LLM-only POC
 
-This branch validates only the dense Qwen3 decoder on one Ascend 310P device.
+The V2 branch is based on AtomGit GVirt master and validates only the dense
+Qwen3-ASR decoder on one Ascend 310P device. The previous P2 native paged
+attention and P3 ACLNN policy experiments are deliberately not part of this
+baseline.
 The audio tower, vLLM integration, tensor parallelism, quantization and graph
 capture are outside the POC boundary.
 
@@ -109,9 +112,27 @@ compiler diagnostic plus the affected kernel and shape. Do not silently fall
 back to BF16, quantized kernels, multi-card communication or vLLM's 5D NZ KV
 cache.
 
-Gate 5 uses the same runner with `--num-layers 1`; the full acceptance script
-runs that comparison before the five full-model text cases and the real-audio
-case.
+Gate 5 uses the same runner with `--num-layers 1`; the short V2 acceptance
+script runs that comparison before the token and 129-token full-model cases.
+The real-audio embedding case is included when its two input files are passed.
+
+## V2 migration gate
+
+The first run on a 310P host should use the short aggregate gates below. They
+default to one stability iteration; set `XLITE_STABILITY_ITERS=50` only when a
+long stability campaign is explicitly required.
+
+```bash
+bash tests/poc_310p/run_kernel_smoke.sh
+bash tests/poc_310p/run_acceptance.sh \
+  /home/models/Qwen3-ASR-1.7B poc_310p_results/v2
+```
+
+The acceptance script optionally accepts an audio embedding and its matching
+MRoPE positions as the third and fourth arguments. It runs one single-layer
+gate, one token-input full model gate, and the required 129-token
+`inputs_embeds` full model gate, aggregating failures instead of stopping at
+the first error.
 
 ## Known unverified items
 
@@ -119,9 +140,12 @@ case.
   in the Windows development workspace.
 - The conservative 310P UB profile and disabled swizzle still require silicon
   validation and performance tuning.
-- The ACLNN cache view currently accepts only batch 1 and consecutive physical
-  block IDs; non-contiguous blocks fail explicitly. Chunked prefill also
-  fails explicitly. A bounded gather fallback remains future work.
+- The correctness attention backend supports batch up to 20, arbitrary physical
+  block tables and chunked prefill by gathering valid K/V into TensorPool
+  buffers. It is intentionally not the final high-performance attention path.
+- Attention metadata is still copied D2H in the ACLNN correctness backend and
+  ACLNN calls synchronize before workspace reuse. Removing those costs belongs
+  to the subsequent performance phase after this new upstream baseline passes.
 - The legacy monolithic host ABI still causes non-POC launcher libraries to be
   packaged. Those paths are rejected by model/runtime gates but are not yet
   physically removed from the wheel.

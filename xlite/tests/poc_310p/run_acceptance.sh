@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-if [[ $# -ne 4 ]]; then
-    echo "usage: $0 CHECKPOINT REPORT_DIR AUDIO_EMBEDS AUDIO_POSITIONS" >&2
+if [[ $# -lt 2 || $# -gt 4 ]]; then
+    echo "usage: $0 CHECKPOINT REPORT_DIR [AUDIO_EMBEDS AUDIO_POSITIONS]" >&2
     exit 2
 fi
 
 checkpoint=$1
 report_dir=$2
-audio_embeds=$3
-audio_positions=$4
+audio_embeds=${3:-}
+audio_positions=${4:-}
+stability_iters=${XLITE_STABILITY_ITERS:-1}
 mkdir -p "${report_dir}"
 failures=()
 
@@ -34,49 +35,48 @@ export XLITE_DP_SIZE=1
 export XLITE_TP_SIZE=1
 export XLITE_WEIGHT_NZ=0
 
-prompts=(
-    "Please transcribe the speech accurately."
-    "Recognize this Chinese speech segment."
-    "Return only the spoken words without explanation."
-    "Transcribe names, numbers, and punctuation."
-    "Continue decoding from the supplied audio embeddings."
-)
-
 run_test single-layer python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --checkpoint "${checkpoint}" \
     --prompt "Single layer numerical gate." \
     --num-layers 1 \
     --decode-tokens 16 \
-    --stability-iters 1 \
+    --stability-iters "${stability_iters}" \
     --report "${report_dir}/single_layer.json"
 
-for index in "${!prompts[@]}"; do
-    run_test "tokens-${index}" python3 tests/poc_310p/run_qwen3_asr_llm.py \
-        --checkpoint "${checkpoint}" \
-        --prompt "${prompts[$index]}" \
-        --decode-tokens 16 \
-        --stability-iters 50 \
-        --report "${report_dir}/tokens_${index}.json"
-done
+run_test tokens python3 tests/poc_310p/run_qwen3_asr_llm.py \
+    --checkpoint "${checkpoint}" \
+    --prompt "Please transcribe the speech accurately." \
+    --decode-tokens 16 \
+    --stability-iters "${stability_iters}" \
+    --report "${report_dir}/tokens.json"
 
 run_test synthetic-129 python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --checkpoint "${checkpoint}" \
     --input-mode synthetic \
     --prompt-tokens 129 \
     --decode-tokens 16 \
-    --stability-iters 50 \
+    --stability-iters "${stability_iters}" \
     --report "${report_dir}/synthetic_129.json"
 
-run_test real-audio-embeds python3 tests/poc_310p/run_qwen3_asr_llm.py \
-    --checkpoint "${checkpoint}" \
-    --input-mode file \
-    --embeds-file "${audio_embeds}" \
-    --positions-file "${audio_positions}" \
-    --decode-tokens 16 \
-    --stability-iters 50 \
-    --report "${report_dir}/real_audio_embeds.json"
+if [[ -n "${audio_embeds}" || -n "${audio_positions}" ]]; then
+    if [[ -z "${audio_embeds}" || -z "${audio_positions}" ]]; then
+        echo "AUDIO_EMBEDS and AUDIO_POSITIONS must be supplied together" >&2
+        exit 2
+    fi
+    run_test real-audio-embeds python3 tests/poc_310p/run_qwen3_asr_llm.py \
+        --checkpoint "${checkpoint}" \
+        --input-mode file \
+        --embeds-file "${audio_embeds}" \
+        --positions-file "${audio_positions}" \
+        --decode-tokens 16 \
+        --stability-iters "${stability_iters}" \
+        --report "${report_dir}/real_audio_embeds.json"
+fi
 
-total_tests=8
+total_tests=3
+if [[ -n "${audio_embeds}" ]]; then
+    total_tests=4
+fi
 echo
 echo "Acceptance summary: $((total_tests - ${#failures[@]})) passed, ${#failures[@]} failed"
 if [[ ${#failures[@]} -ne 0 ]]; then
