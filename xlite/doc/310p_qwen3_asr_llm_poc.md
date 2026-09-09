@@ -30,10 +30,11 @@ runtime/model initialization instead of entering an unverified kernel path.
 
 The build stops at configure time if the target CANN does not provide
 `aclnnMatmul`, `aclnnPromptFlashAttention`, or `aclnnIncreFlashAttention` headers.
-MatMul and attention keep the Xlite ABI but execute through ACLNN. ACLNN
-workspace is borrowed from `XTensorPool`; the correctness backend synchronizes
-before returning it. This synchronization is intentional and is not a
-performance design.
+Unsupported MatMul shapes and attention keep the Xlite ABI but execute through
+ACLNN. ACLNN workspace is borrowed from `XTensorPool`. MatMul remains
+synchronous because fully asynchronous heterogeneous MatMul changed generated
+tokens on the target CANN release. Attention is submitted asynchronously on
+the single Runtime stream and reuses workspace through stream ordering.
 
 `op.cpp` currently exposes all launch stubs through one shared host ABI. The
 POC therefore retains those stubs in the build even though only the FP16 dense
@@ -143,9 +144,10 @@ the first error.
 - The correctness attention backend supports batch up to 20, arbitrary physical
   block tables and chunked prefill by gathering valid K/V into TensorPool
   buffers. It is intentionally not the final high-performance attention path.
-- Attention metadata is still copied D2H in the ACLNN correctness backend and
-  ACLNN calls synchronize before workspace reuse. Removing those costs belongs
-  to the subsequent performance phase after this new upstream baseline passes.
+- Version 0/1 attention metadata uses persistent pinned H2D staging and the
+  host copies retained by `PrepareAttn`; the ACLNN backend performs no metadata
+  D2H. Attention has an opt-in `XLITE_310P_FORCE_SYNC_ATTENTION=1` diagnostic,
+  while the serving default remains asynchronous.
 - The legacy monolithic host ABI still causes non-POC launcher libraries to be
   packaged. Those paths are rejected by model/runtime gates but are not yet
   physically removed from the wheel.

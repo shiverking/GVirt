@@ -88,6 +88,9 @@ public:
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
+#ifdef XLITE_310P_LLM_FP16_POC
+    const uint8_t *CausalMaskHost310P(void);
+#endif
     void MemcpyD2H(void *dst, void *src, size_t size);
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
@@ -123,6 +126,49 @@ public:
     int64_t GetTensorOffset(XTensor &t);
 
     void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
+    void RecordAttentionAclnnLaunch(void)
+    {
+        ++_attentionAclnnLaunches;
+    }
+    void RecordAttentionWorkspace(void *ptr)
+    {
+        if (ptr != nullptr && ptr == _lastAttentionWorkspace) {
+            ++_attentionWorkspaceReuses;
+        }
+        _lastAttentionWorkspace = ptr;
+    }
+    void RecordAttentionForcedSync(void)
+    {
+        ++_attentionForcedSynchronizations;
+    }
+    [[nodiscard]] bool ForceSyncAttention(void) const
+    {
+        return _forceSyncAttention;
+    }
+    [[nodiscard]] uint64_t StreamSynchronizations(void) const
+    {
+        return _streamSynchronizations;
+    }
+    [[nodiscard]] uint64_t PrepareAttnSynchronizations(void) const
+    {
+        return _prepareAttnSynchronizations;
+    }
+    [[nodiscard]] uint64_t AttentionMetadataD2HBytes(void) const
+    {
+        return _attentionMetadataD2HBytes;
+    }
+    [[nodiscard]] uint64_t AttentionAclnnLaunches(void) const
+    {
+        return _attentionAclnnLaunches;
+    }
+    [[nodiscard]] uint64_t AttentionForcedSynchronizations(void) const
+    {
+        return _attentionForcedSynchronizations;
+    }
+    [[nodiscard]] uint64_t AttentionWorkspaceReuses(void) const
+    {
+        return _attentionWorkspaceReuses;
+    }
 
     [[nodiscard]] virtual bool IsDummyRuntime() const
     {
@@ -223,6 +269,17 @@ public:
     // every other architecture.
     std::vector<uint32_t> _lensHost;
     std::vector<uint32_t> _blockTablesHost;
+#ifdef XLITE_310P_LLM_FP16_POC
+    // Stable page-locked sources for asynchronous attention metadata H2D.
+    // The std::vectors above remain the host source of truth shared by all
+    // decoder layers in one forward.
+    XTensor _positionPinnedHost;
+    XTensor _slotMappingPinnedHost;
+    XTensor _cachedLensPinnedHost;
+    XTensor _lensPinnedHost;
+    XTensor _queryStartLocPinnedHost;
+    XTensor _blockTablesPinnedHost;
+#endif
     uint32_t _batch;
     uint32_t _maxTotalLens;
     uint32_t _tileSizeOfCachedKV;
@@ -261,10 +318,25 @@ protected:
     void FiniXcclComm(void);
     uint32_t _devid;
     aclrtEvent _event = nullptr;
+#ifdef XLITE_310P_LLM_FP16_POC
+    // Input and output handoffs must not reset the same event while the other
+    // direction is still pending.
+    aclrtEvent _inputReadyEvent = nullptr;
+    aclrtEvent _outputReadyEvent = nullptr;
+    void *_causalMaskPinnedHost = nullptr;
+#endif
     aclrtContext context = nullptr;
     bool _initOutside = false;
     bool _inited = false;
     bool _graphCommEnabled = true;
+    bool _forceSyncAttention = false;
+    uint64_t _streamSynchronizations = 0;
+    uint64_t _prepareAttnSynchronizations = 0;
+    uint64_t _attentionMetadataD2HBytes = 0;
+    uint64_t _attentionAclnnLaunches = 0;
+    uint64_t _attentionForcedSynchronizations = 0;
+    uint64_t _attentionWorkspaceReuses = 0;
+    void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;
     uint32_t _rankId;
     uint32_t _tpSize;

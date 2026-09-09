@@ -2408,6 +2408,9 @@ PYBIND11_MODULE(_C, m)
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
+        info["attention_metadata"] = "host_retained_pinned";
+        info["attention_execution"] = "async_single_stream";
+        info["cross_stream_handoff"] = "split_acl_event_sync";
         info["matmul_backend"] = "m200_asr_decode_with_aclnn_fallback";
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn";
@@ -2424,6 +2427,13 @@ PYBIND11_MODULE(_C, m)
         stats["m200_requests"] = rt.m200MatmulRequests;
         stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
         stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+        stats["stream_synchronizations"] = rt.StreamSynchronizations();
+        stats["prepare_attn_synchronizations"] = rt.PrepareAttnSynchronizations();
+        stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
+        stats["attention_aclnn_launches"] = rt.AttentionAclnnLaunches();
+        stats["attention_forced_synchronizations"] =
+            rt.AttentionForcedSynchronizations();
+        stats["attention_workspace_reuses"] = rt.AttentionWorkspaceReuses();
         return stats;
     });
 #endif
@@ -2442,6 +2452,36 @@ PYBIND11_MODULE(_C, m)
         .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
         .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
         .def("set_current_context", &XRuntime::SetCurrentContext)
+        .def("get_stats", [](const XRuntime &rt) {
+            py::dict stats;
+#ifdef XLITE_ARCH_310P
+            stats["m200_requests"] = rt.m200MatmulRequests;
+            stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
+            stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+#endif
+            stats["stream_synchronizations"] = rt.StreamSynchronizations();
+            stats["prepare_attn_synchronizations"] = rt.PrepareAttnSynchronizations();
+            stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
+            stats["attention_aclnn_launches"] = rt.AttentionAclnnLaunches();
+            stats["attention_forced_synchronizations"] =
+                rt.AttentionForcedSynchronizations();
+            stats["attention_workspace_reuses"] = rt.AttentionWorkspaceReuses();
+            return stats;
+        })
+        .def("set_host_attention_metadata",
+             [](XRuntime &rt, const std::vector<uint32_t> &lens,
+                const std::vector<uint32_t> &cachedLens,
+                const std::vector<uint32_t> &blockTables, uint32_t maxNumBlocks) {
+                 if (lens.empty() || lens.size() != cachedLens.size() || maxNumBlocks == 0 ||
+                     blockTables.size() != lens.size() * maxNumBlocks) {
+                     throw std::invalid_argument("invalid host attention metadata");
+                 }
+                 rt._lensHost = lens;
+                 rt._cachedLensHost = cachedLens;
+                 rt._blockTablesHost = blockTables;
+             },
+             py::arg("lens"), py::arg("cached_lens"), py::arg("block_tables"),
+             py::arg("max_num_blocks"))
         .def("configure_swizzle", &XRuntime::ConfigureSwizzle, py::arg("swizzle"),
              py::arg("use_swizzle_table"));
 

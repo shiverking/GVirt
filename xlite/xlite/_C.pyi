@@ -14,6 +14,9 @@ import torch
 def get_build_info() -> dict[str, object]:
     """Return the compiled SoC, kernel set, ABI and cache-layout contract."""
 
+def get_310p_matmul_stats(runtime: Runtime) -> dict[str, int]:
+    """Return 310P MatMul and attention runtime counters."""
+
 class Runtime:
     """Ascend runtime handle for streams, communication, and tensor pools.
 
@@ -90,6 +93,18 @@ class Runtime:
         Returns:
             None: Context is updated on the calling thread.
         """
+
+    def get_stats(self) -> dict[str, int]:
+        """Return cumulative 310P runtime and attention synchronization counters."""
+
+    def set_host_attention_metadata(
+        self,
+        lens: Sequence[int],
+        cached_lens: Sequence[int],
+        block_tables: Sequence[int],
+        max_num_blocks: int,
+    ) -> None:
+        """Seed host metadata for standalone 310P attention diagnostics."""
 
     def configure_swizzle(self, swizzle: int, use_swizzle_table: bool) -> None:
         """Configure swizzle parameters for matrix multiplication

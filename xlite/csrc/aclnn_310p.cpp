@@ -78,7 +78,7 @@ static void ValidateFp16(const char *op, std::initializer_list<const XTensor *> 
     }
 }
 
-static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize)
+static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize, bool attention)
 {
     if (workspaceSize == 0) {
         return nullptr;
@@ -87,14 +87,28 @@ static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize)
         throw std::runtime_error("ACLNN workspace request " + std::to_string(workspaceSize) +
                                  " bytes exceeds the 512 MiB reserved 310P TensorPool budget");
     }
-    return &rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
+    XTensor &workspace = rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
+    if (attention) {
+        rt.RecordAttentionWorkspace(workspace.ptr);
+    }
+    return &workspace;
 }
 
-static void FinishAclnn(XRuntime &rt, XTensor *workspace)
+static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention)
 {
-    // Correctness POC: synchronize before ACL descriptor destruction and before
-    // returning workspace storage to TensorPool. Performance work may remove this.
-    CHECK_ACL(aclrtSynchronizeStream(rt.stream));
+    if (attention) {
+        rt.RecordAttentionAclnnLaunch();
+        // Attention work and TensorPool reuse are ordered on the single Xlite
+        // stream. Keep a diagnostic switch, but do not serialize the serving
+        // path. ACLNN MatMul intentionally remains synchronous because making
+        // it asynchronous previously changed autoregressive tokens on 310P.
+        if (rt.ForceSyncAttention()) {
+            rt.RecordAttentionForcedSync();
+            rt.Synchronize();
+        }
+    } else {
+        rt.Synchronize();
+    }
     if (workspace != nullptr) {
         rt.PutTensor(*workspace);
     }
@@ -103,6 +117,9 @@ static void FinishAclnn(XRuntime &rt, XTensor *workspace)
 static void ReadAttentionMetadata(XRuntime &rt, XTensor &lens, XTensor &cachedLens,
                                   XTensor &blockTables, uint32_t maxNumBlock, uint32_t batch)
 {
+    (void)lens;
+    (void)cachedLens;
+    (void)blockTables;
     if (batch == 0 || batch > XLITE_310P_MAX_BATCH) {
         throw std::runtime_error("Ascend310P attention requires batch in [1, " +
                                  std::to_string(XLITE_310P_MAX_BATCH) + "]");
@@ -110,19 +127,11 @@ static void ReadAttentionMetadata(XRuntime &rt, XTensor &lens, XTensor &cachedLe
     if (maxNumBlock == 0) {
         throw std::runtime_error("Ascend310P attention requires a non-empty block table");
     }
-    if (lens.numel < batch || cachedLens.numel < batch ||
-        blockTables.numel < static_cast<size_t>(batch) * maxNumBlock) {
-        throw std::runtime_error("Ascend310P attention metadata tensor is smaller than batch");
+    if (rt._lensHost.size() != batch || rt._cachedLensHost.size() != batch ||
+        rt._blockTablesHost.size() != static_cast<size_t>(batch) * maxNumBlock) {
+        throw std::runtime_error(
+            "Ascend310P host attention metadata does not match the prepared batch");
     }
-    rt.Synchronize();
-    rt._lensHost.resize(batch);
-    rt._cachedLensHost.resize(batch);
-    rt._blockTablesHost.resize(static_cast<size_t>(batch) * maxNumBlock);
-    rt.MemcpyD2H(rt._lensHost.data(), lens.ptr, static_cast<size_t>(batch) * sizeof(uint32_t));
-    rt.MemcpyD2H(rt._cachedLensHost.data(), cachedLens.ptr,
-                 static_cast<size_t>(batch) * sizeof(uint32_t));
-    rt.MemcpyD2H(rt._blockTablesHost.data(), blockTables.ptr,
-                 static_cast<size_t>(batch) * maxNumBlock * sizeof(uint32_t));
 }
 
 static std::vector<uint32_t> GetRequestBlocks(const XRuntime &rt, uint32_t request,
@@ -205,10 +214,10 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         aclOpExecutor *executor = nullptr;
         CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn.get(), aclWeight.get(), aclOut.get(), 0,
                                               &workspaceSize, &executor));
-        XTensor *workspace = GetWorkspace(rt, workspaceSize);
+        XTensor *workspace = GetWorkspace(rt, workspaceSize, false);
         CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
                               executor, rt.stream));
-        FinishAclnn(rt, workspace);
+        FinishAclnn(rt, workspace, false);
     };
 
     if (!transpose && n > static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK)) {
@@ -230,7 +239,6 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                 static_cast<size_t>(currentN) * sizeof(uint16_t), static_cast<size_t>(m),
                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
-        CHECK_ACL(aclrtSynchronizeStream(rt.stream));
         rt.PutTensor(chunkOutput);
         return;
     }
@@ -360,19 +368,19 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         if (!isDecode) {
             const size_t maskElements =
                 static_cast<size_t>(queryTensorLength) * kvTensorLength;
-            std::vector<uint8_t> hostMask(maskElements, 1);
-            for (uint32_t row = 0; row < queryLength; ++row) {
-                const uint32_t visibleKeys = cachedLength + row + 1;
-                for (uint32_t col = 0; col < visibleKeys; ++col) {
-                    hostMask[static_cast<size_t>(row) * kvTensorLength + col] = 0;
-                }
-            }
-            for (uint32_t row = queryLength; row < queryTensorLength; ++row) {
-                hostMask[static_cast<size_t>(row) * kvTensorLength] = 0;
-            }
             XTensor &causalMask =
                 rt.GetTensor({queryTensorLength, kvTensorLength}, INT8, DBG_LOC);
-            rt.MemcpyH2D(causalMask.ptr, hostMask.data(), maskElements);
+            // The pool address may still be referenced by an earlier queued
+            // operation. Keep all writes ordered on rt.stream. Real query rows
+            // copy the appropriate slice of one immutable triangular mask;
+            // padded rows are discarded and may remain unmasked.
+            CHECK_ACL(aclrtMemsetAsync(causalMask.ptr, maskElements, 0,
+                                       maskElements, rt.stream));
+            const uint8_t *hostMask = rt.CausalMaskHost310P() +
+                static_cast<size_t>(cachedLength) * XLITE_310P_MAX_SEQ_LEN;
+            CHECK_ACL(aclrtMemcpy2dAsync(
+                causalMask.ptr, kvTensorLength, hostMask, XLITE_310P_MAX_SEQ_LEN,
+                kvTensorLength, queryLength, ACL_MEMCPY_HOST_TO_DEVICE, rt.stream));
             const std::vector<int64_t> maskDims{queryTensorLength, kvTensorLength};
             AclTensorGuard aclMask(CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL,
                                                 causalMask.ptr));
@@ -384,20 +392,20 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                 aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(), nullptr,
                 nHeads, scale, 2147483647, 2147483647, const_cast<char *>("BSND"), nKvHeads,
                 aclOut.get(), &workspaceSize, &executor));
-            workspace = GetWorkspace(rt, workspaceSize);
+            workspace = GetWorkspace(rt, workspaceSize, true);
             CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                                 workspaceSize, executor, rt.stream));
-            FinishAclnn(rt, workspace);
+            FinishAclnn(rt, workspace, true);
             rt.PutTensor(causalMask);
         } else {
             CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
                 aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, nullptr, nullptr,
                 nHeads, scale, 2147483647, 2147483647, const_cast<char *>("BSND"), nKvHeads,
                 aclOut.get(), &workspaceSize, &executor));
-            workspace = GetWorkspace(rt, workspaceSize);
+            workspace = GetWorkspace(rt, workspaceSize, true);
             CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
                                                 workspaceSize, executor, rt.stream));
-            FinishAclnn(rt, workspace);
+            FinishAclnn(rt, workspace, true);
         }
         if (paddedOutput != nullptr) {
             const size_t validOutputBytes =
@@ -408,7 +416,6 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                                                        sizeof(uint16_t),
                                        paddedOutput->ptr, validOutputBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            CHECK_ACL(aclrtSynchronizeStream(rt.stream));
             rt.PutTensor(*paddedOutput);
             rt.PutTensor(*paddedQuery);
         }

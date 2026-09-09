@@ -20,7 +20,7 @@ import math
 import numpy as np
 import warnings
 from typing import Iterable
-from xlite._C import Runtime, attention
+from xlite._C import Runtime, attention, get_build_info
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -324,10 +324,28 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 v_cache_xlite[cache_block_idx, :current_seq_len] = full_v[:, seq_start:seq_end]
 
         torch.npu.synchronize()
+        if hasattr(rt, "set_host_attention_metadata"):
+            rt.set_host_attention_metadata(
+                query_lens_list,
+                cached_lens_list,
+                block_tables_array.reshape(-1).tolist(),
+                int(block_tables_array.shape[1]),
+            )
         attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
                   output_xlite, query_start_loc, query_lens, cached_lens,
                   block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash)
         torch.npu.synchronize()
+        if (str(dict(get_build_info()).get("soc", "")).lower().startswith("ascend310p")
+                and hasattr(rt, "get_stats")):
+            runtime_stats = dict(rt.get_stats())
+            if runtime_stats.get("attention_metadata_d2h_bytes", -1) != 0:
+                raise AssertionError(
+                    f"attention metadata D2H is not zero: {runtime_stats}"
+                )
+            if runtime_stats.get("attention_aclnn_launches", 0) == 0:
+                raise AssertionError(
+                    f"attention ACLNN launch counter was not updated: {runtime_stats}"
+                )
         if torch.isnan(output_xlite).any():
             raise AssertionError("attention output still contains the no-op sentinel")
 
