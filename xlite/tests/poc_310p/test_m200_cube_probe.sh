@@ -25,7 +25,7 @@ if ! cmake --build "${build_dir}" --parallel "${jobs}"; then
     exit 1
 fi
 
-export LD_LIBRARY_PATH="${build_dir}:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${build_dir}/lib:${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
 for m in 1 20; do
     echo "[ RUN      ] m200-cube-m${m}"
