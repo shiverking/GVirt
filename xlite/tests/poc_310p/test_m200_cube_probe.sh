@@ -3,7 +3,7 @@ set -uo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_dir="${script_dir}/m200_cube_probe"
-build_dir=${XLITE_M200_PROBE_BUILD_DIR:-/tmp/xlite_m200_cube_probe_build}
+build_dir=${XLITE_M200_PROBE_BUILD_DIR:-/tmp/xlite_m200_cube_probe_build_release}
 cann_path=${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
 jobs=${XLITE_BUILD_JOBS:-8}
 
@@ -12,6 +12,7 @@ echo "[ M200 CUBE PROBE ] build=${build_dir}"
 echo "[ M200 CUBE PROBE ] cann=${cann_path}"
 
 cmake -S "${source_dir}" -B "${build_dir}" \
+    -DCMAKE_BUILD_TYPE=Release \
     -DRUN_MODE=npu \
     -DSOC_VERSION=Ascend310P3 \
     -DASCEND_CANN_PACKAGE_PATH="${cann_path}" || exit $?
