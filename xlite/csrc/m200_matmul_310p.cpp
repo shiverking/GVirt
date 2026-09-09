@@ -158,6 +158,27 @@ void XliteM200Matmul310P(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &ou
         return;
     }
 
+    // Diagnostic/correctness path for large sampler batches: write each row's
+    // vocabulary chunks directly into the final contiguous row. This removes
+    // aclrtMemcpy2dAsync and all temporary logits buffers from the equation.
+    // The 13 workspace slots are safely reused in stream order across rows.
+    if (m > kLmHeadRowGroup) {
+        for (uint32_t row = 0; row < m; ++row) {
+            void *inputData = static_cast<void *>(
+                static_cast<uint16_t *>(in.ptr) + static_cast<size_t>(row) * k);
+            uint32_t chunkIndex = 0;
+            for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
+                const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
+                void *weightData = static_cast<void *>(
+                    static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset) * k);
+                void *outputData = static_cast<void *>(
+                    static_cast<uint16_t *>(out.ptr) + static_cast<size_t>(row) * n + offset);
+                Launch(rt, inputData, weightData, outputData, 1, currentN, k, chunkIndex++);
+            }
+        }
+        return;
+    }
+
     const uint32_t rowGroups = (m + kLmHeadRowGroup - 1) / kLmHeadRowGroup;
     const uint32_t columnChunks = (n + kLmHeadChunkN - 1) / kLmHeadChunkN;
     std::vector<XTensor *> chunkOutputs;
