@@ -114,6 +114,20 @@ def load_cube_results(paths: list[Path]) -> dict[tuple[str, int], dict]:
     return results
 
 
+def load_worker_payload(output: str) -> dict | None:
+    # Xlite kernels print progress markers without a trailing newline, so the
+    # JSON record can legitimately arrive as `.\n.\n.{...}` or `.{...}`.
+    for line in reversed(output.splitlines()):
+        start = line.find("{")
+        if start < 0:
+            continue
+        try:
+            return json.loads(line[start:])
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cube-log", type=Path, action="append", required=True,
@@ -174,9 +188,13 @@ def main() -> int:
 
         row = {**cube[(name, m)], "exit_code": status,
                "log": str(log_path.resolve())}
+        payload = load_worker_payload(output) if status == 0 else None
+        if status == 0 and payload is None:
+            status = 125
+            row["exit_code"] = status
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("\nComparison worker exited successfully but emitted no JSON record\n")
         if status == 0:
-            payload = next(json.loads(line) for line in reversed(output.splitlines())
-                           if line.startswith("{"))
             row.update({"aclnn_ms": payload["average_ms"],
                         "speedup": payload["average_ms"] / row["cube_ms"],
                         "cosine": payload["cosine"],
