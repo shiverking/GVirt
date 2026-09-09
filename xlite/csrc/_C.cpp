@@ -16,6 +16,9 @@
 #include "op.h"
 #include "auto_tuner.h"
 #include "debug.h"
+#ifdef XLITE_DIRECT_ATB_310P
+#include "direct_atb_310p.h"
+#endif
 
 namespace py = pybind11;
 
@@ -208,6 +211,9 @@ private:
     XModel *_model = nullptr;
     std::vector<std::vector<XTensor>> _kv;
     std::vector<std::vector<at::Tensor>> _nativeKv310P;
+#ifdef XLITE_DIRECT_ATB_310P
+    std::unique_ptr<XliteDirectAtb310P> _directAtb310P;
+#endif
     at::Tensor _nativeQueryStage310P;
     at::Tensor _nativeKeyStage310P;
     at::Tensor _nativeValueStage310P;
@@ -806,6 +812,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
 _CModel::~_CModel(void)
 {
+#ifdef XLITE_DIRECT_ATB_310P
+    _directAtb310P.reset();
+#endif
     if (_model != nullptr) {
         delete _model;
         _model = nullptr;
@@ -1022,11 +1031,15 @@ bool _CModel::RunNativeAtbAttention310P(
                                  qkvBytes + qBytes + kvBytes, rowBytes, kvBytes, tokens,
                                  ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
     SyncNativeAtbDebug(rt, "qkv_split", layer, batch, tokens);
-    rt.RecordNativeAtbStagingBytes(qkv.bytes);
+    if (rt.UseDirectAtbDecodeAttention310P()) {
+        rt.RecordDirectAtbStagingBytes(qkv.bytes);
+    } else {
+        rt.RecordNativeAtbStagingBytes(qkv.bytes);
+    }
     at::Tensor query = queryStage.narrow(0, 0, tokens);
     at::Tensor key = keyStage.narrow(0, 0, tokens);
     at::Tensor value = valueStage.narrow(0, 0, tokens);
-    if (layer == 0) {
+    if (layer == 0 && !rt.UseDirectAtbDecodeAttention310P()) {
         CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeSlotStage310P),
                                    TorchTensorBytes(_nativeSlotStage310P), slotMapping.ptr,
                                    slotMapping.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
@@ -1041,6 +1054,51 @@ bool _CModel::RunNativeAtbAttention310P(
         SyncNativeAtbDebug(rt, "metadata_copy", layer, batch, tokens);
     }
     at::Tensor slots = _nativeSlotStage310P.narrow(0, 0, tokens);
+
+#ifdef XLITE_DIRECT_ATB_310P
+    if (rt.UseDirectAtbDecodeAttention310P()) {
+        if (_directAtb310P == nullptr) {
+            _directAtb310P = std::make_unique<XliteDirectAtb310P>();
+        }
+        _directAtb310P->SetStream(rt.stream);
+        XTensor *workspaceTensor = nullptr;
+        const auto acquire = [&rt, &workspaceTensor](size_t bytes) -> void * {
+            workspaceTensor = &rt.GetTensor({bytes}, INT8, DBG_LOC);
+            return workspaceTensor->ptr;
+        };
+        const auto release = [&rt, &workspaceTensor](void *) {
+            if (workspaceTensor != nullptr) {
+                rt.PutTensor(*workspaceTensor);
+                workspaceTensor = nullptr;
+            }
+        };
+        const uint32_t cacheBlocks = static_cast<uint32_t>(nativeK.size(0));
+        _directAtb310P->ReshapeAndCache(
+            TensorPtr(key), TensorPtr(value), static_cast<uint32_t>(tokens), TensorPtr(nativeK),
+            TensorPtr(nativeV), cacheBlocks, slotMapping.ptr, acquire, release);
+        rt.RecordDirectAtbSetup();
+        rt.RecordDirectAtbExecute(false);
+        rt.RecordNativeAtbCacheWrite();
+
+        if (!rt._decodeStep) {
+            // Direct ATB and all Xlite kernels are submitted to rt.stream. The
+            // next layer may safely reuse the shared staging buffers without a
+            // host-side synchronization.
+            return false;
+        }
+        if (tokens != batch) {
+            throw std::runtime_error(
+                "direct_atb decode requires exactly one query token per request");
+        }
+        _directAtb310P->PagedAttention(
+            TensorPtr(query), batch, TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
+            blockTables.ptr, static_cast<uint32_t>(tableColumns), totalLens.ptr, output.ptr,
+            acquire, release);
+        rt.RecordDirectAtbSetup();
+        rt.RecordDirectAtbExecute(true, batch);
+        return true;
+    }
+#endif
 
     c10::Stack reshapeStack;
     reshapeStack.emplace_back(key);
@@ -1130,8 +1188,10 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     }
 
     bool nativeAtb = false;
+    bool directAtb = false;
 #ifdef XLITE_ARCH_310P
-    nativeAtb = rt.UseNativeAtbDecodeAttention310P();
+    nativeAtb = rt.UseNativeKvDecodeAttention310P();
+    directAtb = rt.UseDirectAtbDecodeAttention310P();
     if (nativeAtb) {
         if (currStream == 0) {
             throw std::runtime_error(
@@ -1146,7 +1206,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         }
     }
 #endif
-    if (currStream != 0 && rt.taskId == 0 && !nativeAtb) {
+    if (currStream != 0 && rt.taskId == 0 && (!nativeAtb || directAtb)) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
@@ -1158,8 +1218,10 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     aclrtStream savedStream = rt.stream;
 #ifdef XLITE_ARCH_310P
     if (nativeAtb) {
-        currAclStream = reinterpret_cast<aclrtStream>(currStream);
-        rt.stream = currAclStream;
+        if (!directAtb) {
+            currAclStream = reinterpret_cast<aclrtStream>(currStream);
+            rt.stream = currAclStream;
+        }
         rt.nativeAtbAttentionCallback =
             [this, &rt](XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &out,
                         XTensor &slots, XTensor &tables, XTensor &totalLens, uint32_t nHeads,
@@ -1194,7 +1256,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         }
     }
 
-    if (currStream != 0 && !nativeAtb) {
+    if (currStream != 0 && (!nativeAtb || directAtb)) {
         rt.EventRecordCurrStream(currAclStream);
     } else if (currStream == 0) {
         rt.Synchronize();
@@ -1448,8 +1510,10 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 
     bool nativeAtb = false;
+    bool directAtb = false;
 #ifdef XLITE_ARCH_310P
-    nativeAtb = rt.UseNativeAtbDecodeAttention310P();
+    nativeAtb = rt.UseNativeKvDecodeAttention310P();
+    directAtb = rt.UseDirectAtbDecodeAttention310P();
     if (nativeAtb) {
         if (currStream == 0) {
             throw std::runtime_error(
@@ -1464,7 +1528,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         }
     }
 #endif
-    if (currStream != 0 && rt.taskId == 0 && !nativeAtb) {
+    if (currStream != 0 && rt.taskId == 0 && (!nativeAtb || directAtb)) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
@@ -1476,8 +1540,10 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     aclrtStream savedStream = rt.stream;
 #ifdef XLITE_ARCH_310P
     if (nativeAtb) {
-        currAclStream = reinterpret_cast<aclrtStream>(currStream);
-        rt.stream = currAclStream;
+        if (!directAtb) {
+            currAclStream = reinterpret_cast<aclrtStream>(currStream);
+            rt.stream = currAclStream;
+        }
         rt.nativeAtbAttentionCallback =
             [this, &rt](XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &out,
                         XTensor &slots, XTensor &tables, XTensor &totalLens, uint32_t nHeads,
@@ -1513,7 +1579,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         }
     }
 
-    if (currStream != 0 && !nativeAtb) {
+    if (currStream != 0 && (!nativeAtb || directAtb)) {
         rt.EventRecordCurrStream(currAclStream);
     } else if (currStream == 0) {
         rt.Synchronize();
@@ -2806,7 +2872,7 @@ PYBIND11_MODULE(_C, m)
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "runtime_selectable";
         info["decode_attention_backends"] =
-            py::make_tuple("native_atb", "batched_aclnn", "legacy");
+            py::make_tuple("direct_atb", "native_atb", "batched_aclnn", "legacy");
         // PromptFlashAttentionV2 needs a dense, max-length-padded KV gather for
         // decode on 310P.  Keep it available as a diagnostic backend, but do
         // not select it by default: real ASR batch-20 measurements showed a
@@ -2816,7 +2882,11 @@ PYBIND11_MODULE(_C, m)
         info["batched_decode_attention_api"] = "PromptFlashAttentionV2";
         info["native_decode_attention"] = true;
         info["native_decode_attention_api"] = "atb::_npu_paged_attention";
+        info["direct_decode_attention"] = true;
+        info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
+        info["direct_decode_execution"] = "xlite_runtime_stream";
         info["native_decode_cache_layout"] = "NZ_5D";
+        info["direct_atb_task_queue_independent"] = true;
         info["attention_metadata"] = "host_retained_pinned";
         info["attention_execution"] = "async_single_stream";
         info["cross_stream_handoff"] = "split_acl_event_sync";
@@ -2868,6 +2938,14 @@ PYBIND11_MODULE(_C, m)
         stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
         stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
         stats["native_atb_staging_copy_bytes"] = rt.NativeAtbStagingBytes();
+        stats["direct_atb_setup_count"] = rt.DirectAtbSetupCount();
+        stats["direct_atb_execute_count"] = rt.DirectAtbExecuteCount();
+        stats["direct_atb_decode_requests"] = rt.DirectAtbDecodeRequests();
+        stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
+        stats["direct_atb_reshape_launches"] = rt.DirectAtbReshapeLaunches();
+        stats["direct_atb_staging_copy_bytes"] = rt.DirectAtbStagingBytes();
+        stats["forward_input_events"] = rt.ForwardInputEvents();
+        stats["forward_output_events"] = rt.ForwardOutputEvents();
         return stats;
     });
 #endif
@@ -2930,7 +3008,15 @@ PYBIND11_MODULE(_C, m)
             stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
             stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
             stats["native_atb_staging_copy_bytes"] = rt.NativeAtbStagingBytes();
+            stats["direct_atb_setup_count"] = rt.DirectAtbSetupCount();
+            stats["direct_atb_execute_count"] = rt.DirectAtbExecuteCount();
+            stats["direct_atb_decode_requests"] = rt.DirectAtbDecodeRequests();
+            stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
+            stats["direct_atb_reshape_launches"] = rt.DirectAtbReshapeLaunches();
+            stats["direct_atb_staging_copy_bytes"] = rt.DirectAtbStagingBytes();
 #endif
+            stats["forward_input_events"] = rt.ForwardInputEvents();
+            stats["forward_output_events"] = rt.ForwardOutputEvents();
             return stats;
         })
         .def("set_host_attention_metadata",

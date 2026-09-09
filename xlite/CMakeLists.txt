@@ -499,6 +499,29 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         XLITE_ARCH_310P=1
         XLITE_310P_LLM_FP16_POC=1
     )
+
+    set(XLITE_ATB_HOME "$ENV{ATB_HOME_PATH}" CACHE PATH
+        "ATB installation used by the Ascend310P direct runtime backend")
+    find_path(XLITE_ATB_INCLUDE_DIR atb/atb_infer.h
+        HINTS
+            ${XLITE_ATB_HOME}/include
+            /usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_0/include
+            /usr/local/Ascend/nnal/atb/latest/include)
+    find_library(XLITE_ATB_LIBRARY NAMES atb
+        HINTS
+            ${XLITE_ATB_HOME}/lib
+            /usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_0/lib
+            /usr/local/Ascend/nnal/atb/latest/lib)
+    if(NOT XLITE_ATB_INCLUDE_DIR OR NOT XLITE_ATB_LIBRARY)
+        message(FATAL_ERROR
+            "310P llm_fp16 requires the public ATB C++ SDK. Set ATB_HOME_PATH to "
+            "the directory containing include/atb/atb_infer.h and lib/libatb.so")
+    endif()
+    get_filename_component(XLITE_ATB_LIBRARY_DIR ${XLITE_ATB_LIBRARY} DIRECTORY)
+    target_sources(_C PRIVATE csrc/direct_atb_310p.cpp)
+    target_include_directories(_C PRIVATE ${XLITE_ATB_INCLUDE_DIR})
+    target_compile_definitions(_C PRIVATE XLITE_DIRECT_ATB_310P=1)
+    target_link_libraries(_C PRIVATE ${XLITE_ATB_LIBRARY})
 endif()
 
 target_compile_options(_C PRIVATE
@@ -534,8 +557,12 @@ message(STATUS "TORCH_RPATH: ${TORCH_RPATH}")
 set_target_properties(xlite PROPERTIES
     LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
 )
+set(XLITE_EXTENSION_RPATH "\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}")
+if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
+    string(APPEND XLITE_EXTENSION_RPATH ":${XLITE_ATB_LIBRARY_DIR}")
+endif()
 set_target_properties(_C PROPERTIES
-    LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
+    LINK_FLAGS "-Wl,-rpath,${XLITE_EXTENSION_RPATH}"
 )
 
 install(TARGETS xlite_kernels_common_${RUN_MODE} xlite_kernels_bf16_${RUN_MODE} xlite_kernels_f16_${RUN_MODE} xlite

@@ -291,6 +291,10 @@ const char *XRuntime::MatmulBackend310PName(void) const
 
 void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
 {
+    if (backend == "direct_atb") {
+        _decodeAttentionBackend310P = XDecodeAttentionBackend310P::DIRECT_ATB;
+        return;
+    }
     if (backend == "native_atb") {
         _decodeAttentionBackend310P = XDecodeAttentionBackend310P::NATIVE_ATB;
         return;
@@ -304,7 +308,8 @@ void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
         return;
     }
     throw std::invalid_argument(
-        "Ascend310P decode attention backend must be one of: native_atb, batched_aclnn, legacy");
+        "Ascend310P decode attention backend must be one of: direct_atb, native_atb, "
+        "batched_aclnn, legacy");
 }
 #endif
 
@@ -988,6 +993,7 @@ void XRuntime::Synchronize(void)
 
 void XRuntime::EventWaitCurrStream(aclrtStream currStream)
 {
+    ++_forwardInputEvents;
 #ifdef XLITE_310P_LLM_FP16_POC
     CHECK_ACL(aclrtRecordEvent(_inputReadyEvent, currStream));
     CHECK_ACL(aclrtStreamWaitEvent(stream, _inputReadyEvent));
@@ -1001,6 +1007,7 @@ void XRuntime::EventWaitCurrStream(aclrtStream currStream)
 
 void XRuntime::EventRecordCurrStream(aclrtStream currStream)
 {
+    ++_forwardOutputEvents;
 #ifdef XLITE_310P_LLM_FP16_POC
     CHECK_ACL(aclrtRecordEvent(_outputReadyEvent, stream));
     CHECK_ACL(aclrtStreamWaitEvent(currStream, _outputReadyEvent));

@@ -1072,7 +1072,7 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     (void)queryStartLoc;
     (void)lens;
     (void)cachedLens;
-    if (rt.UseNativeAtbDecodeAttention310P()) {
+    if (rt.UseNativeKvDecodeAttention310P()) {
         if (!rt.nativeAtbAttentionCallback) {
             throw std::runtime_error(
                 "Ascend310P native_atb attention requires native 5D/NZ KV caches");

@@ -83,6 +83,7 @@ enum class XDecodeAttentionBackend310P {
     LEGACY,
     BATCHED_ACLNN,
     NATIVE_ATB,
+    DIRECT_ATB,
 };
 #endif
 
@@ -157,6 +158,14 @@ public:
     {
         return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::NATIVE_ATB;
     }
+    [[nodiscard]] bool UseDirectAtbDecodeAttention310P(void) const
+    {
+        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::DIRECT_ATB;
+    }
+    [[nodiscard]] bool UseNativeKvDecodeAttention310P(void) const
+    {
+        return UseNativeAtbDecodeAttention310P() || UseDirectAtbDecodeAttention310P();
+    }
     using NativeAtbAttentionCallback = std::function<bool(
         XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &,
         uint32_t, uint32_t, uint32_t, uint32_t)>;
@@ -217,6 +226,24 @@ public:
     void RecordNativeAtbStagingBytes(uint64_t bytes)
     {
         _nativeAtbStagingBytes += bytes;
+    }
+    void RecordDirectAtbSetup(void)
+    {
+        ++_directAtbSetupCount;
+    }
+    void RecordDirectAtbStagingBytes(uint64_t bytes)
+    {
+        _directAtbStagingBytes += bytes;
+    }
+    void RecordDirectAtbExecute(bool attention, uint32_t requests = 0)
+    {
+        ++_directAtbExecuteCount;
+        if (attention) {
+            _directAtbDecodeRequests += requests;
+            ++_directAtbAttentionLaunches;
+        } else {
+            ++_directAtbReshapeLaunches;
+        }
     }
 #endif
     [[nodiscard]] bool ForceSyncAttention(void) const
@@ -280,7 +307,24 @@ public:
     {
         return _nativeAtbStagingBytes;
     }
+    [[nodiscard]] uint64_t DirectAtbSetupCount(void) const { return _directAtbSetupCount; }
+    [[nodiscard]] uint64_t DirectAtbExecuteCount(void) const { return _directAtbExecuteCount; }
+    [[nodiscard]] uint64_t DirectAtbDecodeRequests(void) const { return _directAtbDecodeRequests; }
+    [[nodiscard]] uint64_t DirectAtbAttentionLaunches(void) const
+    {
+        return _directAtbAttentionLaunches;
+    }
+    [[nodiscard]] uint64_t DirectAtbReshapeLaunches(void) const
+    {
+        return _directAtbReshapeLaunches;
+    }
+    [[nodiscard]] uint64_t DirectAtbStagingBytes(void) const
+    {
+        return _directAtbStagingBytes;
+    }
 #endif
+    [[nodiscard]] uint64_t ForwardInputEvents(void) const { return _forwardInputEvents; }
+    [[nodiscard]] uint64_t ForwardOutputEvents(void) const { return _forwardOutputEvents; }
 
     [[nodiscard]] virtual bool IsDummyRuntime() const
     {
@@ -455,6 +499,8 @@ protected:
     bool _graphCommEnabled = true;
     bool _forceSyncAttention = false;
     uint64_t _streamSynchronizations = 0;
+    uint64_t _forwardInputEvents = 0;
+    uint64_t _forwardOutputEvents = 0;
     uint64_t _prepareAttnSynchronizations = 0;
     uint64_t _attentionMetadataD2HBytes = 0;
     uint64_t _attentionAclnnLaunches = 0;
@@ -469,6 +515,12 @@ protected:
     uint64_t _nativeAtbDecodeLaunches = 0;
     uint64_t _nativeAtbCacheWrites = 0;
     uint64_t _nativeAtbStagingBytes = 0;
+    uint64_t _directAtbSetupCount = 0;
+    uint64_t _directAtbExecuteCount = 0;
+    uint64_t _directAtbDecodeRequests = 0;
+    uint64_t _directAtbAttentionLaunches = 0;
+    uint64_t _directAtbReshapeLaunches = 0;
+    uint64_t _directAtbStagingBytes = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;
