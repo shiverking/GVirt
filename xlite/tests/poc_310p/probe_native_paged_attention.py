@@ -12,6 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import subprocess
+import sys
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass
@@ -124,7 +127,7 @@ def _run_case(case: ProbeCase, warmup: int, iterations: int) -> dict[str, object
     )
 
     query_cpu = torch.randn(
-        (len(case.lengths), NUM_HEADS * HEAD_DIM),
+        (len(case.lengths), NUM_HEADS, HEAD_DIM),
         generator=generator,
         dtype=torch.float16,
     ) * (1.0 / math.sqrt(HEAD_DIM))
@@ -157,7 +160,7 @@ def _run_case(case: ProbeCase, warmup: int, iterations: int) -> dict[str, object
     torch.npu.synchronize()
     average_ms = (time.perf_counter() - started) * 1000.0 / iterations
 
-    actual = output.float().cpu()
+    actual = output.float().cpu().reshape(len(case.lengths), NUM_HEADS * HEAD_DIM)
     expected = _reference(query_cpu, keys_cpu, values_cpu)
     cosine = float(
         torch.nn.functional.cosine_similarity(
@@ -189,7 +192,63 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--report", default="native_paged_attention_310p_report.json")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if not args.worker:
+        # A failed asynchronous NPU launch poisons the process context.  Run
+        # every case in a fresh process so later results remain meaningful.
+        passed: list[dict[str, object]] = []
+        failed: list[dict[str, str]] = []
+        with tempfile.TemporaryDirectory(prefix="xlite_native_pa_") as temp_dir:
+            for case in _make_cases(args.case):
+                child_report = f"{temp_dir}/{case.name}.json"
+                command = [
+                    sys.executable,
+                    __file__,
+                    "--case",
+                    "batch1" if len(case.lengths) == 1 else "batch20",
+                    "--warmup",
+                    str(args.warmup),
+                    "--iterations",
+                    str(args.iterations),
+                    "--report",
+                    child_report,
+                    "--worker",
+                ]
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                print(completed.stdout, end="")
+                try:
+                    with open(child_report, encoding="utf-8") as report:
+                        child_payload = json.load(report)
+                    passed.extend(child_payload["passed"])
+                    failed.extend(child_payload["failed"])
+                except (OSError, json.JSONDecodeError, KeyError):
+                    failed.append(
+                        {
+                            "name": case.name,
+                            "traceback": (
+                                f"worker exited {completed.returncode} without a valid report\n"
+                                f"{completed.stdout}"
+                            ),
+                        }
+                    )
+
+        payload = _payload(passed, failed)
+        with open(args.report, "w", encoding="utf-8") as report:
+            json.dump(payload, report, indent=2)
+        print(
+            f"\nIsolated native paged attention summary: "
+            f"{len(passed)} passed, {len(failed)} failed"
+        )
+        print(f"Report: {args.report}")
+        return 1 if failed else 0
 
     torch.npu.set_device(0)
     passed: list[dict[str, object]] = []
@@ -208,7 +267,23 @@ def main() -> int:
             failed.append({"name": case.name, "traceback": traceback.format_exc()})
             print(f"[  FAILED  ] {case.name} (recorded; continuing)", flush=True)
 
-    payload = {
+    payload = _payload(passed, failed)
+    with open(args.report, "w", encoding="utf-8") as report:
+        json.dump(payload, report, indent=2)
+
+    print(f"\nNative paged attention summary: {len(passed)} passed, {len(failed)} failed")
+    if failed:
+        print("\n" + "=" * 80 + "\nAGGREGATED FAILURES")
+        for failure in failed:
+            print(f"\n## {failure['name']}\n\n{failure['traceback']}")
+        return 1
+    return 0
+
+
+def _payload(
+    passed: list[dict[str, object]], failed: list[dict[str, str]]
+) -> dict[str, object]:
+    return {
         "soc": "Ascend310P3",
         "operator": "torch_npu._npu_paged_attention",
         "cache_writer": "torch_npu._npu_reshape_and_cache",
@@ -222,17 +297,6 @@ def main() -> int:
         "passed": passed,
         "failed": failed,
     }
-    with open(args.report, "w", encoding="utf-8") as report:
-        json.dump(payload, report, indent=2)
-
-    print(f"\nNative paged attention summary: {len(passed)} passed, {len(failed)} failed")
-    print(f"Report: {args.report}")
-    if failed:
-        print("\n" + "=" * 80 + "\nAGGREGATED FAILURES")
-        for failure in failed:
-            print(f"\n## {failure['name']}\n\n{failure['traceback']}")
-        return 1
-    return 0
 
 
 if __name__ == "__main__":
