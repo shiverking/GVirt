@@ -30,7 +30,7 @@ __aicore__ inline void XliteM200CopyTiling(TCubeTiling *tiling, uint64_t &localM
 extern "C" __global__ __aicore__ void xlite_m200_matmul_float16(
     GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tilingGm)
 {
-#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 2002)
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
 #error "xlite_m200_matmul_float16 requires the real M200 architecture"
 #endif
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
