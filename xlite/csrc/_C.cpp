@@ -211,7 +211,10 @@ private:
     at::Tensor _nativeQueryStage310P;
     at::Tensor _nativeKeyStage310P;
     at::Tensor _nativeValueStage310P;
-    at::Tensor _nativeOutputStage310P;
+    std::vector<at::Tensor> _nativeDecodeQueryStage310P;
+    std::vector<at::Tensor> _nativeDecodeKeyStage310P;
+    std::vector<at::Tensor> _nativeDecodeValueStage310P;
+    std::vector<at::Tensor> _nativeDecodeOutputStage310P;
     at::Tensor _nativeSlotStage310P;
     at::Tensor _nativeBlockTableStage310P;
     at::Tensor _nativeTotalLensStage310P;
@@ -836,8 +839,24 @@ void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache
         {static_cast<int64_t>(_nativeMaxTokens310P), 8, 128}, fp16Options);
     _nativeValueStage310P = at::empty(
         {static_cast<int64_t>(_nativeMaxTokens310P), 8, 128}, fp16Options);
-    _nativeOutputStage310P = at::empty(
-        {static_cast<int64_t>(_nativeMaxTokens310P), 16, 128}, fp16Options);
+    _nativeDecodeQueryStage310P.clear();
+    _nativeDecodeKeyStage310P.clear();
+    _nativeDecodeValueStage310P.clear();
+    _nativeDecodeOutputStage310P.clear();
+    _nativeDecodeQueryStage310P.reserve(kvCache.size());
+    _nativeDecodeKeyStage310P.reserve(kvCache.size());
+    _nativeDecodeValueStage310P.reserve(kvCache.size());
+    _nativeDecodeOutputStage310P.reserve(kvCache.size());
+    for (size_t layer = 0; layer < kvCache.size(); ++layer) {
+        _nativeDecodeQueryStage310P.emplace_back(at::empty(
+            {static_cast<int64_t>(_nativeMaxBatch310P), 16, 128}, fp16Options));
+        _nativeDecodeKeyStage310P.emplace_back(at::empty(
+            {static_cast<int64_t>(_nativeMaxBatch310P), 8, 128}, fp16Options));
+        _nativeDecodeValueStage310P.emplace_back(at::empty(
+            {static_cast<int64_t>(_nativeMaxBatch310P), 8, 128}, fp16Options));
+        _nativeDecodeOutputStage310P.emplace_back(at::empty(
+            {static_cast<int64_t>(_nativeMaxBatch310P), 16, 128}, fp16Options));
+    }
     _nativeSlotStage310P =
         at::empty({static_cast<int64_t>(_nativeMaxTokens310P)}, intOptions);
     // PrepareAttn packs only the active block-table columns. Keep the staging
@@ -984,23 +1003,29 @@ bool _CModel::RunNativeAtbAttention310P(
         throw std::runtime_error("native_atb QKV input is not tightly packed");
     }
     const auto *qkvBytes = static_cast<const uint8_t *>(qkv.ptr);
+    at::Tensor &queryStage = rt._decodeStep ? _nativeDecodeQueryStage310P[layer]
+                                            : _nativeQueryStage310P;
+    at::Tensor &keyStage = rt._decodeStep ? _nativeDecodeKeyStage310P[layer]
+                                          : _nativeKeyStage310P;
+    at::Tensor &valueStage = rt._decodeStep ? _nativeDecodeValueStage310P[layer]
+                                            : _nativeValueStage310P;
     // ATB's native operators require contiguous ND Q/K/V. A narrow view of
     // packed [Q,K,V] retains rowBytes as its leading stride and is not valid
     // input even though its logical shape looks correct.
-    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeQueryStage310P), qBytes, qkvBytes,
+    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(queryStage), qBytes, qkvBytes,
                                  rowBytes, qBytes, tokens,
                                  ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeKeyStage310P), kvBytes,
+    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(keyStage), kvBytes,
                                  qkvBytes + qBytes, rowBytes, kvBytes, tokens,
                                  ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeValueStage310P), kvBytes,
+    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(valueStage), kvBytes,
                                  qkvBytes + qBytes + kvBytes, rowBytes, kvBytes, tokens,
                                  ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
     SyncNativeAtbDebug(rt, "qkv_split", layer, batch, tokens);
     rt.RecordNativeAtbStagingBytes(qkv.bytes);
-    at::Tensor query = _nativeQueryStage310P.narrow(0, 0, tokens);
-    at::Tensor key = _nativeKeyStage310P.narrow(0, 0, tokens);
-    at::Tensor value = _nativeValueStage310P.narrow(0, 0, tokens);
+    at::Tensor query = queryStage.narrow(0, 0, tokens);
+    at::Tensor key = keyStage.narrow(0, 0, tokens);
+    at::Tensor value = valueStage.narrow(0, 0, tokens);
     if (layer == 0) {
         CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeSlotStage310P),
                                    TorchTensorBytes(_nativeSlotStage310P), slotMapping.ptr,
@@ -1028,6 +1053,12 @@ bool _CModel::RunNativeAtbAttention310P(
     rt.RecordNativeAtbCacheWrite();
 
     if (!rt._decodeStep) {
+        // Prefill can use thousands of tokens, so retaining a full-size staging
+        // set for every decoder layer would waste hundreds of MiB. Drain only
+        // this one-time cache population before the shared buffers are reused.
+        if (!NativeAtbDebugEnabled()) {
+            rt.Synchronize();
+        }
         return false;
     }
     if (tokens != batch) {
@@ -1037,7 +1068,7 @@ bool _CModel::RunNativeAtbAttention310P(
         _nativeBlockTableStage310P.narrow(0, 0, tableElements)
             .view({static_cast<int64_t>(batch), tableColumns});
     at::Tensor lengths = _nativeTotalLensStage310P.narrow(0, 0, batch);
-    at::Tensor out = _nativeOutputStage310P.narrow(0, 0, tokens);
+    at::Tensor out = _nativeDecodeOutputStage310P[layer].narrow(0, 0, tokens);
     c10::Stack pagedStack;
     pagedStack.emplace_back(query);
     pagedStack.emplace_back(nativeK);
