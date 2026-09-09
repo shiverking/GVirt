@@ -205,7 +205,9 @@ private:
     XModel *_model = nullptr;
     std::vector<std::vector<XTensor>> _kv;
     std::vector<std::vector<at::Tensor>> _nativeKv310P;
-    at::Tensor _nativeQkvStage310P;
+    at::Tensor _nativeQueryStage310P;
+    at::Tensor _nativeKeyStage310P;
+    at::Tensor _nativeValueStage310P;
     at::Tensor _nativeOutputStage310P;
     at::Tensor _nativeSlotStage310P;
     at::Tensor _nativeBlockTableStage310P;
@@ -825,8 +827,12 @@ void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache
     _nativeKv310P = kvCache;
     const auto fp16Options = kvCache[0][0].options().dtype(at::kHalf);
     const auto intOptions = kvCache[0][0].options().dtype(at::kInt);
-    _nativeQkvStage310P = at::empty(
-        {static_cast<int64_t>(_nativeMaxTokens310P), 32, 128}, fp16Options);
+    _nativeQueryStage310P = at::empty(
+        {static_cast<int64_t>(_nativeMaxTokens310P), 16, 128}, fp16Options);
+    _nativeKeyStage310P = at::empty(
+        {static_cast<int64_t>(_nativeMaxTokens310P), 8, 128}, fp16Options);
+    _nativeValueStage310P = at::empty(
+        {static_cast<int64_t>(_nativeMaxTokens310P), 8, 128}, fp16Options);
     _nativeOutputStage310P = at::empty(
         {static_cast<int64_t>(_nativeMaxTokens310P), 16, 128}, fp16Options);
     _nativeSlotStage310P =
@@ -904,14 +910,29 @@ bool _CModel::RunNativeAtbAttention310P(
         static_cast<size_t>(tableElements) * sizeof(int32_t)) {
         throw std::runtime_error("native_atb block table is not tightly packed");
     }
-    CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeQkvStage310P),
-                               TorchTensorBytes(_nativeQkvStage310P), qkv.ptr, qkv.bytes,
-                               ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    const size_t qBytes = static_cast<size_t>(nHeads) * headDim * sizeof(uint16_t);
+    const size_t kvBytes = static_cast<size_t>(nKvHeads) * headDim * sizeof(uint16_t);
+    const size_t rowBytes = qBytes + 2 * kvBytes;
+    if (qkv.bytes != static_cast<size_t>(tokens) * rowBytes) {
+        throw std::runtime_error("native_atb QKV input is not tightly packed");
+    }
+    const auto *qkvBytes = static_cast<const uint8_t *>(qkv.ptr);
+    // ATB's native operators require contiguous ND Q/K/V. A narrow view of
+    // packed [Q,K,V] retains rowBytes as its leading stride and is not valid
+    // input even though its logical shape looks correct.
+    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeQueryStage310P), qBytes, qkvBytes,
+                                 rowBytes, qBytes, tokens,
+                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeKeyStage310P), kvBytes,
+                                 qkvBytes + qBytes, rowBytes, kvBytes, tokens,
+                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeValueStage310P), kvBytes,
+                                 qkvBytes + qBytes + kvBytes, rowBytes, kvBytes, tokens,
+                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
     rt.RecordNativeAtbStagingBytes(qkv.bytes);
-    at::Tensor packed = _nativeQkvStage310P.narrow(0, 0, tokens);
-    at::Tensor query = packed.narrow(1, 0, nHeads);
-    at::Tensor key = packed.narrow(1, nHeads, nKvHeads);
-    at::Tensor value = packed.narrow(1, nHeads + nKvHeads, nKvHeads);
+    at::Tensor query = _nativeQueryStage310P.narrow(0, 0, tokens);
+    at::Tensor key = _nativeKeyStage310P.narrow(0, 0, tokens);
+    at::Tensor value = _nativeValueStage310P.narrow(0, 0, tokens);
     if (layer == 0) {
         CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeSlotStage310P),
                                    TorchTensorBytes(_nativeSlotStage310P), slotMapping.ptr,
