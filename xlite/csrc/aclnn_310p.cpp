@@ -21,6 +21,12 @@
 #include "acl/acl.h"
 #include "aclnnop/aclnn_matmul.h"
 #include "aclnnop/aclnn_prompt_flash_attention.h"
+#if __has_include("aclnnop/aclnn_prompt_flash_attention_v2.h")
+#include "aclnnop/aclnn_prompt_flash_attention_v2.h"
+#define XLITE_310P_HAS_PROMPT_FA_V2 1
+#else
+#define XLITE_310P_HAS_PROMPT_FA_V2 0
+#endif
 #include "ascend.h"
 
 namespace {
@@ -45,6 +51,24 @@ public:
 
 private:
     aclTensor *tensor_;
+};
+
+class AclIntArrayGuard {
+public:
+    explicit AclIntArrayGuard(aclIntArray *array) : array_(array) {}
+    ~AclIntArrayGuard()
+    {
+        if (array_ != nullptr) {
+            (void)aclDestroyIntArray(array_);
+        }
+    }
+    aclIntArray *get() const
+    {
+        return array_;
+    }
+
+private:
+    aclIntArray *array_;
 };
 
 static aclTensor *CreateTensor(const std::vector<int64_t> &dims, const std::vector<int64_t> &strides,
@@ -174,8 +198,8 @@ static XTensor &ExtractQuery(XRuntime &rt, XTensor &qkv, size_t rowOffset, uint3
 
 // CANN 9.1 on 310P cannot consume the BSHD page table directly, but it can
 // execute one BSND PromptFlashAttention for the entire decode batch. Gather
-// each request into a padded batch and mask its unused KV tail. This removes
-// the dominant one-ACLNN-launch-per-request behavior while preserving the
+// each request into a padded batch and pass its actual KV length through V2.
+// This removes the dominant one-ACLNN-launch-per-request behavior while preserving the
 // already validated cache layout and GQA semantics.
 static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache,
                                       XTensor &vCache, XTensor &output,
@@ -183,10 +207,27 @@ static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCach
                                       uint32_t nKvHeads, uint32_t headDim,
                                       uint32_t blockSize, uint32_t batch)
 {
+#if !XLITE_310P_HAS_PROMPT_FA_V2
+    (void)rt;
+    (void)qkv;
+    (void)kCache;
+    (void)vCache;
+    (void)output;
+    (void)maxNumBlock;
+    (void)nHeads;
+    (void)nKvHeads;
+    (void)headDim;
+    (void)blockSize;
+    (void)batch;
+    throw std::runtime_error(
+        "Ascend310P batched decode requires aclnnPromptFlashAttentionV2");
+#else
     if (batch < 2) {
         return false;
     }
     uint32_t maxTotalLength = 0;
+    std::vector<int64_t> queryLengths(batch, 1);
+    std::vector<int64_t> kvLengths(batch);
     for (uint32_t request = 0; request < batch; ++request) {
         if (rt._lensHost[request] != 1) {
             return false;
@@ -195,10 +236,11 @@ static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCach
         if (totalLength > XLITE_310P_MAX_SEQ_LEN) {
             throw std::runtime_error("Ascend310P batched decode KV length exceeds 2048");
         }
+        kvLengths[request] = totalLength;
         maxTotalLength = std::max(maxTotalLength, totalLength);
     }
 
-    // Mask KV padding at a 32-token boundary, as recommended by PromptFA.
+    // Keep the packed KV stride aligned while actualSeqLengthsKv excludes its tail.
     const uint32_t kvTensorLength = ROUND_UP(maxTotalLength, 32);
     const size_t qElements = static_cast<size_t>(nHeads) * headDim;
     const size_t rowElements = static_cast<size_t>(nHeads + 2 * nKvHeads) * headDim;
@@ -212,15 +254,12 @@ static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCach
         rt.GetTensor({batch, kvTensorLength, nKvHeads, headDim}, FP16, DBG_LOC);
     XTensor &packedValue =
         rt.GetTensor({batch, kvTensorLength, nKvHeads, headDim}, FP16, DBG_LOC);
-    XTensor &paddingMask = rt.GetTensor({batch, 1, 1, kvTensorLength}, INT8, DBG_LOC);
 
     CHECK_ACL(aclrtMemcpy2dAsync(query.ptr, qBytes, qkv.ptr, rowBytes, qBytes, batch,
                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
     CHECK_ACL(aclrtMemsetAsync(packedKey.ptr, packedKey.bytes, 0, packedKey.bytes, rt.stream));
     CHECK_ACL(aclrtMemsetAsync(packedValue.ptr, packedValue.bytes, 0,
                                packedValue.bytes, rt.stream));
-    CHECK_ACL(aclrtMemsetAsync(paddingMask.ptr, paddingMask.bytes, 1,
-                               paddingMask.bytes, rt.stream));
 
     uint64_t gatheredBytes = 0;
     for (uint32_t request = 0; request < batch; ++request) {
@@ -245,43 +284,45 @@ static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCach
                                        copyBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             gatheredBytes += copyBytes * 2;
         }
-        void *maskRow = static_cast<uint8_t *>(paddingMask.ptr) +
-                        static_cast<size_t>(request) * kvTensorLength;
-        CHECK_ACL(aclrtMemsetAsync(maskRow, kvTensorLength, 0, totalLength, rt.stream));
     }
 
     const std::vector<int64_t> qDims{batch, 1, nHeads, headDim};
     const std::vector<int64_t> kvDims{batch, kvTensorLength, nKvHeads, headDim};
-    const std::vector<int64_t> maskDims{batch, 1, 1, kvTensorLength};
     AclTensorGuard aclQuery(
         CreateTensor(qDims, ContiguousStrides(qDims), ACL_FLOAT16, query.ptr));
     AclTensorGuard aclKey(
         CreateTensor(kvDims, ContiguousStrides(kvDims), ACL_FLOAT16, packedKey.ptr));
     AclTensorGuard aclValue(
         CreateTensor(kvDims, ContiguousStrides(kvDims), ACL_FLOAT16, packedValue.ptr));
-    AclTensorGuard aclMask(
-        CreateTensor(maskDims, ContiguousStrides(maskDims), ACL_BOOL, paddingMask.ptr));
     AclTensorGuard aclOut(
         CreateTensor(qDims, ContiguousStrides(qDims), ACL_FLOAT16, output.ptr));
+    AclIntArrayGuard actualQueryLengths(
+        aclCreateIntArray(queryLengths.data(), queryLengths.size()));
+    AclIntArrayGuard actualKvLengths(
+        aclCreateIntArray(kvLengths.data(), kvLengths.size()));
+    if (actualQueryLengths.get() == nullptr || actualKvLengths.get() == nullptr) {
+        throw std::runtime_error("aclCreateIntArray returned nullptr for batched decode lengths");
+    }
 
     uint64_t workspaceSize = 0;
     aclOpExecutor *executor = nullptr;
-    CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
-        aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(), nullptr,
-        nHeads, 1.0, 2147483647, 2147483647, const_cast<char *>("BSND"), nKvHeads,
-        aclOut.get(), &workspaceSize, &executor));
+    CHECK_ACL(aclnnPromptFlashAttentionV2GetWorkspaceSize(
+        aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, nullptr,
+        actualQueryLengths.get(), actualKvLengths.get(), nullptr, nullptr, nullptr,
+        nullptr, nullptr, nHeads, 1.0, 2147483647, 2147483647,
+        const_cast<char *>("BSND"), nKvHeads, 0, aclOut.get(), &workspaceSize, &executor));
     XTensor *workspace = GetWorkspace(rt, workspaceSize, true);
-    CHECK_ACL(aclnnPromptFlashAttention(workspace == nullptr ? nullptr : workspace->ptr,
-                                        workspaceSize, executor, rt.stream));
+    CHECK_ACL(aclnnPromptFlashAttentionV2(workspace == nullptr ? nullptr : workspace->ptr,
+                                          workspaceSize, executor, rt.stream));
     FinishAclnn(rt, workspace, true);
     rt.RecordBatchedDecodeAttention(batch);
     rt.RecordDecodeKvGatherBytes(gatheredBytes);
 
-    rt.PutTensor(paddingMask);
     rt.PutTensor(packedValue);
     rt.PutTensor(packedKey);
     rt.PutTensor(query);
     return true;
+#endif
 }
 
 }  // namespace

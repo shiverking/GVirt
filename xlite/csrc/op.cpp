@@ -1038,11 +1038,9 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                 rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
             XTensor &packedValue =
                 rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
-            XTensor &paddingMask = rt.GetTensor({batch, 1, 1, paddedKv}, INT8, DBG_LOC);
             XTensor &workspace =
                 rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
             rt.PutTensor(workspace);
-            rt.PutTensor(paddingMask);
             rt.PutTensor(packedValue);
             rt.PutTensor(packedKey);
             rt.PutTensor(query);
@@ -1112,11 +1110,9 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                 rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
             XTensor &packedValue =
                 rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
-            XTensor &paddingMask = rt.GetTensor({batch, 1, 1, paddedKv}, INT8, DBG_LOC);
             XTensor &workspace =
                 rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
             rt.PutTensor(workspace);
-            rt.PutTensor(paddingMask);
             rt.PutTensor(packedValue);
             rt.PutTensor(packedKey);
             rt.PutTensor(query);

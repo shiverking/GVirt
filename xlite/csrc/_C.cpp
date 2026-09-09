@@ -2411,6 +2411,7 @@ PYBIND11_MODULE(_C, m)
         info["decode_attention_backends"] = py::make_tuple("batched_aclnn", "legacy");
         info["default_decode_attention_backend"] = "batched_aclnn";
         info["batched_decode_attention"] = true;
+        info["batched_decode_attention_api"] = "PromptFlashAttentionV2";
         info["attention_metadata"] = "host_retained_pinned";
         info["attention_execution"] = "async_single_stream";
         info["cross_stream_handoff"] = "split_acl_event_sync";
