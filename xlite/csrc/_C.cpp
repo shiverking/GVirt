@@ -831,8 +831,11 @@ void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache
         {static_cast<int64_t>(_nativeMaxTokens310P), 16, 128}, fp16Options);
     _nativeSlotStage310P =
         at::empty({static_cast<int64_t>(_nativeMaxTokens310P)}, intOptions);
+    // PrepareAttn packs only the active block-table columns. Keep the staging
+    // storage flat so a variable-width [batch, columns] view has the same row
+    // stride as that packed source.
     _nativeBlockTableStage310P = at::empty(
-        {static_cast<int64_t>(_nativeMaxBatch310P),
+        {static_cast<int64_t>(_nativeMaxBatch310P) *
          static_cast<int64_t>(_nativeMaxBlocks310P)}, intOptions);
     _nativeTotalLensStage310P =
         at::empty({static_cast<int64_t>(_nativeMaxBatch310P)}, intOptions);
@@ -886,10 +889,20 @@ bool _CModel::RunNativeAtbAttention310P(
     at::Tensor &nativeK = _nativeKv310P[layer][0];
     at::Tensor &nativeV = _nativeKv310P[layer][1];
     const int64_t tokens = static_cast<int64_t>(qkv.shape[0]);
+    if (blockTables.shape.size() != 2) {
+        throw std::runtime_error("native_atb block table must be rank 2");
+    }
+    const int64_t tableColumns = static_cast<int64_t>(blockTables.shape[1]);
+    const int64_t tableElements = static_cast<int64_t>(batch) * tableColumns;
     if (tokens > static_cast<int64_t>(_nativeMaxTokens310P) ||
-        batch > _nativeMaxBatch310P || blockTables.shape.size() != 2 ||
-        blockTables.shape[1] > _nativeMaxBlocks310P) {
+        batch > _nativeMaxBatch310P ||
+        tableColumns > static_cast<int64_t>(_nativeMaxBlocks310P) ||
+        tableElements > _nativeBlockTableStage310P.numel()) {
         throw std::runtime_error("native_atb staging capacity exceeded");
+    }
+    if (blockTables.bytes !=
+        static_cast<size_t>(tableElements) * sizeof(int32_t)) {
+        throw std::runtime_error("native_atb block table is not tightly packed");
     }
     CHECK_ACL(aclrtMemcpyAsync(TensorPtr(_nativeQkvStage310P),
                                TorchTensorBytes(_nativeQkvStage310P), qkv.ptr, qkv.bytes,
@@ -929,8 +942,9 @@ bool _CModel::RunNativeAtbAttention310P(
     if (tokens != batch) {
         throw std::runtime_error("native_atb decode requires exactly one query token per request");
     }
-    at::Tensor table = _nativeBlockTableStage310P.narrow(0, 0, batch).narrow(
-        1, 0, static_cast<int64_t>(blockTables.shape[1]));
+    at::Tensor table =
+        _nativeBlockTableStage310P.narrow(0, 0, tableElements)
+            .view({static_cast<int64_t>(batch), tableColumns});
     at::Tensor lengths = _nativeTotalLensStage310P.narrow(0, 0, batch);
     at::Tensor out = _nativeOutputStage310P.narrow(0, 0, tokens);
     c10::Stack pagedStack;
