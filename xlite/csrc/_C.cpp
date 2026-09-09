@@ -2409,7 +2409,7 @@ PYBIND11_MODULE(_C, m)
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "aclnn_per_request";
         info["matmul_backend"] = "m200_asr_decode_with_aclnn_fallback";
-        info["m200_lm_head_max_batch"] = 8;
+        info["m200_lm_head_max_batch"] = 20;
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";

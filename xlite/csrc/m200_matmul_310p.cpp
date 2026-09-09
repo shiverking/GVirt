@@ -15,10 +15,6 @@
 namespace {
 
 constexpr uint32_t kMaxDecodeBatch = 20;
-// Random-weight validation found localized corruption for the chunked LM Head
-// at M=20. Keep the verified M=1..8 range on Cube and use ACLNN above it until
-// a dedicated multi-row chunk-output kernel is available.
-constexpr uint32_t kMaxLmHeadCubeBatch = 8;
 constexpr uint32_t kLmHeadN = 151936;
 constexpr uint32_t kLmHeadChunkN = 12288;
 
@@ -121,8 +117,7 @@ bool XliteM200Matmul310PSupported(const XTensor &in, const XTensor &weight,
     const uint32_t m = static_cast<uint32_t>(in.shape[0]);
     const uint32_t k = static_cast<uint32_t>(in.shape[1]);
     const uint32_t n = static_cast<uint32_t>(weight.shape[0]);
-    const bool safeLmHeadBatch = n != kLmHeadN || m <= kMaxLmHeadCubeBatch;
-    return m >= 1 && m <= kMaxDecodeBatch && safeLmHeadBatch && weight.shape[1] == k &&
+    return m >= 1 && m <= kMaxDecodeBatch && weight.shape[1] == k &&
            out.shape[0] == m && out.shape[1] == n && IsAsrProjection(n, k);
 }
 
@@ -137,28 +132,35 @@ void XliteM200Matmul310P(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &ou
         return;
     }
 
-    XTensor *chunkOutput = nullptr;
+    std::vector<XTensor *> chunkOutputs;
     if (m > 1) {
-        chunkOutput = &rt.GetTensor({m, kLmHeadChunkN}, FP16, DBG_LOC);
+        const uint32_t chunks = (n + kLmHeadChunkN - 1) / kLmHeadChunkN;
+        chunkOutputs.reserve(chunks);
+        for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
+            const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
+            chunkOutputs.push_back(&rt.GetTensor({m, currentN}, FP16, DBG_LOC));
+        }
     }
+    uint32_t chunkIndex = 0;
     for (uint32_t offset = 0; offset < n; offset += kLmHeadChunkN) {
         const uint32_t currentN = std::min(kLmHeadChunkN, n - offset);
         void *weightData = static_cast<void *>(
             static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset) * k);
         void *outputData = m == 1
             ? static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset)
-            : chunkOutput->ptr;
+            : chunkOutputs[chunkIndex]->ptr;
         Launch(rt, in.ptr, weightData, outputData, m, currentN, k);
         if (m > 1) {
             void *destination = static_cast<void *>(static_cast<uint16_t *>(out.ptr) + offset);
             CHECK_ACL(aclrtMemcpy2dAsync(destination, static_cast<size_t>(n) * sizeof(uint16_t),
-                                         chunkOutput->ptr,
+                                         chunkOutputs[chunkIndex]->ptr,
                                          static_cast<size_t>(currentN) * sizeof(uint16_t),
                                          static_cast<size_t>(currentN) * sizeof(uint16_t), m,
                                          ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
+        ++chunkIndex;
     }
-    if (chunkOutput != nullptr) {
+    for (XTensor *chunkOutput : chunkOutputs) {
         rt.PutTensor(*chunkOutput);
     }
 }
