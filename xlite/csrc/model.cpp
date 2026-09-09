@@ -16,6 +16,14 @@
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
+    // New callers populate blockSizes; blockSize is retained only for legacy
+    // callers.  Normalize before the 310P capability gate so it never reads
+    // the deprecated, potentially unset scalar field.
+    if (_c.blockSizes.empty()) {
+        _c.blockSizes.push_back(_c.blockSize);
+    } else {
+        _c.blockSize = _c.blockSizes[0];
+    }
 #ifdef XLITE_310P_LLM_FP16_POC
     if (rankId != 0 || c.defTpSize != 1 || c.defDpSize != 1 || c.moeEpSize != 1 ||
         c.moeTPSize != 1) {
@@ -29,8 +37,8 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     if (c.quantMsdW4a8 || c.quantAttnWeightTrans || c.quantAttnWeightNz) {
         throw std::runtime_error("Ascend310P llm_fp16 POC does not support quantization");
     }
-    if (c.nHeads != 16 || c.nKvHeads != 8 || c.headDim != 128 || c.blockSize != 128 ||
-        c.intermediateSize != 6144 || c.addBias) {
+    if (_c.nHeads != 16 || _c.nKvHeads != 8 || _c.headDim != 128 || _c.blockSize != 128 ||
+        _c.intermediateSize != 6144 || _c.addBias) {
         throw std::runtime_error(
             "Ascend310P llm_fp16 POC requires Q16/KV8, head_dim=128, block_size=128, "
             "intermediate_size=6144 and bias-free QKV");
@@ -135,9 +143,6 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
             _layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
                                                                       : XMODEL_LAYER_ATTN_LINEAR;
         }
-    }
-    if (_c.blockSizes.empty()) {
-        _c.blockSizes.push_back(_c.blockSize);
     }
 }
 
