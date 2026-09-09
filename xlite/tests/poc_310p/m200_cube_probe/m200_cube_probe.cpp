@@ -4,6 +4,7 @@
  * kept in FP16 to match the decoder tensors.
  */
 #include "kernel_operator.h"
+#define ASCENDC_CUBE_ONLY
 #include "lib/matmul_intf.h"
 
 using namespace matmul;
