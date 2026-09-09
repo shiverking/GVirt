@@ -1072,7 +1072,18 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     (void)queryStartLoc;
     (void)lens;
     (void)cachedLens;
-    (void)blockTables;
+    if (rt.UseNativeAtbDecodeAttention310P()) {
+        if (!rt.nativeAtbAttentionCallback) {
+            throw std::runtime_error(
+                "Ascend310P native_atb attention requires native 5D/NZ KV caches");
+        }
+        const bool handled = rt.nativeAtbAttentionCallback(
+            qkv, kCache, vCache, output, rt._attnSlotMapping[0], blockTables,
+            rt._attnTotalLens, nHeads, nKvHeads, headDim, batch);
+        if (handled) {
+            return;
+        }
+    }
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, lens, cachedLens, blockTables,
                             maxNumBlocks, nHeads, nKvHeads, headDim, blockSize, batch, true);

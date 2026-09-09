@@ -5,6 +5,8 @@
 #include <pybind11/stl.h>
 #include <torch/torch.h>
 #include <torch/extension.h>
+#include <ATen/core/dispatch/Dispatcher.h>
+#include <ATen/core/stack.h>
 #include <optional>
 #include "xlite.h"
 #include "core_assigner.h"
@@ -71,6 +73,7 @@ public:
                                    std::vector<at::Tensor> &deepstackInput,
                                    const std::optional<at::Tensor> &inputIds);
     size_t GetTensorPoolSize(int dbg);
+    void SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache);
 
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
 
@@ -201,6 +204,7 @@ public:
 private:
     XModel *_model = nullptr;
     std::vector<std::vector<XTensor>> _kv;
+    std::vector<std::vector<at::Tensor>> _nativeKv310P;
     std::vector<XTensor> _deepstackInputEmbeds;
     void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                  std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
@@ -218,6 +222,12 @@ private:
                           std::vector<at::Tensor> &qBias, std::vector<at::Tensor> &dScale,
                           std::vector<MatmulWeight> &weightsXT, uint32_t currLayer,
                           bool isRowParallel, uint32_t tpRank, uint32_t layerOffset = 0);
+#ifdef XLITE_ARCH_310P
+    bool RunNativeAtbAttention310P(XRuntime &rt, XTensor &qkv, XTensor &kCache,
+                                   XTensor &vCache, XTensor &output, XTensor &slotMapping,
+                                   XTensor &blockTables, XTensor &totalLens, uint32_t nHeads,
+                                   uint32_t nKvHeads, uint32_t headDim, uint32_t batch);
+#endif
 };
 
 static bool TensorUsable(const at::Tensor &t)
@@ -781,6 +791,131 @@ _CModel::~_CModel(void)
     }
 }
 
+void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache)
+{
+#ifdef XLITE_ARCH_310P
+    if (kvCache.size() != _kv.size()) {
+        throw std::invalid_argument("native 310P KV cache layer count does not match model");
+    }
+    for (size_t layer = 0; layer < kvCache.size(); ++layer) {
+        if (kvCache[layer].size() != 2) {
+            throw std::invalid_argument("native 310P KV cache requires K/V pairs");
+        }
+        for (const at::Tensor &cache : kvCache[layer]) {
+            if (!cache.defined() || cache.scalar_type() != at::kHalf || cache.dim() != 4 ||
+                cache.size(1) != 64 || cache.size(2) != 128 || cache.size(3) != 16) {
+                throw std::invalid_argument(
+                    "native 310P KV cache must be FP16 [num_blocks,64,128,16] FRACTAL_NZ");
+            }
+        }
+    }
+    _nativeKv310P = kvCache;
+#else
+    (void)kvCache;
+    throw std::runtime_error("native 310P KV cache is unavailable in this build");
+#endif
+}
+
+#ifdef XLITE_ARCH_310P
+namespace {
+at::Tensor MakeNpuView(void *ptr, at::IntArrayRef sizes, at::IntArrayRef strides,
+                       const at::TensorOptions &options)
+{
+    return at::from_blob(ptr, sizes, strides, [](void *) {}, options);
+}
+
+void CallAtbBoxed(const char *name, c10::Stack &stack)
+{
+    static const auto reshape =
+        c10::Dispatcher::singleton().findSchemaOrThrow("atb::_npu_reshape_and_cache", "");
+    static const auto paged =
+        c10::Dispatcher::singleton().findSchemaOrThrow("atb::_npu_paged_attention", "");
+    if (std::string(name) == "reshape") {
+        reshape.callBoxed(&stack);
+    } else {
+        paged.callBoxed(&stack);
+    }
+}
+}  // namespace
+
+bool _CModel::RunNativeAtbAttention310P(
+    XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &output,
+    XTensor &slotMapping, XTensor &blockTables, XTensor &totalLens, uint32_t nHeads,
+    uint32_t nKvHeads, uint32_t headDim, uint32_t batch)
+{
+    (void)vCache;
+    size_t layer = _kv.size();
+    for (size_t i = 0; i < _kv.size(); ++i) {
+        if (_kv[i][0].ptr == kCache.ptr) {
+            layer = i;
+            break;
+        }
+    }
+    if (layer == _kv.size() || layer >= _nativeKv310P.size()) {
+        throw std::runtime_error("native_atb could not resolve the decoder layer KV cache");
+    }
+    if (nHeads != 16 || nKvHeads != 8 || headDim != 128 || qkv.dtype != FP16) {
+        throw std::runtime_error("native_atb is specialized for Q16/KV8/D128 FP16");
+    }
+
+    at::Tensor &nativeK = _nativeKv310P[layer][0];
+    at::Tensor &nativeV = _nativeKv310P[layer][1];
+    const int64_t tokens = static_cast<int64_t>(qkv.shape[0]);
+    const int64_t rowStride = static_cast<int64_t>(nHeads + 2 * nKvHeads) * headDim;
+    const auto fp16Options = nativeK.options().dtype(at::kHalf);
+    const auto intOptions = nativeK.options().dtype(at::kInt);
+    at::Tensor query = MakeNpuView(qkv.ptr, {tokens, nHeads, headDim},
+                                   {rowStride, headDim, 1}, fp16Options);
+    auto *qkvBytes = static_cast<uint8_t *>(qkv.ptr);
+    at::Tensor key = MakeNpuView(qkvBytes + nHeads * headDim * sizeof(uint16_t),
+                                 {tokens, nKvHeads, headDim}, {rowStride, headDim, 1},
+                                 fp16Options);
+    at::Tensor value = MakeNpuView(
+        qkvBytes + (nHeads + nKvHeads) * headDim * sizeof(uint16_t),
+        {tokens, nKvHeads, headDim}, {rowStride, headDim, 1}, fp16Options);
+    at::Tensor slots = MakeNpuView(slotMapping.ptr, {tokens}, {1}, intOptions);
+
+    c10::Stack reshapeStack;
+    reshapeStack.emplace_back(key);
+    reshapeStack.emplace_back(value);
+    reshapeStack.emplace_back(nativeK);
+    reshapeStack.emplace_back(nativeV);
+    reshapeStack.emplace_back(slots);
+    CallAtbBoxed("reshape", reshapeStack);
+    rt.RecordNativeAtbCacheWrite();
+
+    if (!rt._decodeStep) {
+        return false;
+    }
+    if (tokens != batch) {
+        throw std::runtime_error("native_atb decode requires exactly one query token per request");
+    }
+    at::Tensor table = MakeNpuView(blockTables.ptr,
+                                   {static_cast<int64_t>(blockTables.shape[0]),
+                                    static_cast<int64_t>(blockTables.shape[1])},
+                                   {static_cast<int64_t>(blockTables.shape[1]), 1}, intOptions);
+    at::Tensor lengths = MakeNpuView(totalLens.ptr, {static_cast<int64_t>(batch)}, {1}, intOptions);
+    at::Tensor out = MakeNpuView(output.ptr, {tokens, nHeads, headDim},
+                                 {static_cast<int64_t>(nHeads * headDim), headDim, 1},
+                                 fp16Options);
+    c10::Stack pagedStack;
+    pagedStack.emplace_back(query);
+    pagedStack.emplace_back(nativeK);
+    pagedStack.emplace_back(nativeV);
+    pagedStack.emplace_back(static_cast<int64_t>(nKvHeads));
+    pagedStack.emplace_back(static_cast<int64_t>(nHeads));
+    // Xlite RoPE-and-cache has already applied 1/sqrt(head_dim) to Q.
+    pagedStack.emplace_back(1.0);
+    pagedStack.emplace_back(table);
+    pagedStack.emplace_back(lengths);
+    pagedStack.emplace_back(out);
+    pagedStack.emplace_back(c10::IValue());
+    CallAtbBoxed("paged", pagedStack);
+    rt.RecordNativeAtbAttention(batch);
+    return true;
+}
+#endif
+
 void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                       std::vector<std::vector<at::Tensor>> &kvCache,
                       std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
@@ -818,7 +953,24 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         }
     }
 
-    if (currStream != 0 && rt.taskId == 0) {
+    bool nativeAtb = false;
+#ifdef XLITE_ARCH_310P
+    nativeAtb = rt.UseNativeAtbDecodeAttention310P();
+    if (nativeAtb) {
+        if (currStream == 0) {
+            throw std::runtime_error(
+                "native_atb requires the current PyTorch NPU stream from the online runner");
+        }
+        if (_nativeKv310P.size() != _kv.size()) {
+            throw std::runtime_error(
+                "native_atb requires one registered 5D/NZ K/V cache pair per decoder layer");
+        }
+        if (rt.multiTaskParallel) {
+            throw std::runtime_error("native_atb does not support Xlite multi-task parallelism");
+        }
+    }
+#endif
+    if (currStream != 0 && rt.taskId == 0 && !nativeAtb) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
@@ -827,7 +979,33 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         rt.NotifyWaitPeerStream();
     }
 
-    _model->Forward(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis, _output);
+    aclrtStream savedStream = rt.stream;
+#ifdef XLITE_ARCH_310P
+    if (nativeAtb) {
+        currAclStream = reinterpret_cast<aclrtStream>(currStream);
+        rt.stream = currAclStream;
+        rt.nativeAtbAttentionCallback =
+            [this, &rt](XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &out,
+                        XTensor &slots, XTensor &tables, XTensor &totalLens, uint32_t nHeads,
+                        uint32_t nKvHeads, uint32_t headDim, uint32_t batch) {
+                return RunNativeAtbAttention310P(rt, qkv, kCache, vCache, out, slots, tables,
+                                                 totalLens, nHeads, nKvHeads, headDim, batch);
+            };
+    }
+#endif
+    try {
+        _model->Forward(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis, _output);
+    } catch (...) {
+#ifdef XLITE_ARCH_310P
+        rt.nativeAtbAttentionCallback = {};
+#endif
+        rt.stream = savedStream;
+        throw;
+    }
+#ifdef XLITE_ARCH_310P
+    rt.nativeAtbAttentionCallback = {};
+#endif
+    rt.stream = savedStream;
 
     if (rt.multiTaskParallel) {
         if (rt.taskId == 0) {
@@ -840,9 +1018,9 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         }
     }
 
-    if (currStream != 0) {
+    if (currStream != 0 && !nativeAtb) {
         rt.EventRecordCurrStream(currAclStream);
-    } else {
+    } else if (currStream == 0) {
         rt.Synchronize();
     }
 }
@@ -2408,7 +2586,8 @@ PYBIND11_MODULE(_C, m)
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "runtime_selectable";
-        info["decode_attention_backends"] = py::make_tuple("batched_aclnn", "legacy");
+        info["decode_attention_backends"] =
+            py::make_tuple("native_atb", "batched_aclnn", "legacy");
         // PromptFlashAttentionV2 needs a dense, max-length-padded KV gather for
         // decode on 310P.  Keep it available as a diagnostic backend, but do
         // not select it by default: real ASR batch-20 measurements showed a
@@ -2416,6 +2595,9 @@ PYBIND11_MODULE(_C, m)
         info["default_decode_attention_backend"] = "legacy";
         info["batched_decode_attention"] = true;
         info["batched_decode_attention_api"] = "PromptFlashAttentionV2";
+        info["native_decode_attention"] = true;
+        info["native_decode_attention_api"] = "atb::_npu_paged_attention";
+        info["native_decode_cache_layout"] = "NZ_5D";
         info["attention_metadata"] = "host_retained_pinned";
         info["attention_execution"] = "async_single_stream";
         info["cross_stream_handoff"] = "split_acl_event_sync";
@@ -2463,6 +2645,9 @@ PYBIND11_MODULE(_C, m)
             rt.BatchedDecodeAttentionLaunches();
         stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
         stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
+        stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
+        stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
+        stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
         return stats;
     });
 #endif
@@ -2521,6 +2706,9 @@ PYBIND11_MODULE(_C, m)
                 rt.BatchedDecodeAttentionLaunches();
             stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
             stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
+            stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
+            stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
+            stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
 #endif
             return stats;
         })
@@ -2781,6 +2969,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("hc_head_base", &_CModel::hcHeadBase)
         .def_readwrite("hc_head_scale", &_CModel::hcHeadScale)
         .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
+        .def("set_native_kv_cache_310p", &_CModel::SetNativeKvCache310P,
+             py::arg("kv_cache"))
         .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())

@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include "base.h"
 
@@ -81,6 +82,7 @@ enum class XMatmulBackend310P {
 enum class XDecodeAttentionBackend310P {
     LEGACY,
     BATCHED_ACLNN,
+    NATIVE_ATB,
 };
 #endif
 
@@ -151,6 +153,14 @@ public:
     {
         return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::BATCHED_ACLNN;
     }
+    [[nodiscard]] bool UseNativeAtbDecodeAttention310P(void) const
+    {
+        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::NATIVE_ATB;
+    }
+    using NativeAtbAttentionCallback = std::function<bool(
+        XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &,
+        uint32_t, uint32_t, uint32_t, uint32_t)>;
+    NativeAtbAttentionCallback nativeAtbAttentionCallback;
     void RecordM200Matmul310P(uint32_t m)
     {
         ++m200MatmulRequests;
@@ -194,6 +204,15 @@ public:
     void RecordDecodeKvGatherBytes(uint64_t bytes)
     {
         _decodeKvGatherBytes += bytes;
+    }
+    void RecordNativeAtbAttention(uint32_t requests)
+    {
+        _nativeAtbDecodeRequests += requests;
+        ++_nativeAtbDecodeLaunches;
+    }
+    void RecordNativeAtbCacheWrite(void)
+    {
+        ++_nativeAtbCacheWrites;
     }
 #endif
     [[nodiscard]] bool ForceSyncAttention(void) const
@@ -240,6 +259,18 @@ public:
     [[nodiscard]] uint64_t DecodeKvGatherBytes(void) const
     {
         return _decodeKvGatherBytes;
+    }
+    [[nodiscard]] uint64_t NativeAtbDecodeRequests(void) const
+    {
+        return _nativeAtbDecodeRequests;
+    }
+    [[nodiscard]] uint64_t NativeAtbDecodeLaunches(void) const
+    {
+        return _nativeAtbDecodeLaunches;
+    }
+    [[nodiscard]] uint64_t NativeAtbCacheWrites(void) const
+    {
+        return _nativeAtbCacheWrites;
     }
 #endif
 
@@ -351,6 +382,7 @@ public:
     XTensor _positionPinnedHost;
     XTensor _slotMappingPinnedHost;
     XTensor _cachedLensPinnedHost;
+    XTensor _totalLensPinnedHost;
     XTensor _lensPinnedHost;
     XTensor _queryStartLocPinnedHost;
     XTensor _blockTablesPinnedHost;
@@ -366,12 +398,16 @@ public:
                                             // {_slotMapping}, v2 -> attnMeta.slotMapping
     XTensor _attnLens;        // [batch] int32, ref: v0/1 -> _lens, v2 -> attnMeta.lens
     XTensor _attnCachedLens;  // [batch] int32, ref: v0/1 -> _cachedLens, v2 -> attnMeta.cachedLens
+    // Total valid KV length (cached + query). Native 310P paged attention consumes this
+    // directly, avoiding a host callback or per-layer device add.
+    XTensor _attnTotalLens;
     XTensor _attnQueryStartLoc;  // [batch] int32, ref: v0/1 -> _queryStartLoc, v2 ->
                                  // attnMeta.queryStartLoc
     XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
     XTensor _blockTables;  // [maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)] int32, internal buffer
     XTensor _slotMapping;  // [maxBatchedTokens] int32, internal buffer
     XTensor _cachedLens;   // [maxBatch] int32, internal buffer
+    XTensor _totalLens;    // [maxBatch] int32, internal buffer
     XTensor _lens;         // [maxBatch] int32, internal buffer
     XTensor _queryStartLoc;  // [maxBatch] int32, internal buffer
     // Host copy of per-request query lengths from PrepareAttn (mixed-length linear attn).
@@ -421,6 +457,9 @@ protected:
     uint64_t _batchedDecodeAttentionLaunches = 0;
     uint64_t _legacyAttentionRequests = 0;
     uint64_t _decodeKvGatherBytes = 0;
+    uint64_t _nativeAtbDecodeRequests = 0;
+    uint64_t _nativeAtbDecodeLaunches = 0;
+    uint64_t _nativeAtbCacheWrites = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;

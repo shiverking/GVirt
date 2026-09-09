@@ -194,6 +194,9 @@ XRuntime::~XRuntime(void)
     if (_cachedLens.ptr) {
         (void)aclrtFree(_cachedLens.ptr);
     }
+    if (_totalLens.ptr) {
+        (void)aclrtFree(_totalLens.ptr);
+    }
     if (_lens.ptr) {
         (void)aclrtFree(_lens.ptr);
     }
@@ -212,6 +215,9 @@ XRuntime::~XRuntime(void)
     }
     if (_cachedLensPinnedHost.ptr) {
         (void)aclrtFreeHost(_cachedLensPinnedHost.ptr);
+    }
+    if (_totalLensPinnedHost.ptr) {
+        (void)aclrtFreeHost(_totalLensPinnedHost.ptr);
     }
     if (_lensPinnedHost.ptr) {
         (void)aclrtFreeHost(_lensPinnedHost.ptr);
@@ -285,6 +291,10 @@ const char *XRuntime::MatmulBackend310PName(void) const
 
 void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
 {
+    if (backend == "native_atb") {
+        _decodeAttentionBackend310P = XDecodeAttentionBackend310P::NATIVE_ATB;
+        return;
+    }
     if (backend == "batched_aclnn") {
         _decodeAttentionBackend310P = XDecodeAttentionBackend310P::BATCHED_ACLNN;
         return;
@@ -294,7 +304,7 @@ void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
         return;
     }
     throw std::invalid_argument(
-        "Ascend310P decode attention backend must be one of: batched_aclnn, legacy");
+        "Ascend310P decode attention backend must be one of: native_atb, batched_aclnn, legacy");
 }
 #endif
 
@@ -465,6 +475,13 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
     size_t size;
     void *ptr;
 
+#ifdef XLITE_310P_LLM_FP16_POC
+    // Native paged attention needs cached+query lengths for both metadata versions.
+    size = maxBatch * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _totalLens.Init({maxBatch}, INT32, ptr);
+#endif
+
     switch (attnMeta.version) {
         case 0:
             size = maxBatchedTokens * XDtypeBit(INT64) / 8;
@@ -498,7 +515,7 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
     }
 
 #ifdef XLITE_310P_LLM_FP16_POC
-    if (attnMeta.version != 2) {
+    {
         auto allocPinned = [](XTensor &tensor, std::vector<size_t> shape, enum XDtype dtype) {
             size_t numel = 1;
             for (size_t dim : shape) {
@@ -511,6 +528,7 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
         allocPinned(_positionPinnedHost, {maxBatchedTokens}, INT64);
         allocPinned(_slotMappingPinnedHost, {maxBatchedTokens}, INT32);
         allocPinned(_cachedLensPinnedHost, {maxBatch}, INT32);
+        allocPinned(_totalLensPinnedHost, {maxBatch}, INT32);
         allocPinned(_lensPinnedHost, {maxBatch}, INT32);
         allocPinned(_queryStartLocPinnedHost, {maxBatch}, INT32);
         allocPinned(_blockTablesPinnedHost,
@@ -837,6 +855,14 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     size = batch * XDtypeBit(INT32) / 8;
+
+#ifdef XLITE_310P_LLM_FP16_POC
+    std::memcpy(_totalLensPinnedHost.ptr, totalLens.data(), size);
+    CHECK_ACL(aclrtMemcpyAsync(_totalLens.ptr, size, _totalLensPinnedHost.ptr, size,
+                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
+    _attnTotalLens = _totalLens;
+    _attnTotalLens.View({batch});
+#endif
 
     switch (attnMeta.version) {
         case 0:
