@@ -1750,10 +1750,11 @@ void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor 
     size_t elemSize = XDtypeBit(inputs[0].dtype) / 8;
     size_t outRowStride = totalLastDim * elemSize;
 
-    constexpr uint32_t maxInputs = 8;
     // Column concat == concat_col kernel: out is [times, outRowStride]; each row
     // gathers per-input column chunks (sizes[i] = inputs[i] row bytes) from the
     // strided inputs. Single kernel launch replaces the per-row memcpy storm.
+#if !defined(XLITE_310P_LLM_FP16_POC)
+    constexpr uint32_t maxInputs = 8;
     if (inputs.size() <= maxInputs && times > 0) {
         void *ptrs[maxInputs] = {nullptr};
         uint64_t s[maxInputs] = {0};
@@ -1768,6 +1769,7 @@ void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor 
                                static_cast<uint32_t>(times), static_cast<uint64_t>(outRowStride));
         return;
     }
+#endif
 
     // Fallback for the rare > maxInputs case: per-row memcpy.
     for (size_t h = 0; h < times; ++h) {
@@ -1804,11 +1806,12 @@ void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outp
         throw std::runtime_error("XliteOpSplitCol: sum(outputs last dim) != in last dim");
     }
 
-    constexpr uint32_t maxOutputs = 8;
     // Column split == split kernel with numPackets=height: each row (packet) of
     // totalSize bytes is cut into per-output column chunks of sizes[i] bytes.
     // Single kernel launch replaces the per-row memcpy storm (and its many
     // tiny async copy-engine tasks).
+#if !defined(XLITE_310P_LLM_FP16_POC)
+    constexpr uint32_t maxOutputs = 8;
     if (outputs.size() <= maxOutputs && height > 0) {
         void *ptrs[maxOutputs] = {nullptr};
         uint64_t s[maxOutputs] = {0};
@@ -1825,6 +1828,7 @@ void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outp
                           totalSize);
         return;
     }
+#endif
 
     // Fallback for the rare > maxOutputs case: per-row memcpy.
     for (size_t h = 0; h < height; ++h) {
@@ -1914,6 +1918,17 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
 void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
                              uint32_t nKHeads, uint32_t nVHeads, uint32_t headBytes)
 {
+#if defined(XLITE_310P_LLM_FP16_POC)
+    (void)rt;
+    (void)in;
+    (void)out;
+    (void)numTokens;
+    (void)nKHeads;
+    (void)nVHeads;
+    (void)headBytes;
+    throw std::runtime_error(
+        "Ascend310P Qwen3-ASR FP16 build does not support repeat-interleave");
+#else
     if (IsDummyRuntime(rt)) {
         return;
     }
@@ -1935,6 +1950,7 @@ void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t n
     uint32_t numBlocks = ConvKernelBlockNum(rt, totalSegs, /*tilePerCore=*/4096);
     aclrtlaunch_repeat_interleave(numBlocks, rt.stream, in.ptr, out.ptr, numTokens, nKHeads,
                                   nVHeads, headBytes);
+#endif
 }
 
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
