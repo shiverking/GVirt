@@ -263,7 +263,9 @@ private:
                 {1,
                  (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)), FIXPIPE_DATABLOCK)),
                  0, 0});
+#if !defined(XLITE_DEVICE_310P)
             PipeBarrier<PIPE_FIX>();
+#endif
         }
 
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);

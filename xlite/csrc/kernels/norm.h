@@ -9,6 +9,25 @@
 #if defined(__DAV_C220_VEC__) || defined(XLITE_ARCH_310P)
 
 #if defined(XLITE_ARCH_310P)
+// The generic conversion helpers currently live in kernel_macro.h's C220
+// vector-only section.  M200 does not enter that section, but the dedicated
+// 310P FP16 norm kernels still need the two supported conversions.  Keep these
+// local to the 310P build instead of exposing the surrounding C220 helpers and
+// instructions to the M200 compiler.
+template <typename Dtype>
+__aicore__ inline void convert_input(__ubuf__ float *dst, __ubuf__ Dtype *src, uint64_t repeat)
+{
+    static_assert(std::is_same_v<Dtype, float16_t>, "Ascend310P norm only supports FP16");
+    vconv_f162f32(dst, src, repeat, 1, 1, 8, 4);
+}
+
+template <typename Dtype>
+__aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, uint64_t repeat)
+{
+    static_assert(std::is_same_v<Dtype, float16_t>, "Ascend310P norm only supports FP16");
+    vconv_f322f16(dst, src, repeat, 1, 1, 4, 8);
+}
+
 __aicore__ inline void xlite_310p_set_mask(uint32_t len)
 {
     uint64_t tail = len % 64;
@@ -88,6 +107,11 @@ __aicore__ inline void duplicate_item(__ubuf__ float *buf, uint32_t cnt_per_toke
     }
 }
 
+// The upstream tiled no-affine implementation uses C220-only ReduceSum,
+// SetMask and aligned-copy helpers.  It is not used by the Qwen3-ASR decoder
+// (hidden/head dimensions are below its >6144 gate), so do not make M200 parse
+// unsupported code merely to keep the full upstream kernel surface buildable.
+#if !defined(XLITE_ARCH_310P)
 // Tiled no-affine RMSNorm for norm_dim > NORM_TILED_THRESHOLD.
 // Two-pass scan in tileDim chunks (re-reads GM in pass 2; row ~32KB so cheap):
 //   pass 1: sum(x^2) -> scalar;  pass 2: y = x * rsqrt(sum/norm_dim + eps)
@@ -269,6 +293,7 @@ __aicore__ inline void rmsnorm_noaffine_tiled(__gm__ Dtype *input, __gm__ Dtype 
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     pipe_barrier(PIPE_ALL);
 }
+#endif
 
 template <typename Dtype>
 __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias,
@@ -285,6 +310,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
 
     auto normKind = static_cast<NormKind>(kind);
 
+#if !defined(XLITE_ARCH_310P)
     if (useNorm && !weight && norm_dim > 6144 && cnt_per_token == 1 && normKind == NormKind::Rms) {
         rmsnorm_noaffine_tiled<Dtype>(reinterpret_cast<__gm__ Dtype *>(input),
                                       reinterpret_cast<__gm__ Dtype *>(output), token_num, norm_dim,
@@ -294,6 +320,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         }
         return;
     }
+#endif
 
     float inv_n = (float)1.0 / norm_dim;
     float divTpSize = (float)1.0 / tpSize;
