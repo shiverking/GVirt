@@ -1031,7 +1031,24 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
-        const size_t paddedTokens = (qkv.shape[0] + blockSize - 1) / blockSize * blockSize;
+        if (rt._decodeStep && batch > 1) {
+            const size_t paddedKv = ROUND_UP(rt._maxTotalLens, 32);
+            XTensor &query = rt.GetTensor({batch, nHeads * headDim}, FP16, DBG_LOC);
+            XTensor &packedKey =
+                rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
+            XTensor &packedValue =
+                rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
+            XTensor &paddingMask = rt.GetTensor({batch, 1, 1, paddedKv}, INT8, DBG_LOC);
+            XTensor &workspace =
+                rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
+            rt.PutTensor(workspace);
+            rt.PutTensor(paddingMask);
+            rt.PutTensor(packedValue);
+            rt.PutTensor(packedKey);
+            rt.PutTensor(query);
+            return;
+        }
+        const size_t paddedTokens = ROUND_UP(qkv.shape[0], blockSize);
         XTensor &query = rt.GetTensor({qkv.shape[0], nHeads * headDim}, FP16, DBG_LOC);
         XTensor *paddedQuery = nullptr;
         XTensor *paddedOutput = nullptr;
@@ -1088,7 +1105,24 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
 {
     if (IsDummyRuntime(rt)) {
 #ifdef XLITE_ARCH_310P
-        const size_t paddedTokens = (qkv.shape[0] + blockSize - 1) / blockSize * blockSize;
+        if (rt._decodeStep && batch > 1) {
+            const size_t paddedKv = ROUND_UP(rt._maxTotalLens, 32);
+            XTensor &query = rt.GetTensor({batch, nHeads * headDim}, FP16, DBG_LOC);
+            XTensor &packedKey =
+                rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
+            XTensor &packedValue =
+                rt.GetTensor({batch, paddedKv, nKvHeads, headDim}, FP16, DBG_LOC);
+            XTensor &paddingMask = rt.GetTensor({batch, 1, 1, paddedKv}, INT8, DBG_LOC);
+            XTensor &workspace =
+                rt.GetTensor({XLITE_310P_ACLNN_WORKSPACE_BYTES}, INT8, DBG_LOC);
+            rt.PutTensor(workspace);
+            rt.PutTensor(paddingMask);
+            rt.PutTensor(packedValue);
+            rt.PutTensor(packedKey);
+            rt.PutTensor(query);
+            return;
+        }
+        const size_t paddedTokens = ROUND_UP(qkv.shape[0], blockSize);
         XTensor &query = rt.GetTensor({qkv.shape[0], nHeads * headDim}, FP16, DBG_LOC);
         XTensor *paddedQuery = nullptr;
         XTensor *paddedOutput = nullptr;

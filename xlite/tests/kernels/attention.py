@@ -79,6 +79,7 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [2047], [1]),
         (2, [0, 127], [129, 1]),
         (2, [128, 64], [65, 129]),
+        (2, [16, 128], [1, 1]),
         (8, [15, 31, 63, 127, 255, 511, 1023, 2047], [1] * 8),
         (20, [16 + index * 7 for index in range(20)], [1] * 20),
     ]
@@ -96,12 +97,19 @@ def case_name(batch: int, cached_lens: list[int], query_lens: list[int]) -> str:
 parser = argparse.ArgumentParser(description="Xlite attention correctness test")
 parser.add_argument("--rerun-failed", action="store_true",
                     help="310P FP16: rerun failures from attention_310p_report/summary.json")
+parser.add_argument("--batched-decode-only", action="store_true",
+                    help="310P FP16: run only the new multi-request decode path")
 test_args = parser.parse_args()
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
 if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
     report_dir = Path("attention_310p_report")
     report_dir.mkdir(parents=True, exist_ok=True)
     selected_indices = list(range(len(work)))
+    if test_args.batched_decode_only:
+        selected_indices = [
+            index for index, (_batch, _cached, query) in enumerate(work)
+            if _batch > 1 and all(length == 1 for length in query)
+        ]
     if test_args.rerun_failed:
         summary_path = report_dir / "summary.json"
         if not summary_path.is_file():
@@ -346,6 +354,19 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 raise AssertionError(
                     f"attention ACLNN launch counter was not updated: {runtime_stats}"
                 )
+            if batch > 1 and all(length == 1 for length in query_len_list):
+                if runtime_stats.get("batched_decode_attention_requests") != batch:
+                    raise AssertionError(
+                        f"batched decode did not consume all requests: {runtime_stats}"
+                    )
+                if runtime_stats.get("batched_decode_attention_launches") != 1:
+                    raise AssertionError(
+                        f"batched decode did not use exactly one ACLNN launch: {runtime_stats}"
+                    )
+                if runtime_stats.get("legacy_attention_requests") != 0:
+                    raise AssertionError(
+                        f"batched decode silently used legacy attention: {runtime_stats}"
+                    )
         if torch.isnan(output_xlite).any():
             raise AssertionError("attention output still contains the no-op sentinel")
 

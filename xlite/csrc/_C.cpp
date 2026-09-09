@@ -2407,7 +2407,10 @@ PYBIND11_MODULE(_C, m)
         info["cache_layout"] = "BSHD";
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
-        info["attention_backend"] = "aclnn_per_request";
+        info["attention_backend"] = "runtime_selectable";
+        info["decode_attention_backends"] = py::make_tuple("batched_aclnn", "legacy");
+        info["default_decode_attention_backend"] = "batched_aclnn";
+        info["batched_decode_attention"] = true;
         info["attention_metadata"] = "host_retained_pinned";
         info["attention_execution"] = "async_single_stream";
         info["cross_stream_handoff"] = "split_acl_event_sync";
@@ -2449,6 +2452,12 @@ PYBIND11_MODULE(_C, m)
         stats["attention_forced_synchronizations"] =
             rt.AttentionForcedSynchronizations();
         stats["attention_workspace_reuses"] = rt.AttentionWorkspaceReuses();
+        stats["batched_decode_attention_requests"] =
+            rt.BatchedDecodeAttentionRequests();
+        stats["batched_decode_attention_launches"] =
+            rt.BatchedDecodeAttentionLaunches();
+        stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
+        stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
         return stats;
     });
 #endif
@@ -2469,6 +2478,8 @@ PYBIND11_MODULE(_C, m)
         .def("set_current_context", &XRuntime::SetCurrentContext)
 #ifdef XLITE_ARCH_310P
         .def("set_matmul_backend_310p", &XRuntime::SetMatmulBackend310P,
+             py::arg("backend"))
+        .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend310P,
              py::arg("backend"))
 #endif
         .def("get_stats", [](const XRuntime &rt) {
@@ -2498,6 +2509,14 @@ PYBIND11_MODULE(_C, m)
             stats["attention_forced_synchronizations"] =
                 rt.AttentionForcedSynchronizations();
             stats["attention_workspace_reuses"] = rt.AttentionWorkspaceReuses();
+#ifdef XLITE_ARCH_310P
+            stats["batched_decode_attention_requests"] =
+                rt.BatchedDecodeAttentionRequests();
+            stats["batched_decode_attention_launches"] =
+                rt.BatchedDecodeAttentionLaunches();
+            stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
+            stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
+#endif
             return stats;
         })
         .def("set_host_attention_metadata",

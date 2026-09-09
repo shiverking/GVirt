@@ -78,6 +78,10 @@ enum class XMatmulBackend310P {
     ACLNN,
     M200_ASR,
 };
+enum class XDecodeAttentionBackend310P {
+    LEGACY,
+    BATCHED_ACLNN,
+};
 #endif
 
 class XRuntime
@@ -137,10 +141,15 @@ public:
     void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
 #ifdef XLITE_ARCH_310P
     void SetMatmulBackend310P(const std::string &backend);
+    void SetDecodeAttentionBackend310P(const std::string &backend);
     [[nodiscard]] const char *MatmulBackend310PName(void) const;
     [[nodiscard]] bool UseM200Matmul310P(void) const
     {
         return _matmulBackend310P == XMatmulBackend310P::M200_ASR;
+    }
+    [[nodiscard]] bool UseBatchedDecodeAttention310P(void) const
+    {
+        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::BATCHED_ACLNN;
     }
     void RecordM200Matmul310P(uint32_t m)
     {
@@ -172,6 +181,21 @@ public:
     {
         ++_attentionForcedSynchronizations;
     }
+#ifdef XLITE_ARCH_310P
+    void RecordBatchedDecodeAttention(uint32_t requests)
+    {
+        _batchedDecodeAttentionRequests += requests;
+        ++_batchedDecodeAttentionLaunches;
+    }
+    void RecordLegacyAttentionRequest(void)
+    {
+        ++_legacyAttentionRequests;
+    }
+    void RecordDecodeKvGatherBytes(uint64_t bytes)
+    {
+        _decodeKvGatherBytes += bytes;
+    }
+#endif
     [[nodiscard]] bool ForceSyncAttention(void) const
     {
         return _forceSyncAttention;
@@ -200,6 +224,24 @@ public:
     {
         return _attentionWorkspaceReuses;
     }
+#ifdef XLITE_ARCH_310P
+    [[nodiscard]] uint64_t BatchedDecodeAttentionRequests(void) const
+    {
+        return _batchedDecodeAttentionRequests;
+    }
+    [[nodiscard]] uint64_t BatchedDecodeAttentionLaunches(void) const
+    {
+        return _batchedDecodeAttentionLaunches;
+    }
+    [[nodiscard]] uint64_t LegacyAttentionRequests(void) const
+    {
+        return _legacyAttentionRequests;
+    }
+    [[nodiscard]] uint64_t DecodeKvGatherBytes(void) const
+    {
+        return _decodeKvGatherBytes;
+    }
+#endif
 
     [[nodiscard]] virtual bool IsDummyRuntime() const
     {
@@ -347,6 +389,8 @@ public:
 protected:
 #ifdef XLITE_ARCH_310P
     XMatmulBackend310P _matmulBackend310P = XMatmulBackend310P::M200_ASR;
+    XDecodeAttentionBackend310P _decodeAttentionBackend310P =
+        XDecodeAttentionBackend310P::BATCHED_ACLNN;
 #endif
     int GetNodeIps(void);
     int InitHcclComm(void);
@@ -372,6 +416,12 @@ protected:
     uint64_t _attentionAclnnLaunches = 0;
     uint64_t _attentionForcedSynchronizations = 0;
     uint64_t _attentionWorkspaceReuses = 0;
+#ifdef XLITE_ARCH_310P
+    uint64_t _batchedDecodeAttentionRequests = 0;
+    uint64_t _batchedDecodeAttentionLaunches = 0;
+    uint64_t _legacyAttentionRequests = 0;
+    uint64_t _decodeKvGatherBytes = 0;
+#endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;
     uint32_t _rankId;

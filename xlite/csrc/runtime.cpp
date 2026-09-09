@@ -282,6 +282,20 @@ const char *XRuntime::MatmulBackend310PName(void) const
 {
     return _matmulBackend310P == XMatmulBackend310P::M200_ASR ? "m200_asr" : "aclnn";
 }
+
+void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
+{
+    if (backend == "batched_aclnn") {
+        _decodeAttentionBackend310P = XDecodeAttentionBackend310P::BATCHED_ACLNN;
+        return;
+    }
+    if (backend == "legacy") {
+        _decodeAttentionBackend310P = XDecodeAttentionBackend310P::LEGACY;
+        return;
+    }
+    throw std::invalid_argument(
+        "Ascend310P decode attention backend must be one of: batched_aclnn, legacy");
+}
 #endif
 
 int XRuntime::GetNodeIps(void)
