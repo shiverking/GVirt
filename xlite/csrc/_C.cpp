@@ -2409,7 +2409,11 @@ PYBIND11_MODULE(_C, m)
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "runtime_selectable";
         info["decode_attention_backends"] = py::make_tuple("batched_aclnn", "legacy");
-        info["default_decode_attention_backend"] = "batched_aclnn";
+        // PromptFlashAttentionV2 needs a dense, max-length-padded KV gather for
+        // decode on 310P.  Keep it available as a diagnostic backend, but do
+        // not select it by default: real ASR batch-20 measurements showed a
+        // large regression compared with the per-request legacy path.
+        info["default_decode_attention_backend"] = "legacy";
         info["batched_decode_attention"] = true;
         info["batched_decode_attention_api"] = "PromptFlashAttentionV2";
         info["attention_metadata"] = "host_retained_pinned";

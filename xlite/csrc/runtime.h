@@ -390,7 +390,7 @@ protected:
 #ifdef XLITE_ARCH_310P
     XMatmulBackend310P _matmulBackend310P = XMatmulBackend310P::M200_ASR;
     XDecodeAttentionBackend310P _decodeAttentionBackend310P =
-        XDecodeAttentionBackend310P::BATCHED_ACLNN;
+        XDecodeAttentionBackend310P::LEGACY;
 #endif
     int GetNodeIps(void);
     int InitHcclComm(void);
