@@ -7,7 +7,10 @@
 #include <torch/extension.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/stack.h>
+#include <iostream>
+#include <limits>
 #include <optional>
+#include <sstream>
 #include "xlite.h"
 #include "core_assigner.h"
 #include "op.h"
@@ -870,6 +873,29 @@ void CallAtbBoxed(const char *name, c10::Stack &stack)
         paged.callBoxed(&stack);
     }
 }
+
+bool NativeAtbDebugEnabled()
+{
+    static const bool enabled =
+        isEnvironmentVariableTrue(std::getenv("XLITE_310P_DEBUG_NATIVE_ATB"));
+    return enabled;
+}
+
+void SyncNativeAtbDebug(XRuntime &rt, const char *stage, size_t layer,
+                        uint32_t batch, int64_t tokens)
+{
+    if (!NativeAtbDebugEnabled()) {
+        return;
+    }
+    const aclError result = aclrtSynchronizeStream(rt.stream);
+    if (result != ACL_ERROR_NONE) {
+        std::ostringstream message;
+        message << "native_atb diagnostic failure: stage=" << stage
+                << ", layer=" << layer << ", batch=" << batch
+                << ", tokens=" << tokens << ", aclError=" << result;
+        throw std::runtime_error(message.str());
+    }
+}
 }  // namespace
 
 bool _CModel::RunNativeAtbAttention310P(
@@ -910,6 +936,47 @@ bool _CModel::RunNativeAtbAttention310P(
         static_cast<size_t>(tableElements) * sizeof(int32_t)) {
         throw std::runtime_error("native_atb block table is not tightly packed");
     }
+    if (layer == 0) {
+        if (rt._lensHost.size() != batch || rt._cachedLensHost.size() != batch ||
+            rt._blockTablesHost.size() != static_cast<size_t>(tableElements)) {
+            throw std::runtime_error("native_atb retained host metadata size mismatch");
+        }
+        const uint32_t cacheBlocks = static_cast<uint32_t>(nativeK.size(0));
+        uint32_t minTotalLength = std::numeric_limits<uint32_t>::max();
+        uint32_t maxTotalLength = 0;
+        uint32_t maxPhysicalBlock = 0;
+        for (uint32_t request = 0; request < batch; ++request) {
+            const uint32_t totalLength =
+                rt._cachedLensHost[request] + rt._lensHost[request];
+            const uint32_t requiredBlocks = (totalLength + 127) / 128;
+            if (requiredBlocks == 0 ||
+                requiredBlocks > static_cast<uint32_t>(tableColumns)) {
+                throw std::runtime_error("native_atb block table is shorter than valid KV length");
+            }
+            minTotalLength = std::min(minTotalLength, totalLength);
+            maxTotalLength = std::max(maxTotalLength, totalLength);
+            for (uint32_t logical = 0; logical < requiredBlocks; ++logical) {
+                const uint32_t physical =
+                    rt._blockTablesHost[request * tableColumns + logical];
+                if (physical >= cacheBlocks) {
+                    std::ostringstream message;
+                    message << "native_atb physical block out of range: request=" << request
+                            << ", logical=" << logical << ", physical=" << physical
+                            << ", cache_blocks=" << cacheBlocks;
+                    throw std::runtime_error(message.str());
+                }
+                maxPhysicalBlock = std::max(maxPhysicalBlock, physical);
+            }
+        }
+        if (NativeAtbDebugEnabled()) {
+            std::cerr << "[XLITE_NATIVE_ATB_DEBUG] layer=0 batch=" << batch
+                      << " tokens=" << tokens << " table_columns=" << tableColumns
+                      << " cache_blocks=" << cacheBlocks
+                      << " total_lens_min=" << minTotalLength
+                      << " total_lens_max=" << maxTotalLength
+                      << " max_physical_block=" << maxPhysicalBlock << std::endl;
+        }
+    }
     const size_t qBytes = static_cast<size_t>(nHeads) * headDim * sizeof(uint16_t);
     const size_t kvBytes = static_cast<size_t>(nKvHeads) * headDim * sizeof(uint16_t);
     const size_t rowBytes = qBytes + 2 * kvBytes;
@@ -929,6 +996,7 @@ bool _CModel::RunNativeAtbAttention310P(
     CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(_nativeValueStage310P), kvBytes,
                                  qkvBytes + qBytes + kvBytes, rowBytes, kvBytes, tokens,
                                  ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    SyncNativeAtbDebug(rt, "qkv_split", layer, batch, tokens);
     rt.RecordNativeAtbStagingBytes(qkv.bytes);
     at::Tensor query = _nativeQueryStage310P.narrow(0, 0, tokens);
     at::Tensor key = _nativeKeyStage310P.narrow(0, 0, tokens);
@@ -945,6 +1013,7 @@ bool _CModel::RunNativeAtbAttention310P(
                                    totalLens.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         rt.RecordNativeAtbStagingBytes(
             slotMapping.bytes + blockTables.bytes + totalLens.bytes);
+        SyncNativeAtbDebug(rt, "metadata_copy", layer, batch, tokens);
     }
     at::Tensor slots = _nativeSlotStage310P.narrow(0, 0, tokens);
 
@@ -955,6 +1024,7 @@ bool _CModel::RunNativeAtbAttention310P(
     reshapeStack.emplace_back(nativeV);
     reshapeStack.emplace_back(slots);
     CallAtbBoxed("reshape", reshapeStack);
+    SyncNativeAtbDebug(rt, "reshape_and_cache", layer, batch, tokens);
     rt.RecordNativeAtbCacheWrite();
 
     if (!rt._decodeStep) {
@@ -981,8 +1051,10 @@ bool _CModel::RunNativeAtbAttention310P(
     pagedStack.emplace_back(out);
     pagedStack.emplace_back(c10::IValue());
     CallAtbBoxed("paged", pagedStack);
+    SyncNativeAtbDebug(rt, "paged_attention", layer, batch, tokens);
     CHECK_ACL(aclrtMemcpyAsync(output.ptr, output.bytes, TensorPtr(out), TorchTensorBytes(out),
                                ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    SyncNativeAtbDebug(rt, "output_copy", layer, batch, tokens);
     rt.RecordNativeAtbStagingBytes(output.bytes);
     rt.RecordNativeAtbAttention(batch);
     return true;
