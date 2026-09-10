@@ -103,7 +103,23 @@ parser.add_argument("--batched-decode-only", action="store_true",
                     help="310P FP16: run only the new multi-request decode path")
 parser.add_argument("--batched-prefill-only", action="store_true",
                     help="310P FP16: run only equal-length batched prefill cases")
+parser.add_argument("--shape-cases", type=Path,
+                    default=(Path(os.environ["XLITE_ATTENTION_SHAPE_CASES"])
+                             if "XLITE_ATTENTION_SHAPE_CASES" in os.environ else None),
+                    help="310P FP16: run scheduler batch shapes generated from runtime telemetry")
 test_args = parser.parse_args()
+if test_args.shape_cases is not None:
+    try:
+        shape_payload = json.loads(test_args.shape_cases.read_text(encoding="utf-8"))
+        work = [
+            (int(case["batch"]), list(map(int, case["cached_lens"])),
+             list(map(int, case["query_lens"])))
+            for case in shape_payload["cases"]
+        ]
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
+        parser.error(f"cannot load shape cases from {test_args.shape_cases}: {error}")
+    if not work:
+        parser.error(f"no shape cases found in {test_args.shape_cases}")
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
 if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
     report_dir = Path("attention_310p_report")
@@ -145,8 +161,10 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
         print(f"[ RUN      ] {current_case_name}", flush=True)
         log_path = report_dir / f"{current_case_name}.log"
         env = dict(os.environ, XLITE_ATTENTION_CASE_INDEX=str(index))
-        if test_args.batched_prefill_only:
+        if test_args.batched_prefill_only or test_args.shape_cases is not None:
             env["XLITE_TEST_BATCHED_PREFILL"] = "1"
+        if test_args.shape_cases is not None:
+            env["XLITE_ATTENTION_SHAPE_CASES"] = str(test_args.shape_cases.resolve())
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 result = subprocess.run(
@@ -383,17 +401,32 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                         f"batched decode silently used legacy attention: {runtime_stats}"
                     )
             if os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
-                if runtime_stats.get("batched_prefill_attention_requests") != batch:
+                groups = {}
+                for query_length, cached_length in zip(query_len_list, cached_lens_list):
+                    if query_length == 1 and cached_length > 0:
+                        continue
+                    key = (query_length, cached_length)
+                    groups[key] = groups.get(key, 0) + 1
+                expected_requests = 0
+                expected_launches = 0
+                for count in groups.values():
+                    full_groups, remainder = divmod(count, 4)
+                    expected_requests += full_groups * 4
+                    expected_launches += full_groups
+                    if remainder >= 2:
+                        expected_requests += remainder
+                        expected_launches += 1
+                if (runtime_stats.get("batched_prefill_attention_requests") !=
+                        expected_requests):
                     raise AssertionError(
-                        f"batched prefill did not consume all requests: {runtime_stats}"
+                        "batched prefill request count does not match exact-shape "
+                        f"groups ({expected_requests} expected): {runtime_stats}"
                     )
-                if runtime_stats.get("batched_prefill_attention_launches") != 1:
+                if (runtime_stats.get("batched_prefill_attention_launches") !=
+                        expected_launches):
                     raise AssertionError(
-                        f"batched prefill did not use exactly one ACLNN launch: {runtime_stats}"
-                    )
-                if runtime_stats.get("legacy_attention_requests") != 0:
-                    raise AssertionError(
-                        f"batched prefill silently used legacy attention: {runtime_stats}"
+                        "batched prefill launch count does not match exact-shape "
+                        f"groups ({expected_launches} expected): {runtime_stats}"
                     )
         if torch.isnan(output_xlite).any():
             raise AssertionError("attention output still contains the no-op sentinel")

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include "base.h"
 
@@ -322,6 +323,31 @@ public:
     {
         return _batchedPrefillAttentionLaunches;
     }
+    [[nodiscard]] uint64_t PrefillShapeForwardCalls(void) const
+    {
+        return _prefillShapeForwardCalls;
+    }
+    [[nodiscard]] uint64_t PrefillShapeRequests(void) const { return _prefillShapeRequests; }
+    [[nodiscard]] uint64_t PrefillExactGroupableRequests(void) const
+    {
+        return _prefillExactGroupableRequests;
+    }
+    [[nodiscard]] uint64_t PrefillActualQueryTokens(void) const
+    {
+        return _prefillActualQueryTokens;
+    }
+    [[nodiscard]] uint64_t PrefillPaddedQueryTokens(void) const
+    {
+        return _prefillPaddedQueryTokens;
+    }
+    [[nodiscard]] const std::map<std::string, uint64_t> &PrefillShapeHistogram(void) const
+    {
+        return _prefillShapeHistogram;
+    }
+    [[nodiscard]] const std::map<std::string, uint64_t> &PrefillBatchShapeHistogram(void) const
+    {
+        return _prefillBatchShapeHistogram;
+    }
     [[nodiscard]] uint64_t AclnnMatmulSynchronizations(void) const
     {
         return _aclnnMatmulSynchronizations;
@@ -571,6 +597,13 @@ protected:
     uint64_t _batchedDecodeAttentionLaunches = 0;
     uint64_t _batchedPrefillAttentionRequests = 0;
     uint64_t _batchedPrefillAttentionLaunches = 0;
+    uint64_t _prefillShapeForwardCalls = 0;
+    uint64_t _prefillShapeRequests = 0;
+    uint64_t _prefillExactGroupableRequests = 0;
+    uint64_t _prefillActualQueryTokens = 0;
+    uint64_t _prefillPaddedQueryTokens = 0;
+    std::map<std::string, uint64_t> _prefillShapeHistogram;
+    std::map<std::string, uint64_t> _prefillBatchShapeHistogram;
     uint64_t _aclnnMatmulSynchronizations = 0;
     uint64_t _lmHeadSynchronizations = 0;
     uint64_t _legacyAttentionRequests = 0;

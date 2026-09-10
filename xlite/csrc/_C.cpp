@@ -2959,6 +2959,7 @@ PYBIND11_MODULE(_C, m)
         info["batched_prefill_micro_batch"] = 4;
         info["default_batched_prefill_attention"] = false;
         info["batched_prefill_status"] = "experimental_shape_probe";
+        info["prefill_shape_telemetry"] = 1;
         info["native_decode_cache_layout"] = "NZ_5D";
         info["direct_atb_task_queue_independent"] = true;
         info["attention_metadata"] = "host_retained_pinned";
@@ -3011,6 +3012,21 @@ PYBIND11_MODULE(_C, m)
             rt.BatchedPrefillAttentionRequests();
         stats["batched_prefill_attention_launches"] =
             rt.BatchedPrefillAttentionLaunches();
+        stats["prefill_shape_forward_calls"] = rt.PrefillShapeForwardCalls();
+        stats["prefill_shape_requests"] = rt.PrefillShapeRequests();
+        stats["prefill_exact_groupable_requests"] = rt.PrefillExactGroupableRequests();
+        stats["prefill_actual_query_tokens"] = rt.PrefillActualQueryTokens();
+        stats["prefill_padded_query_tokens"] = rt.PrefillPaddedQueryTokens();
+        py::dict prefillShapes;
+        py::dict prefillBatchShapes;
+        for (const auto &[shape, count] : rt.PrefillShapeHistogram()) {
+            prefillShapes[py::str(shape)] = count;
+        }
+        for (const auto &[shape, count] : rt.PrefillBatchShapeHistogram()) {
+            prefillBatchShapes[py::str(shape)] = count;
+        }
+        stats["prefill_shape_histogram"] = prefillShapes;
+        stats["prefill_batch_shape_histogram"] = prefillBatchShapes;
         stats["aclnn_matmul_synchronizations"] =
             rt.AclnnMatmulSynchronizations();
         stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
@@ -3094,6 +3110,22 @@ PYBIND11_MODULE(_C, m)
                 rt.BatchedPrefillAttentionRequests();
             stats["batched_prefill_attention_launches"] =
                 rt.BatchedPrefillAttentionLaunches();
+            stats["prefill_shape_forward_calls"] = rt.PrefillShapeForwardCalls();
+            stats["prefill_shape_requests"] = rt.PrefillShapeRequests();
+            stats["prefill_exact_groupable_requests"] =
+                rt.PrefillExactGroupableRequests();
+            stats["prefill_actual_query_tokens"] = rt.PrefillActualQueryTokens();
+            stats["prefill_padded_query_tokens"] = rt.PrefillPaddedQueryTokens();
+            py::dict prefillShapes;
+            py::dict prefillBatchShapes;
+            for (const auto &[shape, count] : rt.PrefillShapeHistogram()) {
+                prefillShapes[py::str(shape)] = count;
+            }
+            for (const auto &[shape, count] : rt.PrefillBatchShapeHistogram()) {
+                prefillBatchShapes[py::str(shape)] = count;
+            }
+            stats["prefill_shape_histogram"] = prefillShapes;
+            stats["prefill_batch_shape_histogram"] = prefillBatchShapes;
             stats["aclnn_matmul_synchronizations"] =
                 rt.AclnnMatmulSynchronizations();
             stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();

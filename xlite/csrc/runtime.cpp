@@ -841,6 +841,52 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     _lensHost = lens;
     _cachedLensHost = cachedLens;
 
+#ifdef XLITE_ARCH_310P
+    // Record scheduler shapes once per forward, before the 28 decoder layers
+    // consume the same metadata.  A request is prefill when it has more than
+    // one query token or no cached KV; ordinary one-token decode is excluded.
+    std::map<std::string, uint32_t> exactShapeCounts;
+    std::string batchShape = "b" + std::to_string(batch) + "-q";
+    for (uint32_t i = 0; i < batch; ++i) {
+        if (i != 0) {
+            batchShape += "_";
+        }
+        batchShape += std::to_string(lens[i]);
+    }
+    batchShape += "-c";
+    for (uint32_t i = 0; i < batch; ++i) {
+        if (i != 0) {
+            batchShape += "_";
+        }
+        batchShape += std::to_string(cachedLens[i]);
+    }
+    uint32_t prefillRequests = 0;
+    for (uint32_t i = 0; i < batch; ++i) {
+        if (lens[i] == 1 && cachedLens[i] != 0) {
+            continue;
+        }
+        ++prefillRequests;
+        ++_prefillShapeRequests;
+        _prefillActualQueryTokens += lens[i];
+        _prefillPaddedQueryTokens += DIV_ROUND_UP(lens[i], 128U) * 128U;
+        const std::string shape = "q" + std::to_string(lens[i]) + "-c" +
+                                  std::to_string(cachedLens[i]) + "-kv" +
+                                  std::to_string(totalLens[i]);
+        ++_prefillShapeHistogram[shape];
+        ++exactShapeCounts[shape];
+    }
+    if (prefillRequests != 0) {
+        ++_prefillShapeForwardCalls;
+        ++_prefillBatchShapeHistogram[batchShape];
+        for (const auto &[shape, count] : exactShapeCounts) {
+            (void)shape;
+            if (count > 1) {
+                _prefillExactGroupableRequests += count;
+            }
+        }
+    }
+#endif
+
     if (batchedTokens == 0 || batchedTokens > maxBatchedTokens) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                  ": invalid attnMeta batched tokens(" +
