@@ -80,6 +80,12 @@ def run_shape(m: int, n: int, k: int) -> None:
           backend_stats["aclnn_requests"] != 1):
         raise AssertionError(
             f"shape outside the verified M200 range did not use ACLNN fallback: {backend_stats}")
+    if n == 151936:
+        if (backend_stats.get("lm_head_synchronizations") != 1 or
+                backend_stats.get("aclnn_matmul_synchronizations") != 1):
+            raise AssertionError(
+                "chunked LM Head must submit all chunks before one synchronization: "
+                f"{backend_stats}")
 
 
 def main() -> int:

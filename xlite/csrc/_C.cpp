@@ -2954,6 +2954,9 @@ PYBIND11_MODULE(_C, m)
         info["direct_atb_operation_scope"] = "per_layer";
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
+        info["batched_prefill_attention"] = true;
+        info["batched_prefill_attention_api"] = "PromptFlashAttentionV2";
+        info["batched_prefill_micro_batch"] = 4;
         info["native_decode_cache_layout"] = "NZ_5D";
         info["direct_atb_task_queue_independent"] = true;
         info["attention_metadata"] = "host_retained_pinned";
@@ -2963,7 +2966,8 @@ PYBIND11_MODULE(_C, m)
         info["matmul_backends"] = py::make_tuple("m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
         info["m200_lm_head_max_batch"] = 0;
-        info["lm_head_backend"] = "aclnn";
+        info["lm_head_backend"] = "aclnn_batched_submit";
+        info["lm_head_synchronizations_per_call"] = 1;
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";
@@ -3001,6 +3005,13 @@ PYBIND11_MODULE(_C, m)
             rt.BatchedDecodeAttentionRequests();
         stats["batched_decode_attention_launches"] =
             rt.BatchedDecodeAttentionLaunches();
+        stats["batched_prefill_attention_requests"] =
+            rt.BatchedPrefillAttentionRequests();
+        stats["batched_prefill_attention_launches"] =
+            rt.BatchedPrefillAttentionLaunches();
+        stats["aclnn_matmul_synchronizations"] =
+            rt.AclnnMatmulSynchronizations();
+        stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
         stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
         stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
         stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
@@ -3075,6 +3086,13 @@ PYBIND11_MODULE(_C, m)
                 rt.BatchedDecodeAttentionRequests();
             stats["batched_decode_attention_launches"] =
                 rt.BatchedDecodeAttentionLaunches();
+            stats["batched_prefill_attention_requests"] =
+                rt.BatchedPrefillAttentionRequests();
+            stats["batched_prefill_attention_launches"] =
+                rt.BatchedPrefillAttentionLaunches();
+            stats["aclnn_matmul_synchronizations"] =
+                rt.AclnnMatmulSynchronizations();
+            stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
             stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
             stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
             stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();

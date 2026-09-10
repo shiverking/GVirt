@@ -14,8 +14,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "acl/acl.h"
@@ -118,7 +121,8 @@ static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize, bool attentio
     return &workspace;
 }
 
-static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention)
+static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention,
+                        bool lmHead = false)
 {
     if (attention) {
         rt.RecordAttentionAclnnLaunch();
@@ -131,6 +135,7 @@ static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention)
             rt.Synchronize();
         }
     } else {
+        rt.RecordAclnnMatmulSynchronization(lmHead);
         rt.Synchronize();
     }
     if (workspace != nullptr) {
@@ -325,6 +330,193 @@ static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCach
 #endif
 }
 
+// ASR prefill requests commonly arrive with identical encoder lengths. Batch
+// those requests into one PromptFlashAttentionV2 call instead of submitting
+// one ACLNN operation per request. Exact (query,cached) grouping lets all rows
+// share the already validated 2D causal mask. Micro-batches are capped at four
+// so the padded Q/K/V/output tensors remain comfortably inside the fixed pool
+// even at the 2048-token limit.
+static void RunBatchedPrefillAttention(
+    XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &output,
+    uint32_t maxNumBlock, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
+    uint32_t blockSize, uint32_t batch, const std::vector<size_t> &queryOffsets,
+    std::vector<bool> &processed)
+{
+#if !XLITE_310P_HAS_PROMPT_FA_V2
+    (void)rt;
+    (void)qkv;
+    (void)kCache;
+    (void)vCache;
+    (void)output;
+    (void)maxNumBlock;
+    (void)nHeads;
+    (void)nKvHeads;
+    (void)headDim;
+    (void)blockSize;
+    (void)batch;
+    (void)queryOffsets;
+    (void)processed;
+#else
+    using GroupKey = std::tuple<uint32_t, uint32_t>;
+    std::map<GroupKey, std::vector<uint32_t>> groups;
+    for (uint32_t request = 0; request < batch; ++request) {
+        const uint32_t queryLength = rt._lensHost[request];
+        const uint32_t cachedLength = rt._cachedLensHost[request];
+        if (queryLength == 1 && cachedLength > 0) {
+            continue;
+        }
+        groups[{queryLength, cachedLength}].push_back(request);
+    }
+
+    constexpr size_t kMaxMicroBatch = 4;
+    const size_t qElements = static_cast<size_t>(nHeads) * headDim;
+    const size_t rowElements = static_cast<size_t>(nHeads + 2 * nKvHeads) * headDim;
+    const size_t qBytes = qElements * sizeof(uint16_t);
+    const size_t rowBytes = rowElements * sizeof(uint16_t);
+    const size_t tokenKvBytes = static_cast<size_t>(nKvHeads) * headDim * sizeof(uint16_t);
+    const size_t blockKvBytes = static_cast<size_t>(blockSize) * tokenKvBytes;
+
+    for (const auto &[key, requests] : groups) {
+        if (requests.size() < 2) {
+            continue;
+        }
+        const uint32_t queryLength = std::get<0>(key);
+        const uint32_t cachedLength = std::get<1>(key);
+        const uint32_t totalLength = queryLength + cachedLength;
+        if (queryLength == 0 || totalLength > XLITE_310P_MAX_SEQ_LEN) {
+            throw std::runtime_error("Ascend310P batched prefill length is invalid");
+        }
+        const uint32_t tensorLength = ROUND_UP(totalLength, blockSize);
+
+        for (size_t begin = 0; begin < requests.size(); begin += kMaxMicroBatch) {
+            const size_t microBatch = std::min(kMaxMicroBatch, requests.size() - begin);
+            if (microBatch < 2) {
+                continue;
+            }
+            XTensor &packedQuery = rt.GetTensor(
+                {microBatch, tensorLength, nHeads, headDim}, FP16, DBG_LOC);
+            XTensor &packedKey = rt.GetTensor(
+                {microBatch, tensorLength, nKvHeads, headDim}, FP16, DBG_LOC);
+            XTensor &packedValue = rt.GetTensor(
+                {microBatch, tensorLength, nKvHeads, headDim}, FP16, DBG_LOC);
+            XTensor &packedOutput = rt.GetTensor(
+                {microBatch, tensorLength, nHeads, headDim}, FP16, DBG_LOC);
+            CHECK_ACL(aclrtMemsetAsync(packedQuery.ptr, packedQuery.bytes, 0,
+                                       packedQuery.bytes, rt.stream));
+            CHECK_ACL(aclrtMemsetAsync(packedKey.ptr, packedKey.bytes, 0,
+                                       packedKey.bytes, rt.stream));
+            CHECK_ACL(aclrtMemsetAsync(packedValue.ptr, packedValue.bytes, 0,
+                                       packedValue.bytes, rt.stream));
+
+            for (size_t local = 0; local < microBatch; ++local) {
+                const uint32_t request = requests[begin + local];
+                void *queryDestination = static_cast<uint8_t *>(packedQuery.ptr) +
+                    local * tensorLength * qBytes;
+                void *querySource = static_cast<uint8_t *>(qkv.ptr) +
+                    queryOffsets[request] * rowBytes;
+                CHECK_ACL(aclrtMemcpy2dAsync(
+                    queryDestination, qBytes, querySource, rowBytes, qBytes, queryLength,
+                    ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+
+                const std::vector<uint32_t> blocks = GetRequestBlocks(
+                    rt, request, totalLength, blockSize, maxNumBlock, kCache.shape[0]);
+                const size_t batchKvOffset = local * tensorLength * tokenKvBytes;
+                for (size_t logicalBlock = 0; logicalBlock < blocks.size(); ++logicalBlock) {
+                    const uint32_t tokenOffset =
+                        static_cast<uint32_t>(logicalBlock) * blockSize;
+                    const uint32_t validTokens =
+                        std::min(blockSize, totalLength - tokenOffset);
+                    const size_t copyBytes = static_cast<size_t>(validTokens) * tokenKvBytes;
+                    const size_t sourceOffset =
+                        static_cast<size_t>(blocks[logicalBlock]) * blockKvBytes;
+                    const size_t destinationOffset =
+                        batchKvOffset + static_cast<size_t>(tokenOffset) * tokenKvBytes;
+                    CHECK_ACL(aclrtMemcpyAsync(
+                        static_cast<uint8_t *>(packedKey.ptr) + destinationOffset,
+                        packedKey.bytes - destinationOffset,
+                        static_cast<uint8_t *>(kCache.ptr) + sourceOffset, copyBytes,
+                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+                    CHECK_ACL(aclrtMemcpyAsync(
+                        static_cast<uint8_t *>(packedValue.ptr) + destinationOffset,
+                        packedValue.bytes - destinationOffset,
+                        static_cast<uint8_t *>(vCache.ptr) + sourceOffset, copyBytes,
+                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+                }
+            }
+
+            XTensor &causalMask =
+                rt.GetTensor({tensorLength, tensorLength}, INT8, DBG_LOC);
+            CHECK_ACL(aclrtMemsetAsync(causalMask.ptr, causalMask.bytes, 0,
+                                       causalMask.bytes, rt.stream));
+            const uint8_t *hostMask = rt.CausalMaskHost310P() +
+                static_cast<size_t>(cachedLength) * XLITE_310P_MAX_SEQ_LEN;
+            CHECK_ACL(aclrtMemcpy2dAsync(
+                causalMask.ptr, tensorLength, hostMask, XLITE_310P_MAX_SEQ_LEN,
+                tensorLength, queryLength, ACL_MEMCPY_HOST_TO_DEVICE, rt.stream));
+
+            const std::vector<int64_t> qDims{
+                static_cast<int64_t>(microBatch), tensorLength, nHeads, headDim};
+            const std::vector<int64_t> kvDims{
+                static_cast<int64_t>(microBatch), tensorLength, nKvHeads, headDim};
+            const std::vector<int64_t> maskDims{tensorLength, tensorLength};
+            AclTensorGuard aclQuery(CreateTensor(
+                qDims, ContiguousStrides(qDims), ACL_FLOAT16, packedQuery.ptr));
+            AclTensorGuard aclKey(CreateTensor(
+                kvDims, ContiguousStrides(kvDims), ACL_FLOAT16, packedKey.ptr));
+            AclTensorGuard aclValue(CreateTensor(
+                kvDims, ContiguousStrides(kvDims), ACL_FLOAT16, packedValue.ptr));
+            AclTensorGuard aclOutput(CreateTensor(
+                qDims, ContiguousStrides(qDims), ACL_FLOAT16, packedOutput.ptr));
+            AclTensorGuard aclMask(CreateTensor(
+                maskDims, ContiguousStrides(maskDims), ACL_BOOL, causalMask.ptr));
+            std::vector<int64_t> queryLengths(microBatch, queryLength);
+            std::vector<int64_t> kvLengths(microBatch, totalLength);
+            AclIntArrayGuard actualQueryLengths(
+                aclCreateIntArray(queryLengths.data(), queryLengths.size()));
+            AclIntArrayGuard actualKvLengths(
+                aclCreateIntArray(kvLengths.data(), kvLengths.size()));
+            if (actualQueryLengths.get() == nullptr || actualKvLengths.get() == nullptr) {
+                throw std::runtime_error(
+                    "aclCreateIntArray returned nullptr for batched prefill lengths");
+            }
+
+            uint64_t workspaceSize = 0;
+            aclOpExecutor *executor = nullptr;
+            CHECK_ACL(aclnnPromptFlashAttentionV2GetWorkspaceSize(
+                aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(),
+                actualQueryLengths.get(), actualKvLengths.get(), nullptr, nullptr, nullptr,
+                nullptr, nullptr, nHeads, 1.0, 2147483647, 2147483647,
+                const_cast<char *>("BSND"), nKvHeads, 0, aclOutput.get(),
+                &workspaceSize, &executor));
+            XTensor *workspace = GetWorkspace(rt, workspaceSize, true);
+            CHECK_ACL(aclnnPromptFlashAttentionV2(
+                workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
+                executor, rt.stream));
+            FinishAclnn(rt, workspace, true);
+
+            for (size_t local = 0; local < microBatch; ++local) {
+                const uint32_t request = requests[begin + local];
+                void *destination = static_cast<uint8_t *>(output.ptr) +
+                    queryOffsets[request] * qBytes;
+                void *source = static_cast<uint8_t *>(packedOutput.ptr) +
+                    local * tensorLength * qBytes;
+                const size_t validBytes = static_cast<size_t>(queryLength) * qBytes;
+                CHECK_ACL(aclrtMemcpyAsync(
+                    destination, output.bytes - queryOffsets[request] * qBytes,
+                    source, validBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+                processed[request] = true;
+            }
+            rt.RecordBatchedPrefillAttention(static_cast<uint32_t>(microBatch));
+            rt.PutTensor(causalMask);
+            rt.PutTensor(packedOutput);
+            rt.PutTensor(packedValue);
+            rt.PutTensor(packedKey);
+            rt.PutTensor(packedQuery);
+        }
+    }
+#endif
+}
+
 }  // namespace
 
 void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
@@ -376,22 +568,66 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
 
     if (!transpose && n > static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK)) {
         const int64_t chunkLimit = static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK);
-        // A contiguous temporary is necessary because an N slice of [M,N] is
-        // strided for M>1.  Copy each completed chunk into the final output.
+        struct PendingChunk {
+            std::unique_ptr<AclTensorGuard> input;
+            std::unique_ptr<AclTensorGuard> weight;
+            std::unique_ptr<AclTensorGuard> output;
+            aclOpExecutor *executor = nullptr;
+            uint64_t workspaceSize = 0;
+            int64_t offset = 0;
+            int64_t width = 0;
+        };
+
+        // LM Head is the only ASR projection that reaches this path. Query all
+        // 13 executors first and retain their descriptors until the final
+        // synchronization. The kernels and their following 2D copies are then
+        // submitted in order with one shared workspace. This preserves the
+        // lifetime guarantee that was missing from the old fully-async P1
+        // experiment while replacing 13 host synchronizations with one.
         XTensor &chunkOutput =
             rt.GetTensor({static_cast<size_t>(m), XLITE_310P_MATMUL_N_CHUNK}, FP16, DBG_LOC);
+        std::vector<PendingChunk> pending;
+        pending.reserve(static_cast<size_t>((n + chunkLimit - 1) / chunkLimit));
+        uint64_t maxWorkspaceSize = 0;
         for (int64_t offset = 0; offset < n; offset += chunkLimit) {
             const int64_t currentN = std::min(chunkLimit, n - offset);
             void *weightData = static_cast<void *>(
                 static_cast<uint16_t *>(weight.ptr) + static_cast<size_t>(offset * k));
-            runMatmul(currentN, weightData, chunkOutput.ptr, {currentN, k}, {1, k});
+            const std::vector<int64_t> inDims{m, k};
+            const std::vector<int64_t> weightDims{k, currentN};
+            const std::vector<int64_t> outDims{m, currentN};
+            PendingChunk chunk;
+            chunk.input = std::make_unique<AclTensorGuard>(CreateTensor(
+                inDims, ContiguousStrides(inDims), ACL_FLOAT16, in.ptr));
+            chunk.weight = std::make_unique<AclTensorGuard>(CreateTensor(
+                weightDims, {1, k}, ACL_FLOAT16, weightData, {currentN, k}));
+            chunk.output = std::make_unique<AclTensorGuard>(CreateTensor(
+                outDims, ContiguousStrides(outDims), ACL_FLOAT16, chunkOutput.ptr));
+            CHECK_ACL(aclnnMatmulGetWorkspaceSize(
+                chunk.input->get(), chunk.weight->get(), chunk.output->get(), 0,
+                &chunk.workspaceSize, &chunk.executor));
+            maxWorkspaceSize = std::max(maxWorkspaceSize, chunk.workspaceSize);
+            chunk.offset = offset;
+            chunk.width = currentN;
+            pending.emplace_back(std::move(chunk));
+        }
+
+        XTensor *workspace = GetWorkspace(rt, maxWorkspaceSize, false);
+        for (const PendingChunk &chunk : pending) {
+            CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr,
+                                  chunk.workspaceSize, chunk.executor, rt.stream));
             void *outputData = static_cast<void *>(
-                static_cast<uint16_t *>(out.ptr) + static_cast<size_t>(offset));
+                static_cast<uint16_t *>(out.ptr) + static_cast<size_t>(chunk.offset));
             CHECK_ACL(aclrtMemcpy2dAsync(
                 outputData, static_cast<size_t>(n) * sizeof(uint16_t), chunkOutput.ptr,
-                static_cast<size_t>(currentN) * sizeof(uint16_t),
-                static_cast<size_t>(currentN) * sizeof(uint16_t), static_cast<size_t>(m),
+                static_cast<size_t>(chunk.width) * sizeof(uint16_t),
+                static_cast<size_t>(chunk.width) * sizeof(uint16_t), static_cast<size_t>(m),
                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        }
+        rt.RecordAclnnMatmulSynchronization(true);
+        rt.Synchronize();
+        if (workspace != nullptr) {
+            rt.PutTensor(*workspace);
         }
         rt.PutTensor(chunkOutput);
         return;
@@ -442,11 +678,27 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         return;
     }
 
-    size_t queryOffset = 0;
+    std::vector<size_t> queryOffsets(batch);
+    size_t runningQueryOffset = 0;
+    for (uint32_t request = 0; request < batch; ++request) {
+        queryOffsets[request] = runningQueryOffset;
+        runningQueryOffset += rt._lensHost[request];
+    }
+    std::vector<bool> batchedPrefillProcessed(batch, false);
+    if (rt.UseDirectAtbDecodeAttention310P()) {
+        RunBatchedPrefillAttention(
+            rt, qkv, kCache, vCache, output, maxNumBlock, nHeads, nKvHeads,
+            headDim, blockSize, batch, queryOffsets, batchedPrefillProcessed);
+    }
+
     const size_t tokenKvBytes = static_cast<size_t>(nKvHeads) * headDim * sizeof(uint16_t);
     const size_t blockKvBytes = static_cast<size_t>(blockSize) * tokenKvBytes;
     for (uint32_t request = 0; request < batch; ++request) {
+        if (batchedPrefillProcessed[request]) {
+            continue;
+        }
         rt.RecordLegacyAttentionRequest();
+        const size_t queryOffset = queryOffsets[request];
         const uint32_t queryLength = rt._lensHost[request];
         const uint32_t cachedLength = rt._cachedLensHost[request];
         const uint32_t totalLength = queryLength + cachedLength;
@@ -583,7 +835,6 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         rt.PutTensor(packedValue);
         rt.PutTensor(packedKey);
         rt.PutTensor(query);
-        queryOffset += queryLength;
     }
 }
 

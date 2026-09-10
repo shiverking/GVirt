@@ -187,6 +187,18 @@ public:
             ++aclnnMatmulRequestsByM[m];
         }
     }
+    void RecordAclnnMatmulSynchronization(bool lmHead)
+    {
+        ++_aclnnMatmulSynchronizations;
+        if (lmHead) {
+            ++_lmHeadSynchronizations;
+        }
+    }
+    void RecordBatchedPrefillAttention(uint32_t requests)
+    {
+        _batchedPrefillAttentionRequests += requests;
+        ++_batchedPrefillAttentionLaunches;
+    }
 #endif
     void RecordAttentionAclnnLaunch(void)
     {
@@ -293,6 +305,22 @@ public:
     [[nodiscard]] uint64_t BatchedDecodeAttentionRequests(void) const
     {
         return _batchedDecodeAttentionRequests;
+    }
+    [[nodiscard]] uint64_t BatchedPrefillAttentionRequests(void) const
+    {
+        return _batchedPrefillAttentionRequests;
+    }
+    [[nodiscard]] uint64_t BatchedPrefillAttentionLaunches(void) const
+    {
+        return _batchedPrefillAttentionLaunches;
+    }
+    [[nodiscard]] uint64_t AclnnMatmulSynchronizations(void) const
+    {
+        return _aclnnMatmulSynchronizations;
+    }
+    [[nodiscard]] uint64_t LmHeadSynchronizations(void) const
+    {
+        return _lmHeadSynchronizations;
     }
     [[nodiscard]] uint64_t BatchedDecodeAttentionLaunches(void) const
     {
@@ -530,6 +558,10 @@ protected:
 #ifdef XLITE_ARCH_310P
     uint64_t _batchedDecodeAttentionRequests = 0;
     uint64_t _batchedDecodeAttentionLaunches = 0;
+    uint64_t _batchedPrefillAttentionRequests = 0;
+    uint64_t _batchedPrefillAttentionLaunches = 0;
+    uint64_t _aclnnMatmulSynchronizations = 0;
+    uint64_t _lmHeadSynchronizations = 0;
     uint64_t _legacyAttentionRequests = 0;
     uint64_t _decodeKvGatherBytes = 0;
     uint64_t _nativeAtbDecodeRequests = 0;

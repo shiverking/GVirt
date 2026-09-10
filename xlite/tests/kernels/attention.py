@@ -24,7 +24,7 @@ from xlite._C import Runtime, attention, get_build_info
 
 logging.getLogger().setLevel(logging.INFO)
 
-enable_flash = False
+enable_flash = os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1"
 
 BLOCK_SIZE = 128
 
@@ -79,6 +79,8 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [2047], [1]),
         (2, [0, 127], [129, 1]),
         (2, [128, 64], [65, 129]),
+        (2, [0, 0], [129, 129]),
+        (4, [0, 0, 0, 0], [129, 129, 129, 129]),
         (2, [16, 128], [1, 1]),
         (8, [15, 31, 63, 127, 255, 511, 1023, 2047], [1] * 8),
         (20, [16 + index * 7 for index in range(20)], [1] * 20),
@@ -99,6 +101,8 @@ parser.add_argument("--rerun-failed", action="store_true",
                     help="310P FP16: rerun failures from attention_310p_report/summary.json")
 parser.add_argument("--batched-decode-only", action="store_true",
                     help="310P FP16: run only the new multi-request decode path")
+parser.add_argument("--batched-prefill-only", action="store_true",
+                    help="310P FP16: run only equal-length batched prefill cases")
 test_args = parser.parse_args()
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
 if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
@@ -109,6 +113,12 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
         selected_indices = [
             index for index, (_batch, _cached, query) in enumerate(work)
             if _batch > 1 and all(length == 1 for length in query)
+        ]
+    if test_args.batched_prefill_only:
+        selected_indices = [
+            index for index, (_batch, cached, query) in enumerate(work)
+            if _batch > 1 and len(set(query)) == 1 and query[0] > 1
+            and len(set(cached)) == 1
         ]
     if test_args.rerun_failed:
         summary_path = report_dir / "summary.json"
@@ -135,6 +145,8 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
         print(f"[ RUN      ] {current_case_name}", flush=True)
         log_path = report_dir / f"{current_case_name}.log"
         env = dict(os.environ, XLITE_ATTENTION_CASE_INDEX=str(index))
+        if test_args.batched_prefill_only:
+            env["XLITE_TEST_BATCHED_PREFILL"] = "1"
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 result = subprocess.run(
@@ -169,6 +181,8 @@ if poc_case_index is not None:
 
 torch.npu.set_device(0)
 rt = Runtime(0, 3000)
+if os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
+    rt.set_decode_attention_backend("direct_atb")
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
@@ -366,6 +380,19 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 if runtime_stats.get("legacy_attention_requests") != 0:
                     raise AssertionError(
                         f"batched decode silently used legacy attention: {runtime_stats}"
+                    )
+            if os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
+                if runtime_stats.get("batched_prefill_attention_requests") != batch:
+                    raise AssertionError(
+                        f"batched prefill did not consume all requests: {runtime_stats}"
+                    )
+                if runtime_stats.get("batched_prefill_attention_launches") != 1:
+                    raise AssertionError(
+                        f"batched prefill did not use exactly one ACLNN launch: {runtime_stats}"
+                    )
+                if runtime_stats.get("legacy_attention_requests") != 0:
+                    raise AssertionError(
+                        f"batched prefill silently used legacy attention: {runtime_stats}"
                     )
         if torch.isnan(output_xlite).any():
             raise AssertionError("attention output still contains the no-op sentinel")
