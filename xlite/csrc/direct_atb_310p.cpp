@@ -85,26 +85,6 @@ void RunOperation(atb::Operation *operation, atb::VariantPack &pack, atb::Contex
 class XliteDirectAtb310P::Impl
 {
 public:
-    Impl()
-    {
-        CheckAtb(atb::CreateContext(&context), "CreateContext");
-    }
-
-    ~Impl()
-    {
-        for (const std::unique_ptr<LayerPlan> &plan : layers) {
-            if (plan != nullptr && plan->paged != nullptr) {
-                (void)atb::DestroyOperation(plan->paged);
-            }
-            if (plan != nullptr && plan->reshape != nullptr) {
-                (void)atb::DestroyOperation(plan->reshape);
-            }
-        }
-        if (context != nullptr) {
-            (void)atb::DestroyContext(context);
-        }
-    }
-
     struct Signature
     {
         std::array<void *, 7> pointers{};
@@ -122,15 +102,47 @@ public:
         }
     };
 
+    struct PagedPlan
+    {
+        atb::Operation *operation = nullptr;
+        atb::VariantPack pack;
+        Signature signature;
+    };
+
     struct LayerPlan
     {
         atb::Operation *reshape = nullptr;
-        atb::Operation *paged = nullptr;
         atb::VariantPack reshapePack;
-        atb::VariantPack pagedPack;
         Signature reshapeSignature;
-        Signature pagedSignature;
+        // Decode batches vary between scheduler steps. Retain one ATB
+        // operation and stable VariantPack for every batch size instead of
+        // invalidating a layer-wide plan whenever continuous batching changes.
+        std::vector<std::unique_ptr<PagedPlan>> pagedByBatch;
     };
+
+    Impl()
+    {
+        CheckAtb(atb::CreateContext(&context), "CreateContext");
+    }
+
+    ~Impl()
+    {
+        for (const std::unique_ptr<LayerPlan> &plan : layers) {
+            if (plan != nullptr && plan->reshape != nullptr) {
+                (void)atb::DestroyOperation(plan->reshape);
+            }
+            if (plan != nullptr) {
+                for (const std::unique_ptr<PagedPlan> &paged : plan->pagedByBatch) {
+                    if (paged != nullptr && paged->operation != nullptr) {
+                        (void)atb::DestroyOperation(paged->operation);
+                    }
+                }
+            }
+        }
+        if (context != nullptr) {
+            (void)atb::DestroyContext(context);
+        }
+    }
 
     LayerPlan &GetLayer(uint32_t layer)
     {
@@ -141,6 +153,21 @@ public:
             layers[layer] = std::make_unique<LayerPlan>();
         }
         return *layers[layer];
+    }
+
+    PagedPlan &GetPaged(uint32_t layer, uint32_t batch)
+    {
+        if (batch == 0 || batch > 20) {
+            throw std::invalid_argument("310P direct ATB batch is outside [1, 20]");
+        }
+        LayerPlan &layerPlan = GetLayer(layer);
+        if (layerPlan.pagedByBatch.size() <= batch) {
+            layerPlan.pagedByBatch.resize(static_cast<size_t>(batch) + 1);
+        }
+        if (layerPlan.pagedByBatch[batch] == nullptr) {
+            layerPlan.pagedByBatch[batch] = std::make_unique<PagedPlan>();
+        }
+        return *layerPlan.pagedByBatch[batch];
     }
 
     atb::Context *context = nullptr;
@@ -201,17 +228,17 @@ bool XliteDirectAtb310P::PagedAttention(
     uint32_t cacheBlocks, void *blockTables, uint32_t tableColumns, void *contextLens, void *output,
     const WorkspaceAcquire &acquire, const WorkspaceRelease &release)
 {
-    Impl::LayerPlan &plan = impl_->GetLayer(layer);
-    if (plan.paged == nullptr) {
+    Impl::PagedPlan &plan = impl_->GetPaged(layer, batch);
+    if (plan.operation == nullptr) {
         atb::infer::PagedAttentionParam pagedParam{};
         pagedParam.headNum = 16;
         pagedParam.kvHeadNum = 8;
         // RoPE-and-cache scales Q before this operation.
         pagedParam.qkScale = 1.0F;
-        CheckAtb(atb::CreateOperation(pagedParam, &plan.paged),
+        CheckAtb(atb::CreateOperation(pagedParam, &plan.operation),
                  "CreatePagedAttentionOperation");
     }
-    atb::VariantPack &pack = plan.pagedPack;
+    atb::VariantPack &pack = plan.pack;
     pack.inTensors.resize(5);
     pack.outTensors.resize(1);
     pack.inTensors[0] = MakeTensor(query, ACL_FLOAT16, ACL_FORMAT_ND, {batch, 16, 128});
@@ -223,10 +250,10 @@ bool XliteDirectAtb310P::PagedAttention(
         MakeTensor(blockTables, ACL_INT32, ACL_FORMAT_ND, {batch, tableColumns});
     pack.inTensors[4] = MakeTensor(contextLens, ACL_INT32, ACL_FORMAT_ND, {batch});
     pack.outTensors[0] = MakeTensor(output, ACL_FLOAT16, ACL_FORMAT_ND, {batch, 16, 128});
-    const bool reused = plan.pagedSignature.Update(
+    const bool reused = plan.signature.Update(
         {query, keyCache, valueCache, blockTables, contextLens, output, nullptr},
         {batch, cacheBlocks, tableColumns});
-    RunOperation(plan.paged, pack, impl_->context, acquire, release, impl_->setupCount,
+    RunOperation(plan.operation, pack, impl_->context, acquire, release, impl_->setupCount,
                  impl_->executeCount);
     return reused;
 }

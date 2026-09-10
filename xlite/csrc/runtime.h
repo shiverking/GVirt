@@ -283,12 +283,36 @@ public:
         _directAtbMixedDecodeRequests += requests;
         ++_directAtbMixedDecodeLaunches;
     }
-    void RecordDirectAtbPlan(bool reused)
+    void RecordDirectAtbCompact(uint64_t bytes)
+    {
+        ++_directAtbCompactLaunches;
+        _directAtbCompactBytes += bytes;
+    }
+    void RecordDirectAtbScatter(uint64_t bytes)
+    {
+        ++_directAtbScatterLaunches;
+        _directAtbScatterBytes += bytes;
+    }
+    void RecordDirectAtbMetadataH2D(uint64_t bytes)
+    {
+        _directAtbMetadataH2DBytes += bytes;
+    }
+    void RecordDirectAtbPlan(bool reused, bool attention)
     {
         if (reused) {
             ++_directAtbPlanReuses;
+            if (attention) {
+                ++_directAtbPagedPlanReuses;
+            } else {
+                ++_directAtbReshapePlanReuses;
+            }
         } else {
             ++_directAtbPlanRebuilds;
+            if (attention) {
+                ++_directAtbPagedPlanRebuilds;
+            } else {
+                ++_directAtbReshapePlanRebuilds;
+            }
         }
     }
 #endif
@@ -423,6 +447,22 @@ public:
     }
     [[nodiscard]] uint64_t DirectAtbPlanReuses(void) const { return _directAtbPlanReuses; }
     [[nodiscard]] uint64_t DirectAtbPlanRebuilds(void) const { return _directAtbPlanRebuilds; }
+    [[nodiscard]] uint64_t DirectAtbPagedPlanReuses(void) const
+    {
+        return _directAtbPagedPlanReuses;
+    }
+    [[nodiscard]] uint64_t DirectAtbPagedPlanRebuilds(void) const
+    {
+        return _directAtbPagedPlanRebuilds;
+    }
+    [[nodiscard]] uint64_t DirectAtbReshapePlanReuses(void) const
+    {
+        return _directAtbReshapePlanReuses;
+    }
+    [[nodiscard]] uint64_t DirectAtbReshapePlanRebuilds(void) const
+    {
+        return _directAtbReshapePlanRebuilds;
+    }
     [[nodiscard]] uint64_t DirectAtbMixedDecodeRequests(void) const
     {
         return _directAtbMixedDecodeRequests;
@@ -430,6 +470,26 @@ public:
     [[nodiscard]] uint64_t DirectAtbMixedDecodeLaunches(void) const
     {
         return _directAtbMixedDecodeLaunches;
+    }
+    [[nodiscard]] uint64_t DirectAtbCompactLaunches(void) const
+    {
+        return _directAtbCompactLaunches;
+    }
+    [[nodiscard]] uint64_t DirectAtbCompactBytes(void) const
+    {
+        return _directAtbCompactBytes;
+    }
+    [[nodiscard]] uint64_t DirectAtbScatterLaunches(void) const
+    {
+        return _directAtbScatterLaunches;
+    }
+    [[nodiscard]] uint64_t DirectAtbScatterBytes(void) const
+    {
+        return _directAtbScatterBytes;
+    }
+    [[nodiscard]] uint64_t DirectAtbMetadataH2DBytes(void) const
+    {
+        return _directAtbMetadataH2DBytes;
     }
 #endif
     [[nodiscard]] uint64_t ForwardInputEvents(void) const { return _forwardInputEvents; }
@@ -542,6 +602,11 @@ public:
     std::vector<uint32_t> _queryOffsetsHost;
     std::vector<uint32_t> _decodeRequestIndicesHost;
     std::vector<uint8_t> _directAtbProcessedRequests;
+    XTensor _decodeQueryOffsets;
+    XTensor _decodeBlockTables;
+    XTensor _decodeTotalLens;
+    uint32_t _decodeTableColumns = 0;
+    bool _decodeMetadataReady = false;
 #endif
 #ifdef XLITE_310P_LLM_FP16_POC
     // Stable page-locked sources for asynchronous attention metadata H2D.
@@ -554,6 +619,9 @@ public:
     XTensor _lensPinnedHost;
     XTensor _queryStartLocPinnedHost;
     XTensor _blockTablesPinnedHost;
+    XTensor _decodeQueryOffsetsPinnedHost;
+    XTensor _decodeBlockTablesPinnedHost;
+    XTensor _decodeTotalLensPinnedHost;
 #endif
     uint32_t _batch = 0;
     uint32_t _maxTotalLens;
@@ -656,8 +724,17 @@ protected:
     uint64_t _directAtbFusedRopeStagingBytes = 0;
     uint64_t _directAtbPlanReuses = 0;
     uint64_t _directAtbPlanRebuilds = 0;
+    uint64_t _directAtbPagedPlanReuses = 0;
+    uint64_t _directAtbPagedPlanRebuilds = 0;
+    uint64_t _directAtbReshapePlanReuses = 0;
+    uint64_t _directAtbReshapePlanRebuilds = 0;
     uint64_t _directAtbMixedDecodeRequests = 0;
     uint64_t _directAtbMixedDecodeLaunches = 0;
+    uint64_t _directAtbCompactLaunches = 0;
+    uint64_t _directAtbCompactBytes = 0;
+    uint64_t _directAtbScatterLaunches = 0;
+    uint64_t _directAtbScatterBytes = 0;
+    uint64_t _directAtbMetadataH2DBytes = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;

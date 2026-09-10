@@ -1115,25 +1115,10 @@ bool _CModel::RunNativeAtbAttention310P(
             static_cast<uint32_t>(layer), TensorPtr(key), TensorPtr(value),
             static_cast<uint32_t>(tokens), TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
             slotMapping.ptr, acquire, release);
-        rt.RecordDirectAtbPlan(reshapePlanReused);
+        rt.RecordDirectAtbPlan(reshapePlanReused, false);
         rt.RecordDirectAtbSetup();
         rt.RecordDirectAtbExecute(false);
         rt.RecordNativeAtbCacheWrite();
-
-        if (rt._linearDecodeStep) {
-            if (tokens != batch) {
-                throw std::runtime_error(
-                    "direct_atb decode requires exactly one query token per request");
-            }
-            const bool pagedPlanReused = _directAtb310P->PagedAttention(
-                static_cast<uint32_t>(layer), TensorPtr(query), batch, TensorPtr(nativeK),
-                TensorPtr(nativeV), cacheBlocks, blockTables.ptr,
-                static_cast<uint32_t>(tableColumns), totalLens.ptr, output.ptr, acquire, release);
-            rt.RecordDirectAtbPlan(pagedPlanReused);
-            rt.RecordDirectAtbSetup();
-            rt.RecordDirectAtbExecute(true, batch);
-            return true;
-        }
 
         // A normal continuous-batching step often contains one fresh ASR
         // prefill and many one-token decodes. Compact only those decode rows
@@ -1146,61 +1131,45 @@ bool _CModel::RunNativeAtbAttention310P(
         }
         if (rt._queryOffsetsHost.size() != batch ||
             rt._directAtbProcessedRequests.size() != batch ||
-            decodeBatch > _nativeMaxBatch310P) {
+            decodeBatch > _nativeMaxBatch310P || !rt._decodeMetadataReady ||
+            rt._decodeTableColumns != _nativeMaxBlocks310P ||
+            rt._decodeQueryOffsets.numel < decodeBatch ||
+            rt._decodeTotalLens.numel < decodeBatch ||
+            rt._decodeBlockTables.numel <
+                static_cast<size_t>(decodeBatch) * rt._decodeTableColumns) {
             throw std::runtime_error("direct_atb mixed decode metadata size mismatch");
         }
         at::Tensor decodeQuery =
             _nativeDecodeQueryStage310P[layer].narrow(0, 0, decodeBatch);
         at::Tensor decodeOutput =
             _nativeDecodeOutputStage310P[layer].narrow(0, 0, decodeBatch);
-        const size_t tableRowBytes = static_cast<size_t>(tableColumns) * sizeof(int32_t);
-        for (uint32_t local = 0; local < decodeBatch; ++local) {
-            const uint32_t request = rt._decodeRequestIndicesHost[local];
-            if (request >= batch || rt._lensHost[request] != 1 ||
-                rt._cachedLensHost[request] == 0) {
-                throw std::runtime_error("direct_atb mixed decode index is invalid");
-            }
-            const size_t queryOffset = rt._queryOffsetsHost[request];
-            CHECK_ACL(aclrtMemcpyAsync(
-                static_cast<uint8_t *>(TensorPtr(decodeQuery)) + local * qBytes,
-                TorchTensorBytes(decodeQuery) - local * qBytes,
-                static_cast<const uint8_t *>(TensorPtr(query)) + queryOffset * qBytes,
-                qBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            CHECK_ACL(aclrtMemcpyAsync(
-                static_cast<uint8_t *>(TensorPtr(_nativeBlockTableStage310P)) +
-                    static_cast<size_t>(local) * tableRowBytes,
-                TorchTensorBytes(_nativeBlockTableStage310P) -
-                    static_cast<size_t>(local) * tableRowBytes,
-                static_cast<const uint8_t *>(blockTables.ptr) +
-                    static_cast<size_t>(request) * tableRowBytes,
-                tableRowBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            CHECK_ACL(aclrtMemcpyAsync(
-                static_cast<uint8_t *>(TensorPtr(_nativeTotalLensStage310P)) +
-                    static_cast<size_t>(local) * sizeof(int32_t),
-                TorchTensorBytes(_nativeTotalLensStage310P) -
-                    static_cast<size_t>(local) * sizeof(int32_t),
-                static_cast<const uint8_t *>(totalLens.ptr) +
-                    static_cast<size_t>(request) * sizeof(int32_t),
-                sizeof(int32_t), ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt._directAtbProcessedRequests[request] = 1;
+        if (!rt._linearDecodeStep) {
+            XliteOpMixedDecodeCopy310P(rt, TensorPtr(query), TensorPtr(decodeQuery),
+                                       rt._decodeQueryOffsets, decodeBatch, false);
+            rt.RecordDirectAtbCompact(static_cast<uint64_t>(decodeBatch) * qBytes);
         }
         const bool pagedPlanReused = _directAtb310P->PagedAttention(
             static_cast<uint32_t>(layer), TensorPtr(decodeQuery), decodeBatch,
             TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
-            TensorPtr(_nativeBlockTableStage310P), static_cast<uint32_t>(tableColumns),
-            TensorPtr(_nativeTotalLensStage310P), TensorPtr(decodeOutput), acquire, release);
-        rt.RecordDirectAtbPlan(pagedPlanReused);
+            rt._decodeBlockTables.ptr, rt._decodeTableColumns,
+            rt._decodeTotalLens.ptr, TensorPtr(decodeOutput), acquire, release);
+        rt.RecordDirectAtbPlan(pagedPlanReused, true);
         rt.RecordDirectAtbSetup();
         rt.RecordDirectAtbExecute(true, decodeBatch);
+        if (rt._linearDecodeStep) {
+            CHECK_ACL(aclrtMemcpyAsync(output.ptr, output.bytes,
+                                       TensorPtr(decodeOutput),
+                                       static_cast<size_t>(decodeBatch) * qBytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            rt.RecordDirectAtbScatter(static_cast<uint64_t>(decodeBatch) * qBytes);
+            return true;
+        }
         rt.RecordDirectAtbMixedDecode(decodeBatch);
-        for (uint32_t local = 0; local < decodeBatch; ++local) {
-            const uint32_t request = rt._decodeRequestIndicesHost[local];
-            const size_t queryOffset = rt._queryOffsetsHost[request];
-            CHECK_ACL(aclrtMemcpyAsync(
-                static_cast<uint8_t *>(output.ptr) + queryOffset * qBytes,
-                output.bytes - queryOffset * qBytes,
-                static_cast<const uint8_t *>(TensorPtr(decodeOutput)) + local * qBytes,
-                qBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        XliteOpMixedDecodeCopy310P(rt, TensorPtr(decodeOutput), output.ptr,
+                                   rt._decodeQueryOffsets, decodeBatch, true);
+        rt.RecordDirectAtbScatter(static_cast<uint64_t>(decodeBatch) * qBytes);
+        for (uint32_t request : rt._decodeRequestIndicesHost) {
+            rt._directAtbProcessedRequests[request] = 1;
         }
         return false;
     }
@@ -3015,11 +2984,14 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
-        info["direct_atb_runtime_version"] = 4;
-        info["direct_atb_operation_scope"] = "per_layer";
+        info["direct_atb_runtime_version"] = 5;
+        info["direct_atb_operation_scope"] = "per_layer_batch";
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
         info["direct_atb_mixed_batch_decode"] = true;
+        info["direct_atb_batched_compact_scatter"] = true;
+        info["direct_atb_plan_cache"] = "layer_batch";
+        info["direct_atb_metadata_upload"] = "once_per_forward";
         info["batched_prefill_attention"] = true;
         info["batched_prefill_attention_api"] = "PromptFlashAttentionV1_exact_shape";
         info["batched_prefill_micro_batch"] = 4;
@@ -3116,10 +3088,23 @@ PYBIND11_MODULE(_C, m)
             rt.DirectAtbFusedRopeStagingBytes();
         stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
         stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
+        stats["direct_atb_paged_plan_reuses"] = rt.DirectAtbPagedPlanReuses();
+        stats["direct_atb_paged_plan_rebuilds"] =
+            rt.DirectAtbPagedPlanRebuilds();
+        stats["direct_atb_reshape_plan_reuses"] =
+            rt.DirectAtbReshapePlanReuses();
+        stats["direct_atb_reshape_plan_rebuilds"] =
+            rt.DirectAtbReshapePlanRebuilds();
         stats["direct_atb_mixed_decode_requests"] =
             rt.DirectAtbMixedDecodeRequests();
         stats["direct_atb_mixed_decode_launches"] =
             rt.DirectAtbMixedDecodeLaunches();
+        stats["direct_atb_compact_launches"] = rt.DirectAtbCompactLaunches();
+        stats["direct_atb_compact_bytes"] = rt.DirectAtbCompactBytes();
+        stats["direct_atb_scatter_launches"] = rt.DirectAtbScatterLaunches();
+        stats["direct_atb_scatter_bytes"] = rt.DirectAtbScatterBytes();
+        stats["direct_atb_metadata_h2d_bytes"] =
+            rt.DirectAtbMetadataH2DBytes();
         stats["forward_input_events"] = rt.ForwardInputEvents();
         stats["forward_output_events"] = rt.ForwardOutputEvents();
         return stats;
@@ -3223,10 +3208,24 @@ PYBIND11_MODULE(_C, m)
                 rt.DirectAtbFusedRopeStagingBytes();
             stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
             stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
+            stats["direct_atb_paged_plan_reuses"] =
+                rt.DirectAtbPagedPlanReuses();
+            stats["direct_atb_paged_plan_rebuilds"] =
+                rt.DirectAtbPagedPlanRebuilds();
+            stats["direct_atb_reshape_plan_reuses"] =
+                rt.DirectAtbReshapePlanReuses();
+            stats["direct_atb_reshape_plan_rebuilds"] =
+                rt.DirectAtbReshapePlanRebuilds();
             stats["direct_atb_mixed_decode_requests"] =
                 rt.DirectAtbMixedDecodeRequests();
             stats["direct_atb_mixed_decode_launches"] =
                 rt.DirectAtbMixedDecodeLaunches();
+            stats["direct_atb_compact_launches"] = rt.DirectAtbCompactLaunches();
+            stats["direct_atb_compact_bytes"] = rt.DirectAtbCompactBytes();
+            stats["direct_atb_scatter_launches"] = rt.DirectAtbScatterLaunches();
+            stats["direct_atb_scatter_bytes"] = rt.DirectAtbScatterBytes();
+            stats["direct_atb_metadata_h2d_bytes"] =
+                rt.DirectAtbMetadataH2DBytes();
 #endif
             stats["forward_input_events"] = rt.ForwardInputEvents();
             stats["forward_output_events"] = rt.ForwardOutputEvents();

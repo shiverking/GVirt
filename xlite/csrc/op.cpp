@@ -47,6 +47,34 @@ void XliteOpProbe310P(XRuntime &rt, XTensor &out, uint32_t value)
 #endif
 }
 
+void XliteOpMixedDecodeCopy310P(XRuntime &rt, void *source, void *destination,
+                                XTensor &queryOffsets, uint32_t rows, bool scatter)
+{
+    if (IsDummyRuntime(rt) || rows == 0) {
+        return;
+    }
+#ifdef XLITE_ARCH_310P
+    if (source == nullptr || destination == nullptr || queryOffsets.ptr == nullptr ||
+        queryOffsets.dtype != INT32 || queryOffsets.numel < rows || rows > 20) {
+        throw std::invalid_argument("invalid Ascend310P mixed decode copy arguments");
+    }
+    const uint32_t blocks = std::min(rt.aivNum, rows);
+    if (scatter) {
+        aclrtlaunch_mixed_decode_scatter_float16_t(
+            blocks, rt.stream, source, destination, queryOffsets.ptr, rows);
+    } else {
+        aclrtlaunch_mixed_decode_compact_float16_t(
+            blocks, rt.stream, source, destination, queryOffsets.ptr, rows);
+    }
+#else
+    (void)source;
+    (void)destination;
+    (void)queryOffsets;
+    (void)scatter;
+    throw std::runtime_error("Ascend310P mixed decode copy is unavailable");
+#endif
+}
+
 void XliteOpOfficialAddProbe310P(XRuntime &rt, XTensor &x, XTensor &y, XTensor &z)
 {
     if (IsDummyRuntime(rt)) {

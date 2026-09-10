@@ -206,6 +206,17 @@ XRuntime::~XRuntime(void)
     if (_blockTables.ptr) {
         (void)aclrtFree(_blockTables.ptr);
     }
+#ifdef XLITE_ARCH_310P
+    if (_decodeQueryOffsets.ptr) {
+        (void)aclrtFree(_decodeQueryOffsets.ptr);
+    }
+    if (_decodeBlockTables.ptr) {
+        (void)aclrtFree(_decodeBlockTables.ptr);
+    }
+    if (_decodeTotalLens.ptr) {
+        (void)aclrtFree(_decodeTotalLens.ptr);
+    }
+#endif
 #ifdef XLITE_310P_LLM_FP16_POC
     if (_positionPinnedHost.ptr) {
         (void)aclrtFreeHost(_positionPinnedHost.ptr);
@@ -227,6 +238,15 @@ XRuntime::~XRuntime(void)
     }
     if (_blockTablesPinnedHost.ptr) {
         (void)aclrtFreeHost(_blockTablesPinnedHost.ptr);
+    }
+    if (_decodeQueryOffsetsPinnedHost.ptr) {
+        (void)aclrtFreeHost(_decodeQueryOffsetsPinnedHost.ptr);
+    }
+    if (_decodeBlockTablesPinnedHost.ptr) {
+        (void)aclrtFreeHost(_decodeBlockTablesPinnedHost.ptr);
+    }
+    if (_decodeTotalLensPinnedHost.ptr) {
+        (void)aclrtFreeHost(_decodeTotalLensPinnedHost.ptr);
     }
 #endif
     if (_tokensPerEpGroupAllEpHost.ptr) {
@@ -485,6 +505,15 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
     size = maxBatch * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _totalLens.Init({maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _decodeQueryOffsets.Init({maxBatch}, INT32, ptr);
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _decodeTotalLens.Init({maxBatch}, INT32, ptr);
+    _decodeTableColumns = DIV_ROUND_UP(maxSeqLen, blockSizes[0]);
+    size = maxBatch * _decodeTableColumns * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _decodeBlockTables.Init({maxBatch, _decodeTableColumns}, INT32, ptr);
 #endif
 
     switch (attnMeta.version) {
@@ -537,6 +566,10 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
         allocPinned(_lensPinnedHost, {maxBatch}, INT32);
         allocPinned(_queryStartLocPinnedHost, {maxBatch}, INT32);
         allocPinned(_blockTablesPinnedHost,
+                    {maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32);
+        allocPinned(_decodeQueryOffsetsPinnedHost, {maxBatch}, INT32);
+        allocPinned(_decodeTotalLensPinnedHost, {maxBatch}, INT32);
+        allocPinned(_decodeBlockTablesPinnedHost,
                     {maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32);
     }
 #endif
@@ -851,6 +884,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
     }
     _directAtbProcessedRequests.assign(batch, 0);
+    _decodeMetadataReady = false;
 
     // Record scheduler shapes once per forward, before the 28 decoder layers
     // consume the same metadata.  A request is prefill when it has more than
@@ -1003,6 +1037,54 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnBlockTables = {_blockTables};
             _attnBlockTables[0].View({batch, maxNumBlocks});
+#ifdef XLITE_310P_LLM_FP16_POC
+            if (UseDirectAtbDecodeAttention310P() &&
+                !_decodeRequestIndicesHost.empty()) {
+                if (maxNumBlocks > _decodeTableColumns) {
+                    throw std::runtime_error(
+                        "Ascend310P compact decode block table exceeds runtime capacity");
+                }
+                const uint32_t decodeBatch =
+                    static_cast<uint32_t>(_decodeRequestIndicesHost.size());
+                auto *decodeOffsets = static_cast<uint32_t *>(
+                    _decodeQueryOffsetsPinnedHost.ptr);
+                auto *decodeLens = static_cast<uint32_t *>(
+                    _decodeTotalLensPinnedHost.ptr);
+                auto *decodeTables = static_cast<uint32_t *>(
+                    _decodeBlockTablesPinnedHost.ptr);
+                std::memset(decodeTables, 0,
+                            static_cast<size_t>(decodeBatch) * _decodeTableColumns *
+                                sizeof(uint32_t));
+                for (uint32_t local = 0; local < decodeBatch; ++local) {
+                    const uint32_t request = _decodeRequestIndicesHost[local];
+                    decodeOffsets[local] = queryStartLoc[request];
+                    decodeLens[local] = totalLens[request];
+                    std::memcpy(decodeTables +
+                                    static_cast<size_t>(local) * _decodeTableColumns,
+                                blockTables.data() +
+                                    static_cast<size_t>(request) * maxNumBlocks,
+                                static_cast<size_t>(maxNumBlocks) * sizeof(uint32_t));
+                }
+                const size_t offsetsBytes =
+                    static_cast<size_t>(decodeBatch) * sizeof(uint32_t);
+                const size_t lensBytes = offsetsBytes;
+                const size_t tablesBytes = static_cast<size_t>(decodeBatch) *
+                                           _decodeTableColumns * sizeof(uint32_t);
+                CHECK_ACL(aclrtMemcpyAsync(
+                    _decodeQueryOffsets.ptr, offsetsBytes,
+                    _decodeQueryOffsetsPinnedHost.ptr, offsetsBytes,
+                    ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                CHECK_ACL(aclrtMemcpyAsync(
+                    _decodeTotalLens.ptr, lensBytes, _decodeTotalLensPinnedHost.ptr,
+                    lensBytes, ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                CHECK_ACL(aclrtMemcpyAsync(
+                    _decodeBlockTables.ptr, tablesBytes,
+                    _decodeBlockTablesPinnedHost.ptr, tablesBytes,
+                    ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                RecordDirectAtbMetadataH2D(offsetsBytes + lensBytes + tablesBytes);
+                _decodeMetadataReady = true;
+            }
+#endif
             if (attnMeta.version == 0) {
                 size = batchedTokens * XDtypeBit(INT64) / 8;
 #ifdef XLITE_310P_LLM_FP16_POC

@@ -213,6 +213,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/qk_rms_norm_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/rope_and_cache_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/silu_and_mul_float16_t.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/mixed_decode_copy_float16_t.cpp
     )
     # Keep the official Add baseline in a one-kernel library.  The passing
     # AddKernelInvocationNeo sample produces a default AIC device object;
