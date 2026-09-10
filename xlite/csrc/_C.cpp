@@ -2955,7 +2955,7 @@ PYBIND11_MODULE(_C, m)
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
         info["batched_prefill_attention"] = true;
-        info["batched_prefill_attention_api"] = "PromptFlashAttentionV2";
+        info["batched_prefill_attention_api"] = "PromptFlashAttentionV1_exact_shape";
         info["batched_prefill_micro_batch"] = 4;
         info["default_batched_prefill_attention"] = false;
         info["batched_prefill_status"] = "experimental_shape_probe";

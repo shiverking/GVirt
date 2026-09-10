@@ -331,32 +331,17 @@ static bool RunBatchedDecodeAttention(XRuntime &rt, XTensor &qkv, XTensor &kCach
 }
 
 // ASR prefill requests commonly arrive with identical encoder lengths. Batch
-// those requests into one PromptFlashAttentionV2 call instead of submitting
-// one ACLNN operation per request. Exact (query,cached) grouping lets all rows
-// share the already validated 2D causal mask. Micro-batches are capped at four
-// so the padded Q/K/V/output tensors remain comfortably inside the fixed pool
-// even at the 2048-token limit.
+// those requests into one invocation of the same PromptFlashAttention V1 API
+// used by the verified per-request fallback. V2 produced stable but incorrect
+// results for the real q=205 batch on 310P, while V1 needs no actual-sequence
+// arrays for these exact-shape groups. Micro-batches are capped at four so the
+// padded tensors remain comfortably inside the fixed pool.
 static void RunBatchedPrefillAttention(
     XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &output,
     uint32_t maxNumBlock, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
     uint32_t blockSize, uint32_t batch, const std::vector<size_t> &queryOffsets,
     std::vector<bool> &processed)
 {
-#if !XLITE_310P_HAS_PROMPT_FA_V2
-    (void)rt;
-    (void)qkv;
-    (void)kCache;
-    (void)vCache;
-    (void)output;
-    (void)maxNumBlock;
-    (void)nHeads;
-    (void)nKvHeads;
-    (void)headDim;
-    (void)blockSize;
-    (void)batch;
-    (void)queryOffsets;
-    (void)processed;
-#else
     using GroupKey = std::tuple<uint32_t, uint32_t>;
     std::map<GroupKey, std::vector<uint32_t>> groups;
     for (uint32_t request = 0; request < batch; ++request) {
@@ -469,27 +454,15 @@ static void RunBatchedPrefillAttention(
                 qDims, ContiguousStrides(qDims), ACL_FLOAT16, packedOutput.ptr));
             AclTensorGuard aclMask(CreateTensor(
                 maskDims, ContiguousStrides(maskDims), ACL_BOOL, causalMask.ptr));
-            std::vector<int64_t> queryLengths(microBatch, queryLength);
-            std::vector<int64_t> kvLengths(microBatch, totalLength);
-            AclIntArrayGuard actualQueryLengths(
-                aclCreateIntArray(queryLengths.data(), queryLengths.size()));
-            AclIntArrayGuard actualKvLengths(
-                aclCreateIntArray(kvLengths.data(), kvLengths.size()));
-            if (actualQueryLengths.get() == nullptr || actualKvLengths.get() == nullptr) {
-                throw std::runtime_error(
-                    "aclCreateIntArray returned nullptr for batched prefill lengths");
-            }
-
             uint64_t workspaceSize = 0;
             aclOpExecutor *executor = nullptr;
-            CHECK_ACL(aclnnPromptFlashAttentionV2GetWorkspaceSize(
+            CHECK_ACL(aclnnPromptFlashAttentionGetWorkspaceSize(
                 aclQuery.get(), aclKey.get(), aclValue.get(), nullptr, aclMask.get(),
-                actualQueryLengths.get(), actualKvLengths.get(), nullptr, nullptr, nullptr,
-                nullptr, nullptr, nHeads, 1.0, 2147483647, 2147483647,
-                const_cast<char *>("BSND"), nKvHeads, 0, aclOutput.get(),
+                nullptr, nHeads, 1.0, 2147483647, 2147483647,
+                const_cast<char *>("BSND"), nKvHeads, aclOutput.get(),
                 &workspaceSize, &executor));
             XTensor *workspace = GetWorkspace(rt, workspaceSize, true);
-            CHECK_ACL(aclnnPromptFlashAttentionV2(
+            CHECK_ACL(aclnnPromptFlashAttention(
                 workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
                 executor, rt.stream));
             FinishAclnn(rt, workspace, true);
@@ -514,7 +487,6 @@ static void RunBatchedPrefillAttention(
             rt.PutTensor(packedQuery);
         }
     }
-#endif
 }
 
 }  // namespace
