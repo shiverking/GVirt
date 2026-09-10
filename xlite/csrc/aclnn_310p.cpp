@@ -657,6 +657,12 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         runningQueryOffset += rt._lensHost[request];
     }
     std::vector<bool> batchedPrefillProcessed(batch, false);
+    if (rt._directAtbProcessedRequests.size() == batch) {
+        for (uint32_t request = 0; request < batch; ++request) {
+            batchedPrefillProcessed[request] =
+                rt._directAtbProcessedRequests[request] != 0;
+        }
+    }
     if (rt.UseDirectAtbDecodeAttention310P() &&
         rt.UseBatchedPrefillAttention310P()) {
         RunBatchedPrefillAttention(
@@ -670,7 +676,6 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         if (batchedPrefillProcessed[request]) {
             continue;
         }
-        rt.RecordLegacyAttentionRequest();
         const size_t queryOffset = queryOffsets[request];
         const uint32_t queryLength = rt._lensHost[request];
         const uint32_t cachedLength = rt._cachedLensHost[request];
@@ -680,6 +685,7 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                                      std::to_string(XLITE_310P_MAX_SEQ_LEN) + "]");
         }
         const bool isDecode = queryLength == 1 && cachedLength > 0;
+        rt.RecordLegacyAttentionRequest(isDecode);
         const std::vector<uint32_t> blocks = GetRequestBlocks(
             rt, request, totalLength, blockSize, maxNumBlock, kCache.shape[0]);
         XTensor &query = ExtractQuery(rt, qkv, queryOffset, queryLength,

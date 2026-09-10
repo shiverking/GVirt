@@ -230,9 +230,14 @@ public:
         _batchedDecodeAttentionRequests += requests;
         ++_batchedDecodeAttentionLaunches;
     }
-    void RecordLegacyAttentionRequest(void)
+    void RecordLegacyAttentionRequest(bool decode)
     {
         ++_legacyAttentionRequests;
+        if (decode) {
+            ++_legacyDecodeAttentionRequests;
+        } else {
+            ++_legacyPrefillAttentionRequests;
+        }
     }
     void RecordDecodeKvGatherBytes(uint64_t bytes)
     {
@@ -272,6 +277,11 @@ public:
         } else {
             ++_directAtbReshapeLaunches;
         }
+    }
+    void RecordDirectAtbMixedDecode(uint32_t requests)
+    {
+        _directAtbMixedDecodeRequests += requests;
+        ++_directAtbMixedDecodeLaunches;
     }
     void RecordDirectAtbPlan(bool reused)
     {
@@ -364,6 +374,14 @@ public:
     {
         return _legacyAttentionRequests;
     }
+    [[nodiscard]] uint64_t LegacyDecodeAttentionRequests(void) const
+    {
+        return _legacyDecodeAttentionRequests;
+    }
+    [[nodiscard]] uint64_t LegacyPrefillAttentionRequests(void) const
+    {
+        return _legacyPrefillAttentionRequests;
+    }
     [[nodiscard]] uint64_t DecodeKvGatherBytes(void) const
     {
         return _decodeKvGatherBytes;
@@ -405,6 +423,14 @@ public:
     }
     [[nodiscard]] uint64_t DirectAtbPlanReuses(void) const { return _directAtbPlanReuses; }
     [[nodiscard]] uint64_t DirectAtbPlanRebuilds(void) const { return _directAtbPlanRebuilds; }
+    [[nodiscard]] uint64_t DirectAtbMixedDecodeRequests(void) const
+    {
+        return _directAtbMixedDecodeRequests;
+    }
+    [[nodiscard]] uint64_t DirectAtbMixedDecodeLaunches(void) const
+    {
+        return _directAtbMixedDecodeLaunches;
+    }
 #endif
     [[nodiscard]] uint64_t ForwardInputEvents(void) const { return _forwardInputEvents; }
     [[nodiscard]] uint64_t ForwardOutputEvents(void) const { return _forwardOutputEvents; }
@@ -510,6 +536,13 @@ public:
     // every other architecture.
     std::vector<uint32_t> _lensHost;
     std::vector<uint32_t> _blockTablesHost;
+#ifdef XLITE_ARCH_310P
+    // Computed once in PrepareAttn and shared by all decoder layers. Direct
+    // ATB uses these indices to compact only the decode rows of a mixed batch.
+    std::vector<uint32_t> _queryOffsetsHost;
+    std::vector<uint32_t> _decodeRequestIndicesHost;
+    std::vector<uint8_t> _directAtbProcessedRequests;
+#endif
 #ifdef XLITE_310P_LLM_FP16_POC
     // Stable page-locked sources for asynchronous attention metadata H2D.
     // The std::vectors above remain the host source of truth shared by all
@@ -607,6 +640,8 @@ protected:
     uint64_t _aclnnMatmulSynchronizations = 0;
     uint64_t _lmHeadSynchronizations = 0;
     uint64_t _legacyAttentionRequests = 0;
+    uint64_t _legacyDecodeAttentionRequests = 0;
+    uint64_t _legacyPrefillAttentionRequests = 0;
     uint64_t _decodeKvGatherBytes = 0;
     uint64_t _nativeAtbDecodeRequests = 0;
     uint64_t _nativeAtbDecodeLaunches = 0;
@@ -621,6 +656,8 @@ protected:
     uint64_t _directAtbFusedRopeStagingBytes = 0;
     uint64_t _directAtbPlanReuses = 0;
     uint64_t _directAtbPlanRebuilds = 0;
+    uint64_t _directAtbMixedDecodeRequests = 0;
+    uint64_t _directAtbMixedDecodeLaunches = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;

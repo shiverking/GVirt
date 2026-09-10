@@ -1093,6 +1093,7 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
             throw std::runtime_error(
                 "Ascend310P native_atb attention requires native 5D/NZ KV caches");
         }
+        rt._directAtbProcessedRequests.assign(batch, 0);
         const bool handled = rt.nativeAtbAttentionCallback(
             qkv, kCache, vCache, output, rt._attnSlotMapping[0], blockTables,
             rt._attnTotalLens, nHeads, nKvHeads, headDim, batch);

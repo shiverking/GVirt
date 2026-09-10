@@ -944,12 +944,12 @@ bool _CModel::PrepareNativeAtbRopeStages310P(XRuntime &rt, XTensor &kCache, uint
         layer >= _directAtbRopeStaged310P.size()) {
         return false;
     }
-    at::Tensor &queryStage =
-        rt._decodeStep ? _nativeDecodeQueryStage310P[layer] : _nativeQueryStage310P;
-    at::Tensor &keyStage =
-        rt._decodeStep ? _nativeDecodeKeyStage310P[layer] : _nativeKeyStage310P;
-    at::Tensor &valueStage =
-        rt._decodeStep ? _nativeDecodeValueStage310P[layer] : _nativeValueStage310P;
+    at::Tensor &queryStage = rt._linearDecodeStep ? _nativeDecodeQueryStage310P[layer]
+                                                  : _nativeQueryStage310P;
+    at::Tensor &keyStage = rt._linearDecodeStep ? _nativeDecodeKeyStage310P[layer]
+                                                : _nativeKeyStage310P;
+    at::Tensor &valueStage = rt._linearDecodeStep ? _nativeDecodeValueStage310P[layer]
+                                                  : _nativeValueStage310P;
     query = TensorPtr(queryStage);
     key = TensorPtr(keyStage);
     value = TensorPtr(valueStage);
@@ -1043,12 +1043,12 @@ bool _CModel::RunNativeAtbAttention310P(
         throw std::runtime_error("native_atb QKV input is not tightly packed");
     }
     const auto *qkvBytes = static_cast<const uint8_t *>(qkv.ptr);
-    at::Tensor &queryStage = rt._decodeStep ? _nativeDecodeQueryStage310P[layer]
-                                            : _nativeQueryStage310P;
-    at::Tensor &keyStage = rt._decodeStep ? _nativeDecodeKeyStage310P[layer]
-                                          : _nativeKeyStage310P;
-    at::Tensor &valueStage = rt._decodeStep ? _nativeDecodeValueStage310P[layer]
-                                            : _nativeValueStage310P;
+    at::Tensor &queryStage = rt._linearDecodeStep ? _nativeDecodeQueryStage310P[layer]
+                                                  : _nativeQueryStage310P;
+    at::Tensor &keyStage = rt._linearDecodeStep ? _nativeDecodeKeyStage310P[layer]
+                                                : _nativeKeyStage310P;
+    at::Tensor &valueStage = rt._linearDecodeStep ? _nativeDecodeValueStage310P[layer]
+                                                  : _nativeValueStage310P;
     const bool fusedRopeStages = rt.UseDirectAtbDecodeAttention310P() &&
                                  layer < _directAtbRopeStaged310P.size() &&
                                  _directAtbRopeStaged310P[layer] != 0;
@@ -1120,24 +1120,89 @@ bool _CModel::RunNativeAtbAttention310P(
         rt.RecordDirectAtbExecute(false);
         rt.RecordNativeAtbCacheWrite();
 
-        if (!rt._decodeStep) {
-            // Direct ATB and all Xlite kernels are submitted to rt.stream. The
-            // next layer may safely reuse the shared staging buffers without a
-            // host-side synchronization.
+        if (rt._linearDecodeStep) {
+            if (tokens != batch) {
+                throw std::runtime_error(
+                    "direct_atb decode requires exactly one query token per request");
+            }
+            const bool pagedPlanReused = _directAtb310P->PagedAttention(
+                static_cast<uint32_t>(layer), TensorPtr(query), batch, TensorPtr(nativeK),
+                TensorPtr(nativeV), cacheBlocks, blockTables.ptr,
+                static_cast<uint32_t>(tableColumns), totalLens.ptr, output.ptr, acquire, release);
+            rt.RecordDirectAtbPlan(pagedPlanReused);
+            rt.RecordDirectAtbSetup();
+            rt.RecordDirectAtbExecute(true, batch);
+            return true;
+        }
+
+        // A normal continuous-batching step often contains one fresh ASR
+        // prefill and many one-token decodes. Compact only those decode rows
+        // and submit one PagedAttention operation instead of forcing every
+        // request through the per-request ACLNN fallback.
+        const uint32_t decodeBatch =
+            static_cast<uint32_t>(rt._decodeRequestIndicesHost.size());
+        if (decodeBatch == 0) {
             return false;
         }
-        if (tokens != batch) {
-            throw std::runtime_error(
-                "direct_atb decode requires exactly one query token per request");
+        if (rt._queryOffsetsHost.size() != batch ||
+            rt._directAtbProcessedRequests.size() != batch ||
+            decodeBatch > _nativeMaxBatch310P) {
+            throw std::runtime_error("direct_atb mixed decode metadata size mismatch");
+        }
+        at::Tensor decodeQuery =
+            _nativeDecodeQueryStage310P[layer].narrow(0, 0, decodeBatch);
+        at::Tensor decodeOutput =
+            _nativeDecodeOutputStage310P[layer].narrow(0, 0, decodeBatch);
+        const size_t tableRowBytes = static_cast<size_t>(tableColumns) * sizeof(int32_t);
+        for (uint32_t local = 0; local < decodeBatch; ++local) {
+            const uint32_t request = rt._decodeRequestIndicesHost[local];
+            if (request >= batch || rt._lensHost[request] != 1 ||
+                rt._cachedLensHost[request] == 0) {
+                throw std::runtime_error("direct_atb mixed decode index is invalid");
+            }
+            const size_t queryOffset = rt._queryOffsetsHost[request];
+            CHECK_ACL(aclrtMemcpyAsync(
+                static_cast<uint8_t *>(TensorPtr(decodeQuery)) + local * qBytes,
+                TorchTensorBytes(decodeQuery) - local * qBytes,
+                static_cast<const uint8_t *>(TensorPtr(query)) + queryOffset * qBytes,
+                qBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            CHECK_ACL(aclrtMemcpyAsync(
+                static_cast<uint8_t *>(TensorPtr(_nativeBlockTableStage310P)) +
+                    static_cast<size_t>(local) * tableRowBytes,
+                TorchTensorBytes(_nativeBlockTableStage310P) -
+                    static_cast<size_t>(local) * tableRowBytes,
+                static_cast<const uint8_t *>(blockTables.ptr) +
+                    static_cast<size_t>(request) * tableRowBytes,
+                tableRowBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            CHECK_ACL(aclrtMemcpyAsync(
+                static_cast<uint8_t *>(TensorPtr(_nativeTotalLensStage310P)) +
+                    static_cast<size_t>(local) * sizeof(int32_t),
+                TorchTensorBytes(_nativeTotalLensStage310P) -
+                    static_cast<size_t>(local) * sizeof(int32_t),
+                static_cast<const uint8_t *>(totalLens.ptr) +
+                    static_cast<size_t>(request) * sizeof(int32_t),
+                sizeof(int32_t), ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            rt._directAtbProcessedRequests[request] = 1;
         }
         const bool pagedPlanReused = _directAtb310P->PagedAttention(
-            static_cast<uint32_t>(layer), TensorPtr(query), batch, TensorPtr(nativeK),
-            TensorPtr(nativeV), cacheBlocks, blockTables.ptr,
-            static_cast<uint32_t>(tableColumns), totalLens.ptr, output.ptr, acquire, release);
+            static_cast<uint32_t>(layer), TensorPtr(decodeQuery), decodeBatch,
+            TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
+            TensorPtr(_nativeBlockTableStage310P), static_cast<uint32_t>(tableColumns),
+            TensorPtr(_nativeTotalLensStage310P), TensorPtr(decodeOutput), acquire, release);
         rt.RecordDirectAtbPlan(pagedPlanReused);
         rt.RecordDirectAtbSetup();
-        rt.RecordDirectAtbExecute(true, batch);
-        return true;
+        rt.RecordDirectAtbExecute(true, decodeBatch);
+        rt.RecordDirectAtbMixedDecode(decodeBatch);
+        for (uint32_t local = 0; local < decodeBatch; ++local) {
+            const uint32_t request = rt._decodeRequestIndicesHost[local];
+            const size_t queryOffset = rt._queryOffsetsHost[request];
+            CHECK_ACL(aclrtMemcpyAsync(
+                static_cast<uint8_t *>(output.ptr) + queryOffset * qBytes,
+                output.bytes - queryOffset * qBytes,
+                static_cast<const uint8_t *>(TensorPtr(decodeOutput)) + local * qBytes,
+                qBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        }
+        return false;
     }
 #endif
 
@@ -2950,10 +3015,11 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
-        info["direct_atb_runtime_version"] = 3;
+        info["direct_atb_runtime_version"] = 4;
         info["direct_atb_operation_scope"] = "per_layer";
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
+        info["direct_atb_mixed_batch_decode"] = true;
         info["batched_prefill_attention"] = true;
         info["batched_prefill_attention_api"] = "PromptFlashAttentionV1_exact_shape";
         info["batched_prefill_micro_batch"] = 4;
@@ -3031,6 +3097,10 @@ PYBIND11_MODULE(_C, m)
             rt.AclnnMatmulSynchronizations();
         stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
         stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
+        stats["legacy_decode_attention_requests"] =
+            rt.LegacyDecodeAttentionRequests();
+        stats["legacy_prefill_attention_requests"] =
+            rt.LegacyPrefillAttentionRequests();
         stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
         stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
         stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
@@ -3046,6 +3116,10 @@ PYBIND11_MODULE(_C, m)
             rt.DirectAtbFusedRopeStagingBytes();
         stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
         stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
+        stats["direct_atb_mixed_decode_requests"] =
+            rt.DirectAtbMixedDecodeRequests();
+        stats["direct_atb_mixed_decode_launches"] =
+            rt.DirectAtbMixedDecodeLaunches();
         stats["forward_input_events"] = rt.ForwardInputEvents();
         stats["forward_output_events"] = rt.ForwardOutputEvents();
         return stats;
@@ -3130,6 +3204,10 @@ PYBIND11_MODULE(_C, m)
                 rt.AclnnMatmulSynchronizations();
             stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
             stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
+            stats["legacy_decode_attention_requests"] =
+                rt.LegacyDecodeAttentionRequests();
+            stats["legacy_prefill_attention_requests"] =
+                rt.LegacyPrefillAttentionRequests();
             stats["decode_kv_gather_bytes"] = rt.DecodeKvGatherBytes();
             stats["native_atb_decode_requests"] = rt.NativeAtbDecodeRequests();
             stats["native_atb_decode_launches"] = rt.NativeAtbDecodeLaunches();
@@ -3145,6 +3223,10 @@ PYBIND11_MODULE(_C, m)
                 rt.DirectAtbFusedRopeStagingBytes();
             stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
             stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
+            stats["direct_atb_mixed_decode_requests"] =
+                rt.DirectAtbMixedDecodeRequests();
+            stats["direct_atb_mixed_decode_launches"] =
+                rt.DirectAtbMixedDecodeLaunches();
 #endif
             stats["forward_input_events"] = rt.ForwardInputEvents();
             stats["forward_output_events"] = rt.ForwardOutputEvents();

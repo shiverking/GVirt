@@ -842,6 +842,16 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     _cachedLensHost = cachedLens;
 
 #ifdef XLITE_ARCH_310P
+    _queryOffsetsHost = queryStartLoc;
+    _decodeRequestIndicesHost.clear();
+    _decodeRequestIndicesHost.reserve(batch);
+    for (uint32_t i = 0; i < batch; ++i) {
+        if (lens[i] == 1 && cachedLens[i] > 0) {
+            _decodeRequestIndicesHost.push_back(i);
+        }
+    }
+    _directAtbProcessedRequests.assign(batch, 0);
+
     // Record scheduler shapes once per forward, before the 28 decoder layers
     // consume the same metadata.  A request is prefill when it has more than
     // one query token or no cached KV; ordinary one-token decode is excluded.
