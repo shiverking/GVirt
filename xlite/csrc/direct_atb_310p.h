@@ -23,12 +23,12 @@ public:
     XliteDirectAtb310P &operator=(const XliteDirectAtb310P &) = delete;
 
     void SetStream(aclrtStream stream);
-    void ReshapeAndCache(void *key, void *value, uint32_t tokens, void *keyCache,
-                         void *valueCache, uint32_t cacheBlocks, void *slots,
+    bool ReshapeAndCache(uint32_t layer, void *key, void *value, uint32_t tokens,
+                         void *keyCache, void *valueCache, uint32_t cacheBlocks, void *slots,
                          const WorkspaceAcquire &acquire, const WorkspaceRelease &release);
-    void PagedAttention(void *query, uint32_t batch, void *keyCache, void *valueCache,
-                        uint32_t cacheBlocks, void *blockTables, uint32_t tableColumns,
-                        void *contextLens, void *output,
+    bool PagedAttention(uint32_t layer, void *query, uint32_t batch, void *keyCache,
+                        void *valueCache, uint32_t cacheBlocks, void *blockTables,
+                        uint32_t tableColumns, void *contextLens, void *output,
                         const WorkspaceAcquire &acquire, const WorkspaceRelease &release);
 
     [[nodiscard]] uint64_t SetupCount() const;

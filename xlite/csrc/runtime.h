@@ -245,6 +245,14 @@ public:
             ++_directAtbReshapeLaunches;
         }
     }
+    void RecordDirectAtbPlan(bool reused)
+    {
+        if (reused) {
+            ++_directAtbPlanReuses;
+        } else {
+            ++_directAtbPlanRebuilds;
+        }
+    }
 #endif
     [[nodiscard]] bool ForceSyncAttention(void) const
     {
@@ -322,6 +330,8 @@ public:
     {
         return _directAtbStagingBytes;
     }
+    [[nodiscard]] uint64_t DirectAtbPlanReuses(void) const { return _directAtbPlanReuses; }
+    [[nodiscard]] uint64_t DirectAtbPlanRebuilds(void) const { return _directAtbPlanRebuilds; }
 #endif
     [[nodiscard]] uint64_t ForwardInputEvents(void) const { return _forwardInputEvents; }
     [[nodiscard]] uint64_t ForwardOutputEvents(void) const { return _forwardOutputEvents; }
@@ -521,6 +531,8 @@ protected:
     uint64_t _directAtbAttentionLaunches = 0;
     uint64_t _directAtbReshapeLaunches = 0;
     uint64_t _directAtbStagingBytes = 0;
+    uint64_t _directAtbPlanReuses = 0;
+    uint64_t _directAtbPlanRebuilds = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;
     XTensorPool *_pool = nullptr;

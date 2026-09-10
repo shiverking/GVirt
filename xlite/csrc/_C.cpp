@@ -1073,9 +1073,11 @@ bool _CModel::RunNativeAtbAttention310P(
             }
         };
         const uint32_t cacheBlocks = static_cast<uint32_t>(nativeK.size(0));
-        _directAtb310P->ReshapeAndCache(
-            TensorPtr(key), TensorPtr(value), static_cast<uint32_t>(tokens), TensorPtr(nativeK),
-            TensorPtr(nativeV), cacheBlocks, slotMapping.ptr, acquire, release);
+        const bool reshapePlanReused = _directAtb310P->ReshapeAndCache(
+            static_cast<uint32_t>(layer), TensorPtr(key), TensorPtr(value),
+            static_cast<uint32_t>(tokens), TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
+            slotMapping.ptr, acquire, release);
+        rt.RecordDirectAtbPlan(reshapePlanReused);
         rt.RecordDirectAtbSetup();
         rt.RecordDirectAtbExecute(false);
         rt.RecordNativeAtbCacheWrite();
@@ -1090,10 +1092,11 @@ bool _CModel::RunNativeAtbAttention310P(
             throw std::runtime_error(
                 "direct_atb decode requires exactly one query token per request");
         }
-        _directAtb310P->PagedAttention(
-            TensorPtr(query), batch, TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
-            blockTables.ptr, static_cast<uint32_t>(tableColumns), totalLens.ptr, output.ptr,
-            acquire, release);
+        const bool pagedPlanReused = _directAtb310P->PagedAttention(
+            static_cast<uint32_t>(layer), TensorPtr(query), batch, TensorPtr(nativeK),
+            TensorPtr(nativeV), cacheBlocks, blockTables.ptr,
+            static_cast<uint32_t>(tableColumns), totalLens.ptr, output.ptr, acquire, release);
+        rt.RecordDirectAtbPlan(pagedPlanReused);
         rt.RecordDirectAtbSetup();
         rt.RecordDirectAtbExecute(true, batch);
         return true;
@@ -2885,6 +2888,9 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
+        info["direct_atb_runtime_version"] = 2;
+        info["direct_atb_operation_scope"] = "per_layer";
+        info["direct_atb_setup_cache"] = true;
         info["native_decode_cache_layout"] = "NZ_5D";
         info["direct_atb_task_queue_independent"] = true;
         info["attention_metadata"] = "host_retained_pinned";
@@ -2944,6 +2950,8 @@ PYBIND11_MODULE(_C, m)
         stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
         stats["direct_atb_reshape_launches"] = rt.DirectAtbReshapeLaunches();
         stats["direct_atb_staging_copy_bytes"] = rt.DirectAtbStagingBytes();
+        stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
+        stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
         stats["forward_input_events"] = rt.ForwardInputEvents();
         stats["forward_output_events"] = rt.ForwardOutputEvents();
         return stats;
@@ -3014,6 +3022,8 @@ PYBIND11_MODULE(_C, m)
             stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
             stats["direct_atb_reshape_launches"] = rt.DirectAtbReshapeLaunches();
             stats["direct_atb_staging_copy_bytes"] = rt.DirectAtbStagingBytes();
+            stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
+            stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
 #endif
             stats["forward_input_events"] = rt.ForwardInputEvents();
             stats["forward_output_events"] = rt.ForwardOutputEvents();
