@@ -2957,6 +2957,8 @@ PYBIND11_MODULE(_C, m)
         info["batched_prefill_attention"] = true;
         info["batched_prefill_attention_api"] = "PromptFlashAttentionV2";
         info["batched_prefill_micro_batch"] = 4;
+        info["default_batched_prefill_attention"] = false;
+        info["batched_prefill_status"] = "experimental_shape_probe";
         info["native_decode_cache_layout"] = "NZ_5D";
         info["direct_atb_task_queue_independent"] = true;
         info["attention_metadata"] = "host_retained_pinned";
@@ -3053,6 +3055,8 @@ PYBIND11_MODULE(_C, m)
              py::arg("backend"))
         .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend310P,
              py::arg("backend"))
+        .def("set_batched_prefill_attention_310p",
+             &XRuntime::SetBatchedPrefillAttention310P, py::arg("enabled"))
 #endif
         .def("get_stats", [](const XRuntime &rt) {
             py::dict stats;

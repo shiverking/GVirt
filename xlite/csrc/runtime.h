@@ -145,6 +145,10 @@ public:
 #ifdef XLITE_ARCH_310P
     void SetMatmulBackend310P(const std::string &backend);
     void SetDecodeAttentionBackend310P(const std::string &backend);
+    void SetBatchedPrefillAttention310P(bool enabled)
+    {
+        _enableBatchedPrefillAttention310P = enabled;
+    }
     [[nodiscard]] const char *MatmulBackend310PName(void) const;
     [[nodiscard]] bool UseM200Matmul310P(void) const
     {
@@ -161,6 +165,10 @@ public:
     [[nodiscard]] bool UseDirectAtbDecodeAttention310P(void) const
     {
         return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::DIRECT_ATB;
+    }
+    [[nodiscard]] bool UseBatchedPrefillAttention310P(void) const
+    {
+        return _enableBatchedPrefillAttention310P;
     }
     [[nodiscard]] bool UseNativeKvDecodeAttention310P(void) const
     {
@@ -528,6 +536,9 @@ protected:
     XMatmulBackend310P _matmulBackend310P = XMatmulBackend310P::M200_ASR;
     XDecodeAttentionBackend310P _decodeAttentionBackend310P =
         XDecodeAttentionBackend310P::LEGACY;
+    // The V2 batch path is retained for targeted shape diagnosis, but real
+    // long/chunked ASR prefills have not passed transcript equivalence yet.
+    bool _enableBatchedPrefillAttention310P = false;
 #endif
     int GetNodeIps(void);
     int InitHcclComm(void);

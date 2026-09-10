@@ -685,7 +685,8 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         runningQueryOffset += rt._lensHost[request];
     }
     std::vector<bool> batchedPrefillProcessed(batch, false);
-    if (rt.UseDirectAtbDecodeAttention310P()) {
+    if (rt.UseDirectAtbDecodeAttention310P() &&
+        rt.UseBatchedPrefillAttention310P()) {
         RunBatchedPrefillAttention(
             rt, qkv, kCache, vCache, output, maxNumBlock, nHeads, nKvHeads,
             headDim, blockSize, batch, queryOffsets, batchedPrefillProcessed);

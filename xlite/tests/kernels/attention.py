@@ -183,6 +183,7 @@ torch.npu.set_device(0)
 rt = Runtime(0, 3000)
 if os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
     rt.set_decode_attention_backend("direct_atb")
+    rt.set_batched_prefill_attention_310p(True)
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
