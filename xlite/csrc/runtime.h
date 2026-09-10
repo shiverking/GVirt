@@ -295,6 +295,7 @@ public:
     }
     void RecordDirectAtbMetadataH2D(uint64_t bytes)
     {
+        ++_directAtbMetadataH2DLaunches;
         _directAtbMetadataH2DBytes += bytes;
     }
     void RecordDirectAtbPlan(bool reused, bool attention)
@@ -491,6 +492,10 @@ public:
     {
         return _directAtbMetadataH2DBytes;
     }
+    [[nodiscard]] uint64_t DirectAtbMetadataH2DLaunches(void) const
+    {
+        return _directAtbMetadataH2DLaunches;
+    }
 #endif
     [[nodiscard]] uint64_t ForwardInputEvents(void) const { return _forwardInputEvents; }
     [[nodiscard]] uint64_t ForwardOutputEvents(void) const { return _forwardOutputEvents; }
@@ -602,6 +607,10 @@ public:
     std::vector<uint32_t> _queryOffsetsHost;
     std::vector<uint32_t> _decodeRequestIndicesHost;
     std::vector<uint8_t> _directAtbProcessedRequests;
+    // One fixed-layout allocation keeps offsets, total lengths and block
+    // tables contiguous, allowing PrepareAttn to upload all decode metadata
+    // with one asynchronous H2D operation.
+    XTensor _decodeMetadata;
     XTensor _decodeQueryOffsets;
     XTensor _decodeBlockTables;
     XTensor _decodeTotalLens;
@@ -619,6 +628,7 @@ public:
     XTensor _lensPinnedHost;
     XTensor _queryStartLocPinnedHost;
     XTensor _blockTablesPinnedHost;
+    XTensor _decodeMetadataPinnedHost;
     XTensor _decodeQueryOffsetsPinnedHost;
     XTensor _decodeBlockTablesPinnedHost;
     XTensor _decodeTotalLensPinnedHost;
@@ -734,6 +744,7 @@ protected:
     uint64_t _directAtbCompactBytes = 0;
     uint64_t _directAtbScatterLaunches = 0;
     uint64_t _directAtbScatterBytes = 0;
+    uint64_t _directAtbMetadataH2DLaunches = 0;
     uint64_t _directAtbMetadataH2DBytes = 0;
 #endif
     void *_lastAttentionWorkspace = nullptr;

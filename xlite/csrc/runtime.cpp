@@ -207,14 +207,8 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_blockTables.ptr);
     }
 #ifdef XLITE_ARCH_310P
-    if (_decodeQueryOffsets.ptr) {
-        (void)aclrtFree(_decodeQueryOffsets.ptr);
-    }
-    if (_decodeBlockTables.ptr) {
-        (void)aclrtFree(_decodeBlockTables.ptr);
-    }
-    if (_decodeTotalLens.ptr) {
-        (void)aclrtFree(_decodeTotalLens.ptr);
+    if (_decodeMetadata.ptr) {
+        (void)aclrtFree(_decodeMetadata.ptr);
     }
 #endif
 #ifdef XLITE_310P_LLM_FP16_POC
@@ -239,14 +233,8 @@ XRuntime::~XRuntime(void)
     if (_blockTablesPinnedHost.ptr) {
         (void)aclrtFreeHost(_blockTablesPinnedHost.ptr);
     }
-    if (_decodeQueryOffsetsPinnedHost.ptr) {
-        (void)aclrtFreeHost(_decodeQueryOffsetsPinnedHost.ptr);
-    }
-    if (_decodeBlockTablesPinnedHost.ptr) {
-        (void)aclrtFreeHost(_decodeBlockTablesPinnedHost.ptr);
-    }
-    if (_decodeTotalLensPinnedHost.ptr) {
-        (void)aclrtFreeHost(_decodeTotalLensPinnedHost.ptr);
+    if (_decodeMetadataPinnedHost.ptr) {
+        (void)aclrtFreeHost(_decodeMetadataPinnedHost.ptr);
     }
 #endif
     if (_tokensPerEpGroupAllEpHost.ptr) {
@@ -506,14 +494,18 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _totalLens.Init({maxBatch}, INT32, ptr);
 
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _decodeQueryOffsets.Init({maxBatch}, INT32, ptr);
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _decodeTotalLens.Init({maxBatch}, INT32, ptr);
     _decodeTableColumns = DIV_ROUND_UP(maxSeqLen, blockSizes[0]);
-    size = maxBatch * _decodeTableColumns * XDtypeBit(INT32) / 8;
+    const size_t decodeMetadataElements =
+        2 * maxBatch + maxBatch * _decodeTableColumns;
+    size = decodeMetadataElements * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _decodeBlockTables.Init({maxBatch, _decodeTableColumns}, INT32, ptr);
+    _decodeMetadata.Init({decodeMetadataElements}, INT32, ptr);
+    auto *decodeDevice = static_cast<uint8_t *>(ptr);
+    const size_t decodeVectorBytes = maxBatch * XDtypeBit(INT32) / 8;
+    _decodeQueryOffsets.Init({maxBatch}, INT32, decodeDevice);
+    _decodeTotalLens.Init({maxBatch}, INT32, decodeDevice + decodeVectorBytes);
+    _decodeBlockTables.Init({maxBatch, _decodeTableColumns}, INT32,
+                            decodeDevice + 2 * decodeVectorBytes);
 #endif
 
     switch (attnMeta.version) {
@@ -567,10 +559,17 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
         allocPinned(_queryStartLocPinnedHost, {maxBatch}, INT32);
         allocPinned(_blockTablesPinnedHost,
                     {maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32);
-        allocPinned(_decodeQueryOffsetsPinnedHost, {maxBatch}, INT32);
-        allocPinned(_decodeTotalLensPinnedHost, {maxBatch}, INT32);
-        allocPinned(_decodeBlockTablesPinnedHost,
-                    {maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32);
+        const size_t decodeMetadataElements =
+            2 * maxBatch + maxBatch * DIV_ROUND_UP(maxSeqLen, blockSizes[0]);
+        allocPinned(_decodeMetadataPinnedHost, {decodeMetadataElements}, INT32);
+        auto *decodeHost = static_cast<uint8_t *>(_decodeMetadataPinnedHost.ptr);
+        const size_t decodeVectorBytes = maxBatch * XDtypeBit(INT32) / 8;
+        _decodeQueryOffsetsPinnedHost.Init({maxBatch}, INT32, decodeHost);
+        _decodeTotalLensPinnedHost.Init({maxBatch}, INT32,
+                                        decodeHost + decodeVectorBytes);
+        _decodeBlockTablesPinnedHost.Init(
+            {maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32,
+            decodeHost + 2 * decodeVectorBytes);
     }
 #endif
 
@@ -1065,23 +1064,15 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                     static_cast<size_t>(request) * maxNumBlocks,
                                 static_cast<size_t>(maxNumBlocks) * sizeof(uint32_t));
                 }
-                const size_t offsetsBytes =
-                    static_cast<size_t>(decodeBatch) * sizeof(uint32_t);
-                const size_t lensBytes = offsetsBytes;
-                const size_t tablesBytes = static_cast<size_t>(decodeBatch) *
-                                           _decodeTableColumns * sizeof(uint32_t);
+                // The aliases above occupy one fixed-layout allocation:
+                // [maxBatch offsets][maxBatch total lens][maxBatch x columns
+                // block table]. Upload it once so Decode adds one H2D command
+                // per forward instead of three small commands.
                 CHECK_ACL(aclrtMemcpyAsync(
-                    _decodeQueryOffsets.ptr, offsetsBytes,
-                    _decodeQueryOffsetsPinnedHost.ptr, offsetsBytes,
+                    _decodeMetadata.ptr, _decodeMetadata.bytes,
+                    _decodeMetadataPinnedHost.ptr, _decodeMetadataPinnedHost.bytes,
                     ACL_MEMCPY_HOST_TO_DEVICE, stream));
-                CHECK_ACL(aclrtMemcpyAsync(
-                    _decodeTotalLens.ptr, lensBytes, _decodeTotalLensPinnedHost.ptr,
-                    lensBytes, ACL_MEMCPY_HOST_TO_DEVICE, stream));
-                CHECK_ACL(aclrtMemcpyAsync(
-                    _decodeBlockTables.ptr, tablesBytes,
-                    _decodeBlockTablesPinnedHost.ptr, tablesBytes,
-                    ACL_MEMCPY_HOST_TO_DEVICE, stream));
-                RecordDirectAtbMetadataH2D(offsetsBytes + lensBytes + tablesBytes);
+                RecordDirectAtbMetadataH2D(_decodeMetadata.bytes);
                 _decodeMetadataReady = true;
             }
 #endif

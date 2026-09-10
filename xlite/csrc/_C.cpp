@@ -1148,20 +1148,20 @@ bool _CModel::RunNativeAtbAttention310P(
                                        rt._decodeQueryOffsets, decodeBatch, false);
             rt.RecordDirectAtbCompact(static_cast<uint64_t>(decodeBatch) * qBytes);
         }
+        // Pure decode output is already contiguous in request order. Write it
+        // directly to the caller-owned output and cache that exact pointer as
+        // part of the ATB plan signature. Mixed batches still need the stable
+        // compact output followed by one indexed scatter.
+        void *pagedOutput = rt._linearDecodeStep ? output.ptr : TensorPtr(decodeOutput);
         const bool pagedPlanReused = _directAtb310P->PagedAttention(
             static_cast<uint32_t>(layer), TensorPtr(decodeQuery), decodeBatch,
             TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
             rt._decodeBlockTables.ptr, rt._decodeTableColumns,
-            rt._decodeTotalLens.ptr, TensorPtr(decodeOutput), acquire, release);
+            rt._decodeTotalLens.ptr, pagedOutput, acquire, release);
         rt.RecordDirectAtbPlan(pagedPlanReused, true);
         rt.RecordDirectAtbSetup();
         rt.RecordDirectAtbExecute(true, decodeBatch);
         if (rt._linearDecodeStep) {
-            CHECK_ACL(aclrtMemcpyAsync(output.ptr, output.bytes,
-                                       TensorPtr(decodeOutput),
-                                       static_cast<size_t>(decodeBatch) * qBytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt.RecordDirectAtbScatter(static_cast<uint64_t>(decodeBatch) * qBytes);
             return true;
         }
         rt.RecordDirectAtbMixedDecode(decodeBatch);
@@ -2984,14 +2984,18 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
-        info["direct_atb_runtime_version"] = 5;
-        info["direct_atb_operation_scope"] = "per_layer_batch";
+        info["direct_atb_runtime_version"] = 6;
+        info["direct_atb_operation_scope"] = "per_layer_signature";
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
         info["direct_atb_mixed_batch_decode"] = true;
         info["direct_atb_batched_compact_scatter"] = true;
-        info["direct_atb_plan_cache"] = "layer_batch";
+        info["direct_atb_plan_cache"] = "layer_tensor_signature";
+        info["direct_atb_reshape_signatures_per_layer"] = 16;
+        info["direct_atb_paged_signatures_per_batch"] = 4;
         info["direct_atb_metadata_upload"] = "once_per_forward";
+        info["direct_atb_pure_decode_direct_output"] = true;
+        info["direct_atb_metadata_single_h2d"] = true;
         info["batched_prefill_attention"] = true;
         info["batched_prefill_attention_api"] = "PromptFlashAttentionV1_exact_shape";
         info["batched_prefill_micro_batch"] = 4;
@@ -3105,6 +3109,8 @@ PYBIND11_MODULE(_C, m)
         stats["direct_atb_scatter_bytes"] = rt.DirectAtbScatterBytes();
         stats["direct_atb_metadata_h2d_bytes"] =
             rt.DirectAtbMetadataH2DBytes();
+        stats["direct_atb_metadata_h2d_launches"] =
+            rt.DirectAtbMetadataH2DLaunches();
         stats["forward_input_events"] = rt.ForwardInputEvents();
         stats["forward_output_events"] = rt.ForwardOutputEvents();
         return stats;
@@ -3226,6 +3232,8 @@ PYBIND11_MODULE(_C, m)
             stats["direct_atb_scatter_bytes"] = rt.DirectAtbScatterBytes();
             stats["direct_atb_metadata_h2d_bytes"] =
                 rt.DirectAtbMetadataH2DBytes();
+            stats["direct_atb_metadata_h2d_launches"] =
+                rt.DirectAtbMetadataH2DLaunches();
 #endif
             stats["forward_input_events"] = rt.ForwardInputEvents();
             stats["forward_output_events"] = rt.ForwardOutputEvents();

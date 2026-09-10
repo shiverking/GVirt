@@ -85,6 +85,9 @@ void RunOperation(atb::Operation *operation, atb::VariantPack &pack, atb::Contex
 class XliteDirectAtb310P::Impl
 {
 public:
+    static constexpr size_t kMaxReshapeSignaturesPerLayer = 16;
+    static constexpr size_t kMaxPagedSignaturesPerBatch = 4;
+
     struct Signature
     {
         std::array<void *, 7> pointers{};
@@ -100,6 +103,19 @@ public:
             valid = true;
             return reused;
         }
+
+        bool Matches(const std::array<void *, 7> &newPointers,
+                     const std::array<uint32_t, 3> &newDimensions) const
+        {
+            return valid && pointers == newPointers && dimensions == newDimensions;
+        }
+    };
+
+    struct ReshapePlan
+    {
+        atb::Operation *operation = nullptr;
+        atb::VariantPack pack;
+        Signature signature;
     };
 
     struct PagedPlan
@@ -111,13 +127,12 @@ public:
 
     struct LayerPlan
     {
-        atb::Operation *reshape = nullptr;
-        atb::VariantPack reshapePack;
-        Signature reshapeSignature;
-        // Decode batches vary between scheduler steps. Retain one ATB
-        // operation and stable VariantPack for every batch size instead of
-        // invalidating a layer-wide plan whenever continuous batching changes.
-        std::vector<std::unique_ptr<PagedPlan>> pagedByBatch;
+        // Continuous batching alternates between the per-layer decode staging
+        // buffers and the shared mixed/prefill staging buffers. Preserve every
+        // observed tensor signature so revisiting a shape does not invalidate
+        // the previous ATB setup-cache entry.
+        std::vector<std::unique_ptr<ReshapePlan>> reshapePlans;
+        std::vector<std::vector<std::unique_ptr<PagedPlan>>> pagedByBatch;
     };
 
     Impl()
@@ -128,13 +143,17 @@ public:
     ~Impl()
     {
         for (const std::unique_ptr<LayerPlan> &plan : layers) {
-            if (plan != nullptr && plan->reshape != nullptr) {
-                (void)atb::DestroyOperation(plan->reshape);
-            }
             if (plan != nullptr) {
-                for (const std::unique_ptr<PagedPlan> &paged : plan->pagedByBatch) {
-                    if (paged != nullptr && paged->operation != nullptr) {
-                        (void)atb::DestroyOperation(paged->operation);
+                for (const std::unique_ptr<ReshapePlan> &reshape : plan->reshapePlans) {
+                    if (reshape != nullptr && reshape->operation != nullptr) {
+                        (void)atb::DestroyOperation(reshape->operation);
+                    }
+                }
+                for (const auto &batchPlans : plan->pagedByBatch) {
+                    for (const std::unique_ptr<PagedPlan> &paged : batchPlans) {
+                        if (paged != nullptr && paged->operation != nullptr) {
+                            (void)atb::DestroyOperation(paged->operation);
+                        }
                     }
                 }
             }
@@ -155,7 +174,35 @@ public:
         return *layers[layer];
     }
 
-    PagedPlan &GetPaged(uint32_t layer, uint32_t batch)
+    ReshapePlan &GetReshape(uint32_t layer,
+                           const std::array<void *, 7> &pointers,
+                           const std::array<uint32_t, 3> &dimensions,
+                           bool &reused)
+    {
+        LayerPlan &layerPlan = GetLayer(layer);
+        for (const std::unique_ptr<ReshapePlan> &plan : layerPlan.reshapePlans) {
+            if (plan->signature.Matches(pointers, dimensions)) {
+                reused = true;
+                return *plan;
+            }
+        }
+        if (layerPlan.reshapePlans.size() >= kMaxReshapeSignaturesPerLayer) {
+            ReshapePlan &plan = *layerPlan.reshapePlans.back();
+            (void)plan.signature.Update(pointers, dimensions);
+            reused = false;
+            return plan;
+        }
+        auto plan = std::make_unique<ReshapePlan>();
+        (void)plan->signature.Update(pointers, dimensions);
+        layerPlan.reshapePlans.emplace_back(std::move(plan));
+        reused = false;
+        return *layerPlan.reshapePlans.back();
+    }
+
+    PagedPlan &GetPaged(uint32_t layer, uint32_t batch,
+                        const std::array<void *, 7> &pointers,
+                        const std::array<uint32_t, 3> &dimensions,
+                        bool &reused)
     {
         if (batch == 0 || batch > 20) {
             throw std::invalid_argument("310P direct ATB batch is outside [1, 20]");
@@ -164,10 +211,23 @@ public:
         if (layerPlan.pagedByBatch.size() <= batch) {
             layerPlan.pagedByBatch.resize(static_cast<size_t>(batch) + 1);
         }
-        if (layerPlan.pagedByBatch[batch] == nullptr) {
-            layerPlan.pagedByBatch[batch] = std::make_unique<PagedPlan>();
+        for (const std::unique_ptr<PagedPlan> &plan : layerPlan.pagedByBatch[batch]) {
+            if (plan->signature.Matches(pointers, dimensions)) {
+                reused = true;
+                return *plan;
+            }
         }
-        return *layerPlan.pagedByBatch[batch];
+        if (layerPlan.pagedByBatch[batch].size() >= kMaxPagedSignaturesPerBatch) {
+            PagedPlan &plan = *layerPlan.pagedByBatch[batch].back();
+            (void)plan.signature.Update(pointers, dimensions);
+            reused = false;
+            return plan;
+        }
+        auto plan = std::make_unique<PagedPlan>();
+        (void)plan->signature.Update(pointers, dimensions);
+        layerPlan.pagedByBatch[batch].emplace_back(std::move(plan));
+        reused = false;
+        return *layerPlan.pagedByBatch[batch].back();
     }
 
     atb::Context *context = nullptr;
@@ -197,13 +257,17 @@ bool XliteDirectAtb310P::ReshapeAndCache(
     uint32_t cacheBlocks, void *slots, const WorkspaceAcquire &acquire,
     const WorkspaceRelease &release)
 {
-    Impl::LayerPlan &plan = impl_->GetLayer(layer);
-    if (plan.reshape == nullptr) {
+    const std::array<void *, 7> pointers =
+        {key, value, keyCache, valueCache, slots, nullptr, nullptr};
+    const std::array<uint32_t, 3> dimensions = {tokens, cacheBlocks, 0};
+    bool reused = false;
+    Impl::ReshapePlan &plan = impl_->GetReshape(layer, pointers, dimensions, reused);
+    if (plan.operation == nullptr) {
         atb::infer::ReshapeAndCacheParam reshapeParam{};
-        CheckAtb(atb::CreateOperation(reshapeParam, &plan.reshape),
+        CheckAtb(atb::CreateOperation(reshapeParam, &plan.operation),
                  "CreateReshapeAndCacheOperation");
     }
-    atb::VariantPack &pack = plan.reshapePack;
+    atb::VariantPack &pack = plan.pack;
     pack.inTensors.resize(5);
     pack.outTensors.resize(2);
     pack.inTensors[0] = MakeTensor(key, ACL_FLOAT16, ACL_FORMAT_ND, {tokens, 8, 128});
@@ -215,10 +279,7 @@ bool XliteDirectAtb310P::ReshapeAndCache(
     pack.inTensors[4] = MakeTensor(slots, ACL_INT32, ACL_FORMAT_ND, {tokens});
     pack.outTensors[0] = pack.inTensors[2];
     pack.outTensors[1] = pack.inTensors[3];
-    const bool reused = plan.reshapeSignature.Update(
-        {key, value, keyCache, valueCache, slots, nullptr, nullptr},
-        {tokens, cacheBlocks, 0});
-    RunOperation(plan.reshape, pack, impl_->context, acquire, release, impl_->setupCount,
+    RunOperation(plan.operation, pack, impl_->context, acquire, release, impl_->setupCount,
                  impl_->executeCount);
     return reused;
 }
@@ -228,7 +289,11 @@ bool XliteDirectAtb310P::PagedAttention(
     uint32_t cacheBlocks, void *blockTables, uint32_t tableColumns, void *contextLens, void *output,
     const WorkspaceAcquire &acquire, const WorkspaceRelease &release)
 {
-    Impl::PagedPlan &plan = impl_->GetPaged(layer, batch);
+    const std::array<void *, 7> pointers =
+        {query, keyCache, valueCache, blockTables, contextLens, output, nullptr};
+    const std::array<uint32_t, 3> dimensions = {batch, cacheBlocks, tableColumns};
+    bool reused = false;
+    Impl::PagedPlan &plan = impl_->GetPaged(layer, batch, pointers, dimensions, reused);
     if (plan.operation == nullptr) {
         atb::infer::PagedAttentionParam pagedParam{};
         pagedParam.headNum = 16;
@@ -250,9 +315,6 @@ bool XliteDirectAtb310P::PagedAttention(
         MakeTensor(blockTables, ACL_INT32, ACL_FORMAT_ND, {batch, tableColumns});
     pack.inTensors[4] = MakeTensor(contextLens, ACL_INT32, ACL_FORMAT_ND, {batch});
     pack.outTensors[0] = MakeTensor(output, ACL_FLOAT16, ACL_FORMAT_ND, {batch, 16, 128});
-    const bool reused = plan.signature.Update(
-        {query, keyCache, valueCache, blockTables, contextLens, output, nullptr},
-        {batch, cacheBlocks, tableColumns});
     RunOperation(plan.operation, pack, impl_->context, acquire, release, impl_->setupCount,
                  impl_->executeCount);
     return reused;
