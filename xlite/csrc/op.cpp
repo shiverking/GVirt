@@ -1004,6 +1004,21 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     void *v = reinterpret_cast<void *>(vPtr);
     float scale = 1.0f / sqrtf(static_cast<float>(headDim));
 
+    void *queryStage = nullptr;
+    void *keyStage = nullptr;
+    void *valueStage = nullptr;
+    bool writeContiguousStages = false;
+#ifdef XLITE_ARCH_310P
+    if (rt.nativeAtbRopeStageCallback) {
+        writeContiguousStages = rt.nativeAtbRopeStageCallback(
+            kCache, static_cast<uint32_t>(inout.shape[0]), queryStage, keyStage, valueStage);
+        if (writeContiguousStages &&
+            (queryStage == nullptr || keyStage == nullptr || valueStage == nullptr)) {
+            throw std::runtime_error("Ascend310P direct ATB RoPE staging returned a null buffer");
+        }
+    }
+#endif
+
     if (!isNeox) {
         throw std::runtime_error(std::string(__func__) + ": unsupported rope type gptj");
     }
@@ -1021,7 +1036,8 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     launchKernel(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr,
                  vCache.ptr, slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1],
                  inout.shape[1], inout.shape[1], localHeads, localKvHeads, headDim, blockSize,
-                 scale, mropeMaskH, mropeMaskW);
+                 scale, mropeMaskH, mropeMaskW, queryStage, keyStage, valueStage,
+                 writeContiguousStages);
 }
 
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,

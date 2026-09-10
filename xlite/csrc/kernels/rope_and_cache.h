@@ -211,7 +211,9 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                                       uint32_t value_stride, uint32_t num_heads,
                                       uint32_t num_kv_heads, uint32_t head_size,
                                       uint32_t block_size, float scale_, uint64_t mrope_mask_h,
-                                      uint64_t mrope_mask_w)
+                                      uint64_t mrope_mask_w, GM_ADDR query_stage,
+                                      GM_ADDR key_stage, GM_ADDR value_stage,
+                                      uint32_t write_contiguous_stages)
 {
     set_atomic_none();
     set_mask_norm();
@@ -501,6 +503,11 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
             set_flag(PIPE_MTE2, PIPE_MTE3, event_id);
             wait_flag(PIPE_MTE2, PIPE_MTE3, event_id);
             copy_ubuf_to_gm(gm_vcache, value_dtype_ubuf_addr[event_id], dmi_cfg_kv);
+            if (write_contiguous_stages != 0) {
+                auto gm_value_stage =
+                    (__gm__ Dtype *)value_stage + static_cast<uint64_t>(loop1) * kv_size;
+                copy_ubuf_to_gm(gm_value_stage, value_dtype_ubuf_addr[event_id], dmi_cfg_kv);
+            }
 
             // copy cos and sin, repeat for d/2
             copy_gm_to_ubuf(cos_dtype_ubuf_addr[event_id], gm_cos, dmi_cfg_cossin);
@@ -570,6 +577,11 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
             // Update key and cache key
             copy_ubuf_to_gm(gm_key, key_dtype_ubuf_addr[event_id], dmi_cfg_kv);
             copy_ubuf_to_gm(gm_kcache, key_dtype_ubuf_addr[event_id], dmi_cfg_kv);
+            if (write_contiguous_stages != 0) {
+                auto gm_key_stage =
+                    (__gm__ Dtype *)key_stage + static_cast<uint64_t>(loop1) * kv_size;
+                copy_ubuf_to_gm(gm_key_stage, key_dtype_ubuf_addr[event_id], dmi_cfg_kv);
+            }
 
 #if !defined(XLITE_DEVICE_310P)
             if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
@@ -610,6 +622,11 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
             set_flag(PIPE_V, PIPE_MTE3, event_id);
             wait_flag(PIPE_V, PIPE_MTE3, event_id);
             copy_ubuf_to_gm(gm_query, query_dtype_ubuf_addr[event_id], dmi_cfg_q);
+            if (write_contiguous_stages != 0) {
+                auto gm_query_stage =
+                    (__gm__ Dtype *)query_stage + static_cast<uint64_t>(loop1) * q_size;
+                copy_ubuf_to_gm(gm_query_stage, query_dtype_ubuf_addr[event_id], dmi_cfg_q);
+            }
 
             set_flag(PIPE_MTE3, PIPE_MTE2, event_id);
             ping = 1 - ping;
@@ -627,12 +644,14 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
         GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, uint32_t numTokens,             \
         uint32_t rotDim, uint32_t queryStride, uint32_t keyStride, uint32_t valueStride,           \
         uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize,              \
-        float scaleIn, uint64_t mropeMaskH, uint64_t mropeMaskW)                                   \
+        float scaleIn, uint64_t mropeMaskH, uint64_t mropeMaskW, GM_ADDR queryStage,              \
+        GM_ADDR keyStage, GM_ADDR valueStage, uint32_t writeContiguousStages)                       \
     {                                                                                              \
         rope_and_cache<dtype>(positions, query, key, value, cossinCache, keyCache, valueCache,     \
                               slotMapping, numTokens, rotDim, queryStride, keyStride, valueStride, \
                               numHeads, numKVHeads, headDim, blockSize, scaleIn, mropeMaskH,       \
-                              mropeMaskW);                                                         \
+                              mropeMaskW, queryStage, keyStage, valueStage,                         \
+                              writeContiguousStages);                                              \
     }
 #else
 #define ROPEANDCACHE_FUNC_DEFINE(dtype)                                                    \
@@ -641,7 +660,8 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
         GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, uint32_t numTokens,     \
         uint32_t rotDim, uint32_t queryStride, uint32_t keyStride, uint32_t valueStride,   \
         uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize,      \
-        float scaleIn, uint64_t mropeMaskH, uint64_t mropeMaskW)                           \
+        float scaleIn, uint64_t mropeMaskH, uint64_t mropeMaskW, GM_ADDR queryStage,       \
+        GM_ADDR keyStage, GM_ADDR valueStage, uint32_t writeContiguousStages)               \
     {                                                                                      \
     }
 #endif

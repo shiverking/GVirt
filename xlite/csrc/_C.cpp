@@ -221,6 +221,7 @@ private:
     std::vector<at::Tensor> _nativeDecodeKeyStage310P;
     std::vector<at::Tensor> _nativeDecodeValueStage310P;
     std::vector<at::Tensor> _nativeDecodeOutputStage310P;
+    std::vector<uint8_t> _directAtbRopeStaged310P;
     at::Tensor _nativeSlotStage310P;
     at::Tensor _nativeBlockTableStage310P;
     at::Tensor _nativeTotalLensStage310P;
@@ -245,6 +246,8 @@ private:
                           std::vector<MatmulWeight> &weightsXT, uint32_t currLayer,
                           bool isRowParallel, uint32_t tpRank, uint32_t layerOffset = 0);
 #ifdef XLITE_ARCH_310P
+    bool PrepareNativeAtbRopeStages310P(XRuntime &rt, XTensor &kCache, uint32_t tokens,
+                                        void *&query, void *&key, void *&value);
     bool RunNativeAtbAttention310P(XRuntime &rt, XTensor &qkv, XTensor &kCache,
                                    XTensor &vCache, XTensor &output, XTensor &slotMapping,
                                    XTensor &blockTables, XTensor &totalLens, uint32_t nHeads,
@@ -856,6 +859,7 @@ void _CModel::SetNativeKvCache310P(std::vector<std::vector<at::Tensor>> &kvCache
     _nativeDecodeKeyStage310P.reserve(kvCache.size());
     _nativeDecodeValueStage310P.reserve(kvCache.size());
     _nativeDecodeOutputStage310P.reserve(kvCache.size());
+    _directAtbRopeStaged310P.assign(kvCache.size(), 0);
     for (size_t layer = 0; layer < kvCache.size(); ++layer) {
         _nativeDecodeQueryStage310P.emplace_back(at::empty(
             {static_cast<int64_t>(_nativeMaxBatch310P), 16, 128}, fp16Options));
@@ -925,6 +929,33 @@ void SyncNativeAtbDebug(XRuntime &rt, const char *stage, size_t layer,
     }
 }
 }  // namespace
+
+bool _CModel::PrepareNativeAtbRopeStages310P(XRuntime &rt, XTensor &kCache, uint32_t tokens,
+                                             void *&query, void *&key, void *&value)
+{
+    size_t layer = _kv.size();
+    for (size_t i = 0; i < _kv.size(); ++i) {
+        if (_kv[i][0].ptr == kCache.ptr) {
+            layer = i;
+            break;
+        }
+    }
+    if (layer == _kv.size() || tokens > _nativeMaxTokens310P ||
+        layer >= _directAtbRopeStaged310P.size()) {
+        return false;
+    }
+    at::Tensor &queryStage =
+        rt._decodeStep ? _nativeDecodeQueryStage310P[layer] : _nativeQueryStage310P;
+    at::Tensor &keyStage =
+        rt._decodeStep ? _nativeDecodeKeyStage310P[layer] : _nativeKeyStage310P;
+    at::Tensor &valueStage =
+        rt._decodeStep ? _nativeDecodeValueStage310P[layer] : _nativeValueStage310P;
+    query = TensorPtr(queryStage);
+    key = TensorPtr(keyStage);
+    value = TensorPtr(valueStage);
+    _directAtbRopeStaged310P[layer] = 1;
+    return true;
+}
 
 bool _CModel::RunNativeAtbAttention310P(
     XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &output,
@@ -1018,23 +1049,30 @@ bool _CModel::RunNativeAtbAttention310P(
                                           : _nativeKeyStage310P;
     at::Tensor &valueStage = rt._decodeStep ? _nativeDecodeValueStage310P[layer]
                                             : _nativeValueStage310P;
-    // ATB's native operators require contiguous ND Q/K/V. A narrow view of
-    // packed [Q,K,V] retains rowBytes as its leading stride and is not valid
-    // input even though its logical shape looks correct.
-    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(queryStage), qBytes, qkvBytes,
-                                 rowBytes, qBytes, tokens,
-                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(keyStage), kvBytes,
-                                 qkvBytes + qBytes, rowBytes, kvBytes, tokens,
-                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-    CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(valueStage), kvBytes,
-                                 qkvBytes + qBytes + kvBytes, rowBytes, kvBytes, tokens,
-                                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-    SyncNativeAtbDebug(rt, "qkv_split", layer, batch, tokens);
-    if (rt.UseDirectAtbDecodeAttention310P()) {
-        rt.RecordDirectAtbStagingBytes(qkv.bytes);
+    const bool fusedRopeStages = rt.UseDirectAtbDecodeAttention310P() &&
+                                 layer < _directAtbRopeStaged310P.size() &&
+                                 _directAtbRopeStaged310P[layer] != 0;
+    if (!fusedRopeStages) {
+        // ATB requires contiguous ND Q/K/V. Keep this fallback for the
+        // dispatcher backend and for model variants that do not implement the
+        // 310P fused RoPE staging contract.
+        CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(queryStage), qBytes, qkvBytes,
+                                     rowBytes, qBytes, tokens,
+                                     ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(keyStage), kvBytes,
+                                     qkvBytes + qBytes, rowBytes, kvBytes, tokens,
+                                     ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        CHECK_ACL(aclrtMemcpy2dAsync(TensorPtr(valueStage), kvBytes,
+                                     qkvBytes + qBytes + kvBytes, rowBytes, kvBytes, tokens,
+                                     ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        SyncNativeAtbDebug(rt, "qkv_split", layer, batch, tokens);
+        if (rt.UseDirectAtbDecodeAttention310P()) {
+            rt.RecordDirectAtbStagingBytes(qkv.bytes);
+        } else {
+            rt.RecordNativeAtbStagingBytes(qkv.bytes);
+        }
     } else {
-        rt.RecordNativeAtbStagingBytes(qkv.bytes);
+        rt.RecordDirectAtbFusedRopeStaging(qkv.bytes);
     }
     at::Tensor query = queryStage.narrow(0, 0, tokens);
     at::Tensor key = keyStage.narrow(0, 0, tokens);
@@ -1232,18 +1270,30 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                 return RunNativeAtbAttention310P(rt, qkv, kCache, vCache, out, slots, tables,
                                                  totalLens, nHeads, nKvHeads, headDim, batch);
             };
+        if (directAtb) {
+            std::fill(_directAtbRopeStaged310P.begin(),
+                      _directAtbRopeStaged310P.end(), 0);
+            rt.nativeAtbRopeStageCallback =
+                [this, &rt](XTensor &kCache, uint32_t tokens, void *&query,
+                            void *&key, void *&value) {
+                    return PrepareNativeAtbRopeStages310P(
+                        rt, kCache, tokens, query, key, value);
+                };
+        }
     }
 #endif
     try {
         _model->Forward(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis, _output);
     } catch (...) {
 #ifdef XLITE_ARCH_310P
+        rt.nativeAtbRopeStageCallback = {};
         rt.nativeAtbAttentionCallback = {};
 #endif
         rt.stream = savedStream;
         throw;
     }
 #ifdef XLITE_ARCH_310P
+    rt.nativeAtbRopeStageCallback = {};
     rt.nativeAtbAttentionCallback = {};
 #endif
     rt.stream = savedStream;
@@ -1554,6 +1604,16 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                 return RunNativeAtbAttention310P(rt, qkv, kCache, vCache, out, slots, tables,
                                                  totalLens, nHeads, nKvHeads, headDim, batch);
             };
+        if (directAtb) {
+            std::fill(_directAtbRopeStaged310P.begin(),
+                      _directAtbRopeStaged310P.end(), 0);
+            rt.nativeAtbRopeStageCallback =
+                [this, &rt](XTensor &kCache, uint32_t tokens, void *&query,
+                            void *&key, void *&value) {
+                    return PrepareNativeAtbRopeStages310P(
+                        rt, kCache, tokens, query, key, value);
+                };
+        }
     }
 #endif
     try {
@@ -1561,12 +1621,14 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                         _freqsCis, _inputIds, _output);
     } catch (...) {
 #ifdef XLITE_ARCH_310P
+        rt.nativeAtbRopeStageCallback = {};
         rt.nativeAtbAttentionCallback = {};
 #endif
         rt.stream = savedStream;
         throw;
     }
 #ifdef XLITE_ARCH_310P
+    rt.nativeAtbRopeStageCallback = {};
     rt.nativeAtbAttentionCallback = {};
 #endif
     rt.stream = savedStream;
@@ -2888,9 +2950,10 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
-        info["direct_atb_runtime_version"] = 2;
+        info["direct_atb_runtime_version"] = 3;
         info["direct_atb_operation_scope"] = "per_layer";
         info["direct_atb_setup_cache"] = true;
+        info["direct_atb_fused_rope_staging"] = true;
         info["native_decode_cache_layout"] = "NZ_5D";
         info["direct_atb_task_queue_independent"] = true;
         info["attention_metadata"] = "host_retained_pinned";
@@ -2950,6 +3013,8 @@ PYBIND11_MODULE(_C, m)
         stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
         stats["direct_atb_reshape_launches"] = rt.DirectAtbReshapeLaunches();
         stats["direct_atb_staging_copy_bytes"] = rt.DirectAtbStagingBytes();
+        stats["direct_atb_fused_rope_staging_bytes"] =
+            rt.DirectAtbFusedRopeStagingBytes();
         stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
         stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
         stats["forward_input_events"] = rt.ForwardInputEvents();
@@ -3022,6 +3087,8 @@ PYBIND11_MODULE(_C, m)
             stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
             stats["direct_atb_reshape_launches"] = rt.DirectAtbReshapeLaunches();
             stats["direct_atb_staging_copy_bytes"] = rt.DirectAtbStagingBytes();
+            stats["direct_atb_fused_rope_staging_bytes"] =
+                rt.DirectAtbFusedRopeStagingBytes();
             stats["direct_atb_plan_reuses"] = rt.DirectAtbPlanReuses();
             stats["direct_atb_plan_rebuilds"] = rt.DirectAtbPlanRebuilds();
 #endif

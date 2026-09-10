@@ -170,6 +170,9 @@ public:
         XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &,
         uint32_t, uint32_t, uint32_t, uint32_t)>;
     NativeAtbAttentionCallback nativeAtbAttentionCallback;
+    using NativeAtbRopeStageCallback =
+        std::function<bool(XTensor &, uint32_t, void *&, void *&, void *&)>;
+    NativeAtbRopeStageCallback nativeAtbRopeStageCallback;
     void RecordM200Matmul310P(uint32_t m)
     {
         ++m200MatmulRequests;
@@ -234,6 +237,10 @@ public:
     void RecordDirectAtbStagingBytes(uint64_t bytes)
     {
         _directAtbStagingBytes += bytes;
+    }
+    void RecordDirectAtbFusedRopeStaging(uint64_t bytes)
+    {
+        _directAtbFusedRopeStagingBytes += bytes;
     }
     void RecordDirectAtbExecute(bool attention, uint32_t requests = 0)
     {
@@ -329,6 +336,10 @@ public:
     [[nodiscard]] uint64_t DirectAtbStagingBytes(void) const
     {
         return _directAtbStagingBytes;
+    }
+    [[nodiscard]] uint64_t DirectAtbFusedRopeStagingBytes(void) const
+    {
+        return _directAtbFusedRopeStagingBytes;
     }
     [[nodiscard]] uint64_t DirectAtbPlanReuses(void) const { return _directAtbPlanReuses; }
     [[nodiscard]] uint64_t DirectAtbPlanRebuilds(void) const { return _directAtbPlanRebuilds; }
@@ -531,6 +542,7 @@ protected:
     uint64_t _directAtbAttentionLaunches = 0;
     uint64_t _directAtbReshapeLaunches = 0;
     uint64_t _directAtbStagingBytes = 0;
+    uint64_t _directAtbFusedRopeStagingBytes = 0;
     uint64_t _directAtbPlanReuses = 0;
     uint64_t _directAtbPlanRebuilds = 0;
 #endif
