@@ -146,6 +146,10 @@ public:
 #ifdef XLITE_ARCH_310P
     void SetMatmulBackend310P(const std::string &backend);
     void SetDecodeAttentionBackend310P(const std::string &backend);
+    void SetDirectAtbSetupReuse310P(bool enabled)
+    {
+        _directAtbSetupReuse310P = enabled;
+    }
     void SetBatchedPrefillAttention310P(bool enabled)
     {
         _enableBatchedPrefillAttention310P = enabled;
@@ -166,6 +170,10 @@ public:
     [[nodiscard]] bool UseDirectAtbDecodeAttention310P(void) const
     {
         return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::DIRECT_ATB;
+    }
+    [[nodiscard]] bool UseDirectAtbSetupReuse310P(void) const
+    {
+        return _directAtbSetupReuse310P;
     }
     [[nodiscard]] bool UseBatchedPrefillAttention310P(void) const
     {
@@ -259,6 +267,10 @@ public:
     void RecordDirectAtbSetup(void)
     {
         ++_directAtbSetupCount;
+    }
+    void RecordDirectAtbSetupReuse(void)
+    {
+        ++_directAtbSetupReuseCount;
     }
     void RecordDirectAtbStagingBytes(uint64_t bytes)
     {
@@ -428,6 +440,10 @@ public:
         return _nativeAtbStagingBytes;
     }
     [[nodiscard]] uint64_t DirectAtbSetupCount(void) const { return _directAtbSetupCount; }
+    [[nodiscard]] uint64_t DirectAtbSetupReuseCount(void) const
+    {
+        return _directAtbSetupReuseCount;
+    }
     [[nodiscard]] uint64_t DirectAtbExecuteCount(void) const { return _directAtbExecuteCount; }
     [[nodiscard]] uint64_t DirectAtbDecodeRequests(void) const { return _directAtbDecodeRequests; }
     [[nodiscard]] uint64_t DirectAtbAttentionLaunches(void) const
@@ -668,6 +684,7 @@ protected:
     XMatmulBackend310P _matmulBackend310P = XMatmulBackend310P::M200_ASR;
     XDecodeAttentionBackend310P _decodeAttentionBackend310P =
         XDecodeAttentionBackend310P::LEGACY;
+    bool _directAtbSetupReuse310P = false;
     // The V2 batch path is retained for targeted shape diagnosis, but real
     // long/chunked ASR prefills have not passed transcript equivalence yet.
     bool _enableBatchedPrefillAttention310P = false;
@@ -721,6 +738,7 @@ protected:
     uint64_t _nativeAtbCacheWrites = 0;
     uint64_t _nativeAtbStagingBytes = 0;
     uint64_t _directAtbSetupCount = 0;
+    uint64_t _directAtbSetupReuseCount = 0;
     uint64_t _directAtbExecuteCount = 0;
     uint64_t _directAtbDecodeRequests = 0;
     uint64_t _directAtbAttentionLaunches = 0;

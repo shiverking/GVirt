@@ -23,6 +23,7 @@ public:
     XliteDirectAtb310P &operator=(const XliteDirectAtb310P &) = delete;
 
     void SetStream(aclrtStream stream);
+    void SetSetupReuse(bool enabled);
     bool ReshapeAndCache(uint32_t layer, void *key, void *value, uint32_t tokens,
                          void *keyCache, void *valueCache, uint32_t cacheBlocks, void *slots,
                          const WorkspaceAcquire &acquire, const WorkspaceRelease &release);
@@ -32,6 +33,7 @@ public:
                         const WorkspaceAcquire &acquire, const WorkspaceRelease &release);
 
     [[nodiscard]] uint64_t SetupCount() const;
+    [[nodiscard]] uint64_t SetupReuseCount() const;
     [[nodiscard]] uint64_t ExecuteCount() const;
 
 private:

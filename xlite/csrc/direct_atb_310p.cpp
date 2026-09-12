@@ -56,12 +56,21 @@ atb::Tensor MakeTensor(void *deviceData, aclDataType dtype, aclFormat format,
 
 void RunOperation(atb::Operation *operation, atb::VariantPack &pack, atb::Context *context,
                   const XliteDirectAtb310P::WorkspaceAcquire &acquire,
-                  const XliteDirectAtb310P::WorkspaceRelease &release, uint64_t &setupCount,
-                  uint64_t &executeCount)
+                  const XliteDirectAtb310P::WorkspaceRelease &release,
+                  bool reuseSetup, bool signatureReused, bool &setupReady,
+                  uint64_t &cachedWorkspaceSize, uint64_t &setupCount,
+                  uint64_t &setupReuseCount, uint64_t &executeCount)
 {
-    uint64_t workspaceSize = 0;
-    CheckAtb(operation->Setup(pack, workspaceSize, context), "Setup");
-    ++setupCount;
+    uint64_t workspaceSize = cachedWorkspaceSize;
+    if (!reuseSetup || !signatureReused || !setupReady) {
+        workspaceSize = 0;
+        CheckAtb(operation->Setup(pack, workspaceSize, context), "Setup");
+        cachedWorkspaceSize = workspaceSize;
+        setupReady = true;
+        ++setupCount;
+    } else {
+        ++setupReuseCount;
+    }
     void *workspace = workspaceSize == 0 ? nullptr : acquire(static_cast<size_t>(workspaceSize));
     if (workspaceSize != 0 && workspace == nullptr) {
         throw std::runtime_error("310P direct ATB workspace allocator returned null");
@@ -107,6 +116,8 @@ public:
         atb::Operation *operation = nullptr;
         atb::VariantPack pack;
         Signature signature;
+        bool setupReady = false;
+        uint64_t workspaceSize = 0;
     };
 
     struct LayerPlan
@@ -114,6 +125,8 @@ public:
         atb::Operation *reshape = nullptr;
         atb::VariantPack reshapePack;
         Signature reshapeSignature;
+        bool reshapeSetupReady = false;
+        uint64_t reshapeWorkspaceSize = 0;
         // Decode batches vary between scheduler steps. Retain one ATB
         // operation and stable VariantPack for every batch size instead of
         // invalidating a layer-wide plan whenever continuous batching changes.
@@ -174,7 +187,9 @@ public:
     std::vector<std::unique_ptr<LayerPlan>> layers;
     aclrtStream stream = nullptr;
     uint64_t setupCount = 0;
+    uint64_t setupReuseCount = 0;
     uint64_t executeCount = 0;
+    bool reuseSetup = false;
 };
 
 XliteDirectAtb310P::XliteDirectAtb310P() : impl_(std::make_unique<Impl>()) {}
@@ -190,6 +205,11 @@ void XliteDirectAtb310P::SetStream(aclrtStream stream)
     }
     CheckAtb(impl_->context->SetExecuteStream(stream), "SetExecuteStream");
     impl_->stream = stream;
+}
+
+void XliteDirectAtb310P::SetSetupReuse(bool enabled)
+{
+    impl_->reuseSetup = enabled;
 }
 
 bool XliteDirectAtb310P::ReshapeAndCache(
@@ -218,8 +238,9 @@ bool XliteDirectAtb310P::ReshapeAndCache(
     const bool reused = plan.reshapeSignature.Update(
         {key, value, keyCache, valueCache, slots, nullptr, nullptr},
         {tokens, cacheBlocks, 0});
-    RunOperation(plan.reshape, pack, impl_->context, acquire, release, impl_->setupCount,
-                 impl_->executeCount);
+    RunOperation(plan.reshape, pack, impl_->context, acquire, release, impl_->reuseSetup,
+                 reused, plan.reshapeSetupReady, plan.reshapeWorkspaceSize,
+                 impl_->setupCount, impl_->setupReuseCount, impl_->executeCount);
     return reused;
 }
 
@@ -253,14 +274,20 @@ bool XliteDirectAtb310P::PagedAttention(
     const bool reused = plan.signature.Update(
         {query, keyCache, valueCache, blockTables, contextLens, output, nullptr},
         {batch, cacheBlocks, tableColumns});
-    RunOperation(plan.operation, pack, impl_->context, acquire, release, impl_->setupCount,
-                 impl_->executeCount);
+    RunOperation(plan.operation, pack, impl_->context, acquire, release, impl_->reuseSetup,
+                 reused, plan.setupReady, plan.workspaceSize, impl_->setupCount,
+                 impl_->setupReuseCount, impl_->executeCount);
     return reused;
 }
 
 uint64_t XliteDirectAtb310P::SetupCount() const
 {
     return impl_->setupCount;
+}
+
+uint64_t XliteDirectAtb310P::SetupReuseCount() const
+{
+    return impl_->setupReuseCount;
 }
 
 uint64_t XliteDirectAtb310P::ExecuteCount() const

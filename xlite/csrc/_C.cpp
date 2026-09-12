@@ -1099,6 +1099,7 @@ bool _CModel::RunNativeAtbAttention310P(
             _directAtb310P = std::make_unique<XliteDirectAtb310P>();
         }
         _directAtb310P->SetStream(rt.stream);
+        _directAtb310P->SetSetupReuse(rt.UseDirectAtbSetupReuse310P());
         XTensor *workspaceTensor = nullptr;
         const auto acquire = [&rt, &workspaceTensor](size_t bytes) -> void * {
             workspaceTensor = &rt.GetTensor({bytes}, INT8, DBG_LOC);
@@ -1111,12 +1112,19 @@ bool _CModel::RunNativeAtbAttention310P(
             }
         };
         const uint32_t cacheBlocks = static_cast<uint32_t>(nativeK.size(0));
+        const uint64_t reshapeSetupBefore = _directAtb310P->SetupCount();
+        const uint64_t reshapeReuseBefore = _directAtb310P->SetupReuseCount();
         const bool reshapePlanReused = _directAtb310P->ReshapeAndCache(
             static_cast<uint32_t>(layer), TensorPtr(key), TensorPtr(value),
             static_cast<uint32_t>(tokens), TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
             slotMapping.ptr, acquire, release);
         rt.RecordDirectAtbPlan(reshapePlanReused, false);
-        rt.RecordDirectAtbSetup();
+        if (_directAtb310P->SetupCount() != reshapeSetupBefore) {
+            rt.RecordDirectAtbSetup();
+        }
+        if (_directAtb310P->SetupReuseCount() != reshapeReuseBefore) {
+            rt.RecordDirectAtbSetupReuse();
+        }
         rt.RecordDirectAtbExecute(false);
         rt.RecordNativeAtbCacheWrite();
 
@@ -1148,13 +1156,20 @@ bool _CModel::RunNativeAtbAttention310P(
                                        rt._decodeQueryOffsets, decodeBatch, false);
             rt.RecordDirectAtbCompact(static_cast<uint64_t>(decodeBatch) * qBytes);
         }
+        const uint64_t pagedSetupBefore = _directAtb310P->SetupCount();
+        const uint64_t pagedReuseBefore = _directAtb310P->SetupReuseCount();
         const bool pagedPlanReused = _directAtb310P->PagedAttention(
             static_cast<uint32_t>(layer), TensorPtr(decodeQuery), decodeBatch,
             TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
             rt._decodeBlockTables.ptr, rt._decodeTableColumns,
             rt._decodeTotalLens.ptr, TensorPtr(decodeOutput), acquire, release);
         rt.RecordDirectAtbPlan(pagedPlanReused, true);
-        rt.RecordDirectAtbSetup();
+        if (_directAtb310P->SetupCount() != pagedSetupBefore) {
+            rt.RecordDirectAtbSetup();
+        }
+        if (_directAtb310P->SetupReuseCount() != pagedReuseBefore) {
+            rt.RecordDirectAtbSetupReuse();
+        }
         rt.RecordDirectAtbExecute(true, decodeBatch);
         if (rt._linearDecodeStep) {
             CHECK_ACL(aclrtMemcpyAsync(output.ptr, output.bytes,
@@ -2984,7 +2999,7 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
-        info["direct_atb_runtime_version"] = 8;
+        info["direct_atb_runtime_version"] = 9;
         info["direct_atb_operation_scope"] = "per_layer_batch";
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
@@ -2995,6 +3010,7 @@ PYBIND11_MODULE(_C, m)
         info["direct_atb_pure_decode_direct_output"] = false;
         info["direct_atb_metadata_single_h2d"] = false;
         info["direct_atb_metadata_actual_batch"] = true;
+        info["direct_atb_setup_reuse_probe"] = true;
         info["batched_prefill_attention"] = true;
         info["batched_prefill_attention_api"] = "PromptFlashAttentionV1_exact_shape";
         info["batched_prefill_micro_batch"] = 4;
@@ -3082,6 +3098,7 @@ PYBIND11_MODULE(_C, m)
         stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
         stats["native_atb_staging_copy_bytes"] = rt.NativeAtbStagingBytes();
         stats["direct_atb_setup_count"] = rt.DirectAtbSetupCount();
+        stats["direct_atb_setup_reuse_count"] = rt.DirectAtbSetupReuseCount();
         stats["direct_atb_execute_count"] = rt.DirectAtbExecuteCount();
         stats["direct_atb_decode_requests"] = rt.DirectAtbDecodeRequests();
         stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
@@ -3135,6 +3152,8 @@ PYBIND11_MODULE(_C, m)
              py::arg("backend"))
         .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend310P,
              py::arg("backend"))
+        .def("set_direct_atb_setup_reuse_310p",
+             &XRuntime::SetDirectAtbSetupReuse310P, py::arg("enabled"))
         .def("set_batched_prefill_attention_310p",
              &XRuntime::SetBatchedPrefillAttention310P, py::arg("enabled"))
 #endif
@@ -3204,6 +3223,8 @@ PYBIND11_MODULE(_C, m)
             stats["native_atb_cache_writes"] = rt.NativeAtbCacheWrites();
             stats["native_atb_staging_copy_bytes"] = rt.NativeAtbStagingBytes();
             stats["direct_atb_setup_count"] = rt.DirectAtbSetupCount();
+            stats["direct_atb_setup_reuse_count"] =
+                rt.DirectAtbSetupReuseCount();
             stats["direct_atb_execute_count"] = rt.DirectAtbExecuteCount();
             stats["direct_atb_decode_requests"] = rt.DirectAtbDecodeRequests();
             stats["direct_atb_attention_launches"] = rt.DirectAtbAttentionLaunches();
