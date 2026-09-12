@@ -2030,6 +2030,83 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
     XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
 }
 
+#ifdef XLITE_ARCH_310P
+py::dict ProbeDecodeGraph310P(XRuntime &rt, const std::string &stage,
+                              std::vector<at::Tensor> &tensors, uint32_t iterations)
+{
+    if (iterations == 0) {
+        throw std::invalid_argument("310P graph probe iterations must be positive");
+    }
+    const size_t expected = stage == "m200_matmul" ? 3 : stage == "layer_pre" ? 10 :
+                            stage == "layer_post" ? 13 : 0;
+    if (expected == 0) {
+        throw std::invalid_argument("unknown 310P graph probe stage: " + stage);
+    }
+    if (tensors.size() != expected) {
+        throw std::invalid_argument(stage + " expects " + std::to_string(expected) +
+                                    " tensors, got " + std::to_string(tensors.size()));
+    }
+    std::vector<XTensor> x(tensors.size());
+    for (size_t i = 0; i < tensors.size(); ++i) {
+        InitXTensor(x[i], tensors[i]);
+    }
+
+    const auto submit = [&]() {
+        if (stage == "m200_matmul") {
+            XliteOpMatmul(rt, x[0], x[1], x[2], false, XTensor(), XTensor(), false);
+            return;
+        }
+        if (stage == "layer_pre") {
+            XliteOpMatmul(rt, x[0], x[1], x[4], false, XTensor(), XTensor(), false);
+            XliteOpQkRmsNorm(rt, x[4], x[2], XTensor(), x[3], XTensor(), x[4],
+                             1e-6F, 128, 16, 128, 8, 2048, true,
+                             XTensor(), XTensor());
+            XliteOpRopeCache(rt, x[4], x[5], x[6], x[7], x[8], x[9],
+                             16, 8, 128, 128, 128, true, 0, 0);
+            return;
+        }
+
+        // Restore the residual inside the RI so repeated post-layer replay is
+        // deterministic and does not accumulate the fused residual updates.
+        CHECK_ACL(aclrtMemcpyAsync(x[3].ptr, x[3].bytes, x[2].ptr, x[2].bytes,
+                                   ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        XliteOpMatmul(rt, x[0], x[1], x[5], false, XTensor(), XTensor(), false);
+        XliteOpAddAndRmsNorm(rt, x[5], x[3], x[4], 1e-6F, x[5]);
+        XliteOpMatmul(rt, x[5], x[6], x[7], false, XTensor(), XTensor(), false);
+        XliteOpSiluAndMul(rt, x[7], x[8]);
+        XliteOpMatmul(rt, x[8], x[9], x[10], false, XTensor(), XTensor(), false);
+        XliteOpAddAndRmsNorm(rt, x[10], x[3], x[11], 1e-6F, x[12]);
+    };
+
+    aclmdlRI modelRI = nullptr;
+    // Complete one eager launch first so lazy runtime/kernel initialization is
+    // not accidentally attributed to Model-RI capture compatibility.
+    submit();
+    rt.Synchronize();
+    CHECK_ACL(aclmdlRICaptureBegin(rt.stream, ACL_MODEL_RI_CAPTURE_MODE_RELAXED));
+    submit();
+    CHECK_ACL(aclmdlRICaptureEnd(rt.stream, &modelRI));
+    try {
+        for (uint32_t i = 0; i < iterations; ++i) {
+            CHECK_ACL(aclmdlRIExecuteAsync(modelRI, rt.stream));
+            // Each stage is intentionally synchronized independently. A device
+            // exception is therefore attributed to this probe, not to a later
+            // LM Head or PyTorch operation.
+            rt.Synchronize();
+        }
+    } catch (...) {
+        (void)aclmdlRIDestroy(modelRI);
+        throw;
+    }
+    CHECK_ACL(aclmdlRIDestroy(modelRI));
+    py::dict result;
+    result["stage"] = stage;
+    result["captures"] = 1;
+    result["replays"] = iterations;
+    return result;
+}
+#endif
+
 uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
                      at::Tensor &x_warmup, at::Tensor &y_warmup, at::Tensor &z_warmup,
                      int iterations, int warmup_iterations, bool weightNZ, bool transpose)
@@ -3761,6 +3838,12 @@ PYBIND11_MODULE(_C, m)
           py::arg("y"), py::arg("z"));
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
+#ifdef XLITE_ARCH_310P
+    m.def("probe_decode_graph_310p", &ProbeDecodeGraph310P,
+          "Capture and repeatedly replay one isolated 310P decoder stage",
+          py::arg("rt"), py::arg("stage"), py::arg("tensors"),
+          py::arg("iterations") = 10);
+#endif
     m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("x_warmup"), py::arg("y_warmup"), py::arg("z_warmup"), py::arg("iterations"),
           py::arg("warmup_iterations"), py::arg("weight_nz") = false, py::arg("transpose") = false);
