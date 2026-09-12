@@ -7,6 +7,7 @@
 #include <torch/extension.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/stack.h>
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -222,6 +223,15 @@ private:
     std::vector<at::Tensor> _nativeDecodeValueStage310P;
     std::vector<at::Tensor> _nativeDecodeOutputStage310P;
     std::vector<uint8_t> _directAtbRopeStaged310P;
+#ifdef XLITE_ARCH_310P
+    struct DecodeGraph310P {
+        aclmdlRI modelRI = nullptr;
+        at::Tensor input;
+        at::Tensor output;
+        uint32_t warmups = 0;
+    };
+    std::vector<DecodeGraph310P> _decodeGraphs310P;
+#endif
     at::Tensor _nativeSlotStage310P;
     at::Tensor _nativeBlockTableStage310P;
     at::Tensor _nativeTotalLensStage310P;
@@ -815,6 +825,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
 _CModel::~_CModel(void)
 {
+#ifdef XLITE_ARCH_310P
+    for (auto &graph : _decodeGraphs310P) {
+        if (graph.modelRI != nullptr) {
+            (void)aclmdlRIDestroy(graph.modelRI);
+            graph.modelRI = nullptr;
+        }
+    }
+#endif
 #ifdef XLITE_DIRECT_ATB_310P
     _directAtb310P.reset();
 #endif
@@ -1666,8 +1684,71 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 #endif
     try {
-        _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds,
-                                        _freqsCis, _inputIds, _output);
+#ifdef XLITE_ARCH_310P
+        const bool pureDecode = !attnMeta.lensCpu.empty() &&
+            std::all_of(attnMeta.lensCpu.begin(), attnMeta.lensCpu.end(),
+                        [](uint32_t value) { return value == 1; });
+        const uint32_t graphBatch = static_cast<uint32_t>(attnMeta.lensCpu.size());
+        const bool graphEligible = rt.UseDecodeGraph310P() && directAtb &&
+            std::string(rt.MatmulBackend310PName()) == "m200_asr" && pureDecode &&
+            graphBatch >= 1 && graphBatch <= 20 && deepstackInput.empty() &&
+            _inputIds.ptr == nullptr;
+        if (rt.UseDecodeGraph310P() && !graphEligible) {
+            rt.RecordDecodeGraphFallback310P();
+        }
+        if (graphEligible) {
+            if (_decodeGraphs310P.empty()) {
+                _decodeGraphs310P.resize(21);
+            }
+            DecodeGraph310P &graph = _decodeGraphs310P[graphBatch];
+            // Model-RI replay requires fixed input/output addresses. Scheduler
+            // tensors remain dynamic, so stage only the two decoder boundaries;
+            // weights, KV caches and TensorPool storage are already persistent.
+            if (!graph.input.defined()) {
+                graph.input = at::empty({static_cast<int64_t>(graphBatch), input.size(1)},
+                                        input.options());
+                graph.output = at::empty({static_cast<int64_t>(graphBatch), output.size(1)},
+                                         output.options());
+            }
+            XTensor graphInput, graphOutput;
+            InitXTensor(graphInput, graph.input);
+            InitXTensor(graphOutput, graph.output);
+            CHECK_ACL(aclrtMemcpyAsync(graphInput.ptr, graphInput.bytes, _input.ptr,
+                                       graphInput.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            // Attention metadata changes every decode step and is deliberately
+            // prepared outside the graph. Its H2D updates are ordered before RI
+            // replay on the same Xlite Runtime stream.
+            _model->PrepareForwardWithInputsEmbeds(rt, graphInput, attnMeta, _kv,
+                                                   _inputIds, graphOutput);
+            if (graph.warmups == 0) {
+                _model->ForwardWithInputsEmbedsPrepared(rt, graphInput, _kv,
+                                                        _deepstackInputEmbeds, _freqsCis,
+                                                        graphOutput);
+                graph.warmups = 1;
+                rt.RecordDecodeGraphWarmup310P();
+            } else {
+                if (graph.modelRI == nullptr) {
+                    CHECK_ACL(aclmdlRICaptureBegin(
+                        rt.stream, ACL_MODEL_RI_CAPTURE_MODE_GLOBAL));
+                    _model->ForwardWithInputsEmbedsPrepared(rt, graphInput, _kv,
+                                                            _deepstackInputEmbeds, _freqsCis,
+                                                            graphOutput);
+                    CHECK_ACL(aclmdlRICaptureEnd(rt.stream, &graph.modelRI));
+                    rt.RecordDecodeGraphCapture310P();
+                }
+                CHECK_ACL(aclmdlRIExecuteAsync(graph.modelRI, rt.stream));
+                rt.RecordDecodeGraphReplay310P();
+            }
+            CHECK_ACL(aclrtMemcpyAsync(_output.ptr, _output.bytes, graphOutput.ptr,
+                                       graphOutput.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                       rt.stream));
+        } else
+#endif
+        {
+            _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv,
+                                            _deepstackInputEmbeds, _freqsCis,
+                                            _inputIds, _output);
+        }
     } catch (...) {
 #ifdef XLITE_ARCH_310P
         rt.nativeAtbRopeStageCallback = {};
@@ -3028,6 +3109,8 @@ PYBIND11_MODULE(_C, m)
         info["default_matmul_backend"] = "m200_asr";
         info["m200_asr_prefill"] = true;
         info["m200_asr_prefill_max_m"] = 4096;
+        info["decode_graph_310p"] = true;
+        info["decode_graph_310p_mode"] = "direct_atb_m200_asr_decode_only";
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;
@@ -3098,6 +3181,10 @@ PYBIND11_MODULE(_C, m)
         stats["aclnn_matmul_event_waits"] = rt.AclnnMatmulEventWaits();
         stats["aclnn_matmul_peak_inflight"] = rt.AclnnMatmulPeakInflight();
         stats["aclnn_matmul_async"] = rt.UseAclnnMatmulAsync310P();
+        stats["decode_graph_warmups"] = rt.DecodeGraphWarmups310P();
+        stats["decode_graph_captures"] = rt.DecodeGraphCaptures310P();
+        stats["decode_graph_replays"] = rt.DecodeGraphReplays310P();
+        stats["decode_graph_fallbacks"] = rt.DecodeGraphFallbacks310P();
         stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
         stats["legacy_decode_attention_requests"] =
             rt.LegacyDecodeAttentionRequests();
@@ -3169,6 +3256,8 @@ PYBIND11_MODULE(_C, m)
              &XRuntime::SetDirectAtbSetupReuse310P, py::arg("enabled"))
         .def("set_batched_prefill_attention_310p",
              &XRuntime::SetBatchedPrefillAttention310P, py::arg("enabled"))
+        .def("set_decode_graph_310p", &XRuntime::SetDecodeGraph310P,
+             py::arg("enabled"))
 #endif
         .def("get_stats", [](const XRuntime &rt) {
             py::dict stats;
@@ -3189,6 +3278,10 @@ PYBIND11_MODULE(_C, m)
             }
             stats["m200_requests_by_m"] = m200ByM;
             stats["aclnn_requests_by_m"] = aclnnByM;
+            stats["decode_graph_warmups"] = rt.DecodeGraphWarmups310P();
+            stats["decode_graph_captures"] = rt.DecodeGraphCaptures310P();
+            stats["decode_graph_replays"] = rt.DecodeGraphReplays310P();
+            stats["decode_graph_fallbacks"] = rt.DecodeGraphFallbacks310P();
 #endif
             stats["stream_synchronizations"] = rt.StreamSynchronizations();
             stats["prepare_attn_synchronizations"] = rt.PrepareAttnSynchronizations();

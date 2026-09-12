@@ -153,6 +153,14 @@ public:
                                  std::vector<std::vector<XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &inputIds, XTensor &output);
+    void PrepareForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
+                                        XModelAttnMeta &attnMeta,
+                                        std::vector<std::vector<XTensor>> &kvCache,
+                                        XTensor &inputIds, XTensor &output);
+    void ForwardWithInputsEmbedsPrepared(XRuntime &rt, XTensor &input,
+                                         std::vector<std::vector<XTensor>> &kvCache,
+                                         std::vector<XTensor> &deepstackInputEmbeds,
+                                         XTensor &freqsCis, XTensor &output);
     size_t GetTensorPoolSize(int dbg);
     // whether to use communication optimization
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)

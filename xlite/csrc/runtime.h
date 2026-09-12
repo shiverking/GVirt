@@ -160,6 +160,22 @@ public:
     {
         _enableBatchedPrefillAttention310P = enabled;
     }
+    void SetDecodeGraph310P(bool enabled)
+    {
+        _decodeGraph310P = enabled;
+    }
+    [[nodiscard]] bool UseDecodeGraph310P(void) const
+    {
+        return _decodeGraph310P;
+    }
+    void RecordDecodeGraphWarmup310P() { ++_decodeGraphWarmups310P; }
+    void RecordDecodeGraphCapture310P() { ++_decodeGraphCaptures310P; }
+    void RecordDecodeGraphReplay310P() { ++_decodeGraphReplays310P; }
+    void RecordDecodeGraphFallback310P() { ++_decodeGraphFallbacks310P; }
+    [[nodiscard]] uint64_t DecodeGraphWarmups310P() const { return _decodeGraphWarmups310P; }
+    [[nodiscard]] uint64_t DecodeGraphCaptures310P() const { return _decodeGraphCaptures310P; }
+    [[nodiscard]] uint64_t DecodeGraphReplays310P() const { return _decodeGraphReplays310P; }
+    [[nodiscard]] uint64_t DecodeGraphFallbacks310P() const { return _decodeGraphFallbacks310P; }
     [[nodiscard]] const char *MatmulBackend310PName(void) const;
     [[nodiscard]] bool UseAclnnMatmulAsync310P(void) const
     {
@@ -729,6 +745,11 @@ protected:
     // completed. Event leases preserve those lifetimes without synchronizing
     // the complete Runtime stream after every MatMul.
     bool _aclnnMatmulAsync310P = false;
+    bool _decodeGraph310P = false;
+    uint64_t _decodeGraphWarmups310P = 0;
+    uint64_t _decodeGraphCaptures310P = 0;
+    uint64_t _decodeGraphReplays310P = 0;
+    uint64_t _decodeGraphFallbacks310P = 0;
     struct AclnnMatmulLease310P {
         aclrtEvent event = nullptr;
         std::vector<XTensor *> tensors;

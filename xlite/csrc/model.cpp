@@ -1888,6 +1888,15 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                      XTensor &inputIds, XTensor &output)
 {
+    PrepareForwardWithInputsEmbeds(rt, input, attnMeta, kvCache, inputIds, output);
+    ForwardWithInputsEmbedsPrepared(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
+}
+
+void XModel::PrepareForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
+                                            XModelAttnMeta &attnMeta,
+                                            std::vector<std::vector<XTensor>> &kvCache,
+                                            XTensor &inputIds, XTensor &output)
+{
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
                    _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
@@ -1907,6 +1916,13 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
     if (inputIds.ptr != nullptr && inputIds.numel != 0) {
         _inputIds.Init(inputIds.shape, inputIds.dtype, inputIds.ptr);
     }
+}
+
+void XModel::ForwardWithInputsEmbedsPrepared(XRuntime &rt, XTensor &input,
+                                             std::vector<std::vector<XTensor>> &kvCache,
+                                             std::vector<XTensor> &deepstackInputEmbeds,
+                                             XTensor &freqsCis, XTensor &output)
+{
     if (rt.enableCommOptimize) {
         size_t mPad = ROUND_UP(input.shape[0], _c.defTpSize);
         XTensor *xPadPtr, xPad;
