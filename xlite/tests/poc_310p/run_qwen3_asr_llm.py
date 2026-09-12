@@ -90,6 +90,10 @@ def main() -> int:
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--num-layers", type=int, help="POC gate override; use 1 for Gate 5")
     parser.add_argument("--stability-iters", type=int, default=50)
+    parser.add_argument(
+        "--aclnn-matmul-async", action="store_true",
+        help="retire 310P ACLNN MatMul resources with completion events",
+    )
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))
     args = parser.parse_args()
@@ -118,6 +122,10 @@ def main() -> int:
     with torch.device("npu"):
         model = Llama(model_args)
     model.load_weights(args.checkpoint)
+    if args.aclnn_matmul_async:
+        if not hasattr(model.xlite_rt, "set_aclnn_matmul_async_310p"):
+            raise RuntimeError("installed Xlite does not expose ACLNN MatMul event leases")
+        model.xlite_rt.set_aclnn_matmul_async_310p(True)
 
     non_fp16_parameters = [name for name, value in model.named_parameters()
                            if value.dtype != torch.float16]
@@ -266,6 +274,7 @@ def main() -> int:
         "peak_memory_bytes": int(torch.npu.max_memory_allocated()),
         "stability_iterations": args.stability_iters,
         "memory_growth_bytes": final_memory - initial_memory,
+        "xlite_runtime_stats": dict(model.xlite_rt.get_stats()),
         "acceptance": {
             "hidden_cosine_gte_0_999": hidden_cosine >= 0.999,
             "logits_cosine_gte_0_999": logits_cosine >= 0.999,
