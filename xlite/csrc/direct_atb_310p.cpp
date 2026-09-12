@@ -59,7 +59,8 @@ void RunOperation(atb::Operation *operation, atb::VariantPack &pack, atb::Contex
                   const XliteDirectAtb310P::WorkspaceRelease &release,
                   bool reuseSetup, bool signatureReused, bool &setupReady,
                   uint64_t &cachedWorkspaceSize, uint64_t &setupCount,
-                  uint64_t &setupReuseCount, uint64_t &executeCount)
+                  uint64_t &setupReuseCount, uint64_t &executeCount,
+                  bool graphLaunchMode)
 {
     uint64_t workspaceSize = cachedWorkspaceSize;
     if (!reuseSetup || !signatureReused || !setupReady) {
@@ -76,9 +77,44 @@ void RunOperation(atb::Operation *operation, atb::VariantPack &pack, atb::Contex
         throw std::runtime_error("310P direct ATB workspace allocator returned null");
     }
     try {
-        CheckAtb(operation->Execute(pack, static_cast<uint8_t *>(workspace), workspaceSize, context),
-                 "Execute");
+        if (graphLaunchMode) {
+            context->SetExecuteType(atb::EXECUTE_PRELAUNCH);
+            CheckAtb(operation->Execute(pack, static_cast<uint8_t *>(workspace),
+                                        workspaceSize, context), "ExecutePreLaunch");
+            context->SetExecuteType(atb::EXECUTE_LAUNCH);
+            CheckAtb(operation->Execute(pack, static_cast<uint8_t *>(workspace),
+                                        workspaceSize, context), "ExecuteLaunch");
+        } else {
+            CheckAtb(operation->Execute(pack, static_cast<uint8_t *>(workspace),
+                                        workspaceSize, context), "Execute");
+        }
         ++executeCount;
+    } catch (...) {
+        if (workspace != nullptr) {
+            release(workspace);
+        }
+        throw;
+    }
+    if (workspace != nullptr) {
+        release(workspace);
+    }
+}
+
+void PrepareGraphOperation(atb::Operation *operation, atb::VariantPack &pack,
+                           atb::Context *context,
+                           const XliteDirectAtb310P::WorkspaceAcquire &acquire,
+                           const XliteDirectAtb310P::WorkspaceRelease &release,
+                           uint64_t &workspaceSize)
+{
+    CheckAtb(operation->Setup(pack, workspaceSize, context), "GraphReplaySetup");
+    void *workspace = workspaceSize == 0 ? nullptr : acquire(static_cast<size_t>(workspaceSize));
+    if (workspaceSize != 0 && workspace == nullptr) {
+        throw std::runtime_error("310P direct ATB graph workspace allocator returned null");
+    }
+    try {
+        context->SetExecuteType(atb::EXECUTE_PRELAUNCH);
+        CheckAtb(operation->Execute(pack, static_cast<uint8_t *>(workspace),
+                                    workspaceSize, context), "GraphReplayPreLaunch");
     } catch (...) {
         if (workspace != nullptr) {
             release(workspace);
@@ -190,6 +226,7 @@ public:
     uint64_t setupReuseCount = 0;
     uint64_t executeCount = 0;
     bool reuseSetup = false;
+    bool graphLaunchMode = false;
 };
 
 XliteDirectAtb310P::XliteDirectAtb310P() : impl_(std::make_unique<Impl>()) {}
@@ -210,6 +247,37 @@ void XliteDirectAtb310P::SetStream(aclrtStream stream)
 void XliteDirectAtb310P::SetSetupReuse(bool enabled)
 {
     impl_->reuseSetup = enabled;
+}
+
+void XliteDirectAtb310P::SetGraphLaunchMode()
+{
+    if (!impl_->graphLaunchMode) {
+        CheckAtb(impl_->context->SetLaunchMode(atb::GRAPH_LAUNCH_MODE),
+                 "SetGraphLaunchMode");
+        impl_->graphLaunchMode = true;
+    }
+}
+
+void XliteDirectAtb310P::PrepareGraphReplay(
+    uint32_t batch, const WorkspaceAcquire &acquire,
+    const WorkspaceRelease &release)
+{
+    if (!impl_->graphLaunchMode) {
+        throw std::runtime_error("310P direct ATB graph replay requires graph launch mode");
+    }
+    for (const std::unique_ptr<Impl::LayerPlan> &layer : impl_->layers) {
+        if (layer == nullptr || layer->reshape == nullptr ||
+            layer->pagedByBatch.size() <= batch ||
+            layer->pagedByBatch[batch] == nullptr ||
+            layer->pagedByBatch[batch]->operation == nullptr) {
+            throw std::runtime_error("310P direct ATB graph replay plan is incomplete");
+        }
+        PrepareGraphOperation(layer->reshape, layer->reshapePack, impl_->context,
+                              acquire, release, layer->reshapeWorkspaceSize);
+        Impl::PagedPlan &paged = *layer->pagedByBatch[batch];
+        PrepareGraphOperation(paged.operation, paged.pack, impl_->context,
+                              acquire, release, paged.workspaceSize);
+    }
 }
 
 bool XliteDirectAtb310P::ReshapeAndCache(
@@ -240,7 +308,8 @@ bool XliteDirectAtb310P::ReshapeAndCache(
         {tokens, cacheBlocks, 0});
     RunOperation(plan.reshape, pack, impl_->context, acquire, release, impl_->reuseSetup,
                  reused, plan.reshapeSetupReady, plan.reshapeWorkspaceSize,
-                 impl_->setupCount, impl_->setupReuseCount, impl_->executeCount);
+                 impl_->setupCount, impl_->setupReuseCount, impl_->executeCount,
+                 impl_->graphLaunchMode);
     return reused;
 }
 
@@ -276,7 +345,8 @@ bool XliteDirectAtb310P::PagedAttention(
         {batch, cacheBlocks, tableColumns});
     RunOperation(plan.operation, pack, impl_->context, acquire, release, impl_->reuseSetup,
                  reused, plan.setupReady, plan.workspaceSize, impl_->setupCount,
-                 impl_->setupReuseCount, impl_->executeCount);
+                 impl_->setupReuseCount, impl_->executeCount,
+                 impl_->graphLaunchMode);
     return reused;
 }
 

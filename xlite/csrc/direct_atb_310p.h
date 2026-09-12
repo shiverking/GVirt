@@ -24,6 +24,9 @@ public:
 
     void SetStream(aclrtStream stream);
     void SetSetupReuse(bool enabled);
+    void SetGraphLaunchMode();
+    void PrepareGraphReplay(uint32_t batch, const WorkspaceAcquire &acquire,
+                            const WorkspaceRelease &release);
     bool ReshapeAndCache(uint32_t layer, void *key, void *value, uint32_t tokens,
                          void *keyCache, void *valueCache, uint32_t cacheBlocks, void *slots,
                          const WorkspaceAcquire &acquire, const WorkspaceRelease &release);

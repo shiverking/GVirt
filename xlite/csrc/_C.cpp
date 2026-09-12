@@ -214,6 +214,8 @@ private:
     std::vector<std::vector<at::Tensor>> _nativeKv310P;
 #ifdef XLITE_DIRECT_ATB_310P
     std::unique_ptr<XliteDirectAtb310P> _directAtb310P;
+    std::unique_ptr<XliteDirectAtb310P> _directAtbGraph310P;
+    bool _capturingDecodeGraph310P = false;
 #endif
     at::Tensor _nativeQueryStage310P;
     at::Tensor _nativeKeyStage310P;
@@ -834,6 +836,7 @@ _CModel::~_CModel(void)
     }
 #endif
 #ifdef XLITE_DIRECT_ATB_310P
+    _directAtbGraph310P.reset();
     _directAtb310P.reset();
 #endif
     if (_model != nullptr) {
@@ -1113,11 +1116,17 @@ bool _CModel::RunNativeAtbAttention310P(
 
 #ifdef XLITE_DIRECT_ATB_310P
     if (rt.UseDirectAtbDecodeAttention310P()) {
-        if (_directAtb310P == nullptr) {
-            _directAtb310P = std::make_unique<XliteDirectAtb310P>();
+        std::unique_ptr<XliteDirectAtb310P> &directAtbOwner =
+            _capturingDecodeGraph310P ? _directAtbGraph310P : _directAtb310P;
+        if (directAtbOwner == nullptr) {
+            directAtbOwner = std::make_unique<XliteDirectAtb310P>();
         }
-        _directAtb310P->SetStream(rt.stream);
-        _directAtb310P->SetSetupReuse(rt.UseDirectAtbSetupReuse310P());
+        XliteDirectAtb310P &directAtb = *directAtbOwner;
+        directAtb.SetStream(rt.stream);
+        directAtb.SetSetupReuse(rt.UseDirectAtbSetupReuse310P());
+        if (_capturingDecodeGraph310P) {
+            directAtb.SetGraphLaunchMode();
+        }
         XTensor *workspaceTensor = nullptr;
         const auto acquire = [&rt, &workspaceTensor](size_t bytes) -> void * {
             workspaceTensor = &rt.GetTensor({bytes}, INT8, DBG_LOC);
@@ -1130,17 +1139,17 @@ bool _CModel::RunNativeAtbAttention310P(
             }
         };
         const uint32_t cacheBlocks = static_cast<uint32_t>(nativeK.size(0));
-        const uint64_t reshapeSetupBefore = _directAtb310P->SetupCount();
-        const uint64_t reshapeReuseBefore = _directAtb310P->SetupReuseCount();
-        const bool reshapePlanReused = _directAtb310P->ReshapeAndCache(
+        const uint64_t reshapeSetupBefore = directAtb.SetupCount();
+        const uint64_t reshapeReuseBefore = directAtb.SetupReuseCount();
+        const bool reshapePlanReused = directAtb.ReshapeAndCache(
             static_cast<uint32_t>(layer), TensorPtr(key), TensorPtr(value),
             static_cast<uint32_t>(tokens), TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
             slotMapping.ptr, acquire, release);
         rt.RecordDirectAtbPlan(reshapePlanReused, false);
-        if (_directAtb310P->SetupCount() != reshapeSetupBefore) {
+        if (directAtb.SetupCount() != reshapeSetupBefore) {
             rt.RecordDirectAtbSetup();
         }
-        if (_directAtb310P->SetupReuseCount() != reshapeReuseBefore) {
+        if (directAtb.SetupReuseCount() != reshapeReuseBefore) {
             rt.RecordDirectAtbSetupReuse();
         }
         rt.RecordDirectAtbExecute(false);
@@ -1174,18 +1183,18 @@ bool _CModel::RunNativeAtbAttention310P(
                                        rt._decodeQueryOffsets, decodeBatch, false);
             rt.RecordDirectAtbCompact(static_cast<uint64_t>(decodeBatch) * qBytes);
         }
-        const uint64_t pagedSetupBefore = _directAtb310P->SetupCount();
-        const uint64_t pagedReuseBefore = _directAtb310P->SetupReuseCount();
-        const bool pagedPlanReused = _directAtb310P->PagedAttention(
+        const uint64_t pagedSetupBefore = directAtb.SetupCount();
+        const uint64_t pagedReuseBefore = directAtb.SetupReuseCount();
+        const bool pagedPlanReused = directAtb.PagedAttention(
             static_cast<uint32_t>(layer), TensorPtr(decodeQuery), decodeBatch,
             TensorPtr(nativeK), TensorPtr(nativeV), cacheBlocks,
             rt._decodeBlockTables.ptr, rt._decodeTableColumns,
             rt._decodeTotalLens.ptr, TensorPtr(decodeOutput), acquire, release);
         rt.RecordDirectAtbPlan(pagedPlanReused, true);
-        if (_directAtb310P->SetupCount() != pagedSetupBefore) {
+        if (directAtb.SetupCount() != pagedSetupBefore) {
             rt.RecordDirectAtbSetup();
         }
-        if (_directAtb310P->SetupReuseCount() != pagedReuseBefore) {
+        if (directAtb.SetupReuseCount() != pagedReuseBefore) {
             rt.RecordDirectAtbSetupReuse();
         }
         rt.RecordDirectAtbExecute(true, decodeBatch);
@@ -1728,13 +1737,39 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                 rt.RecordDecodeGraphWarmup310P();
             } else {
                 if (graph.modelRI == nullptr) {
+                    _capturingDecodeGraph310P = true;
                     CHECK_ACL(aclmdlRICaptureBegin(
-                        rt.stream, ACL_MODEL_RI_CAPTURE_MODE_GLOBAL));
-                    _model->ForwardWithInputsEmbedsPrepared(rt, graphInput, _kv,
-                                                            _deepstackInputEmbeds, _freqsCis,
-                                                            graphOutput);
-                    CHECK_ACL(aclmdlRICaptureEnd(rt.stream, &graph.modelRI));
+                        rt.stream, ACL_MODEL_RI_CAPTURE_MODE_RELAXED));
+                    try {
+                        _model->ForwardWithInputsEmbedsPrepared(
+                            rt, graphInput, _kv, _deepstackInputEmbeds,
+                            _freqsCis, graphOutput);
+                        CHECK_ACL(aclmdlRICaptureEnd(rt.stream, &graph.modelRI));
+                    } catch (...) {
+                        _capturingDecodeGraph310P = false;
+                        throw;
+                    }
+                    _capturingDecodeGraph310P = false;
                     rt.RecordDecodeGraphCapture310P();
+                } else {
+#ifdef XLITE_DIRECT_ATB_310P
+                    if (_directAtbGraph310P == nullptr) {
+                        throw std::runtime_error(
+                            "310P Decode Graph lost its direct ATB graph context");
+                    }
+                    XTensor *workspaceTensor = nullptr;
+                    const auto acquire = [&rt, &workspaceTensor](size_t bytes) -> void * {
+                        workspaceTensor = &rt.GetTensor({bytes}, INT8, DBG_LOC);
+                        return workspaceTensor->ptr;
+                    };
+                    const auto release = [&rt, &workspaceTensor](void *) {
+                        if (workspaceTensor != nullptr) {
+                            rt.PutTensor(*workspaceTensor);
+                            workspaceTensor = nullptr;
+                        }
+                    };
+                    _directAtbGraph310P->PrepareGraphReplay(graphBatch, acquire, release);
+#endif
                 }
                 CHECK_ACL(aclmdlRIExecuteAsync(graph.modelRI, rt.stream));
                 rt.RecordDecodeGraphReplay310P();
@@ -3110,7 +3145,8 @@ PYBIND11_MODULE(_C, m)
         info["m200_asr_prefill"] = true;
         info["m200_asr_prefill_max_m"] = 4096;
         info["decode_graph_310p"] = true;
-        info["decode_graph_310p_mode"] = "direct_atb_m200_asr_decode_only";
+        info["decode_graph_310p_mode"] =
+            "direct_atb_external_capture_prelaunch_m200_asr_decode_only";
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;
