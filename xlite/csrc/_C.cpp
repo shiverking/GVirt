@@ -1757,18 +1757,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                         throw std::runtime_error(
                             "310P Decode Graph lost its direct ATB graph context");
                     }
-                    XTensor *workspaceTensor = nullptr;
-                    const auto acquire = [&rt, &workspaceTensor](size_t bytes) -> void * {
-                        workspaceTensor = &rt.GetTensor({bytes}, INT8, DBG_LOC);
-                        return workspaceTensor->ptr;
-                    };
-                    const auto release = [&rt, &workspaceTensor](void *) {
-                        if (workspaceTensor != nullptr) {
-                            rt.PutTensor(*workspaceTensor);
-                            workspaceTensor = nullptr;
-                        }
-                    };
-                    _directAtbGraph310P->PrepareGraphReplay(graphBatch, acquire, release);
+                    _directAtbGraph310P->PrepareGraphReplay(graphBatch);
 #endif
                 }
                 CHECK_ACL(aclmdlRIExecuteAsync(graph.modelRI, rt.stream));
@@ -3147,6 +3136,7 @@ PYBIND11_MODULE(_C, m)
         info["decode_graph_310p"] = true;
         info["decode_graph_310p_mode"] =
             "direct_atb_external_capture_prelaunch_m200_asr_decode_only";
+        info["decode_graph_310p_atb_workspace"] = "capture_address_reuse";
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;
