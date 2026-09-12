@@ -19,7 +19,7 @@ PROJECTIONS = (
     ("down", 2048, 6144),
     ("lm-head", 151936, 2048),
 )
-M_VALUES = (1, 8, 20, 127, 128, 129)
+M_VALUES = (1, 8, 20, 26, 52, 78, 127, 128, 129, 256, 384, 512)
 
 
 def run_shape(m: int, n: int, k: int) -> None:
@@ -68,7 +68,8 @@ def run_shape(m: int, n: int, k: int) -> None:
     }), flush=True)
     # Compare on CPU to avoid the device-side isclose double-tolerance warning.
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
-    use_m200 = backend == "m200_asr" and m <= 20 and n != 151936
+    use_m200 = (backend == "m200_asr" and m <= 20 and n != 151936) or (
+        backend == "m200_asr_prefill" and m <= 4096 and n != 151936)
     if use_m200:
         expected_launches = 13 if n == 151936 else 1
         if (backend_stats["m200_requests"] != 1 or
@@ -92,7 +93,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-dir", type=Path, default=Path("matmul_310p_report"))
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per shape")
-    parser.add_argument("--backend", choices=("m200_asr", "aclnn"), default="m200_asr",
+    parser.add_argument("--backend", choices=("m200_asr_prefill", "m200_asr", "aclnn"),
+                        default="m200_asr",
                         help="Force one 310P MatMul backend in every selected case")
     parser.add_argument("--list", action="store_true", help="List shapes without loading NPU")
     parser.add_argument(
