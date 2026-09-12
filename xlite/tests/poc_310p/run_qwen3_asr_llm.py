@@ -94,6 +94,12 @@ def main() -> int:
         "--aclnn-matmul-async", action="store_true",
         help="event-retire Decoder ACLNN MatMul resources; keep LM Head synchronized",
     )
+    parser.add_argument(
+        "--matmul-backend",
+        choices=("m200_asr_prefill", "m200_asr", "aclnn"),
+        default="m200_asr",
+        help="310P MatMul backend; m200_asr_prefill is experimental",
+    )
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))
     args = parser.parse_args()
@@ -122,6 +128,9 @@ def main() -> int:
     with torch.device("npu"):
         model = Llama(model_args)
     model.load_weights(args.checkpoint)
+    if not hasattr(model.xlite_rt, "set_matmul_backend_310p"):
+        raise RuntimeError("installed Xlite does not expose selectable 310P MatMul backends")
+    model.xlite_rt.set_matmul_backend_310p(args.matmul_backend)
     if args.aclnn_matmul_async:
         if not hasattr(model.xlite_rt, "set_aclnn_matmul_async_310p"):
             raise RuntimeError("installed Xlite does not expose ACLNN MatMul event leases")
