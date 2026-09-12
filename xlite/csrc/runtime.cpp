@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -157,6 +158,23 @@ XRuntime::~XRuntime(void)
         (void)aclrtSynchronizeStream(stream);
     }
 #ifdef XLITE_ARCH_310P
+    // The stream drain above makes deferred ACLNN resources safe to release.
+    // Retire them before deleting the TensorPool that owns their tensors.
+    while (!_aclnnMatmulLeases310P.empty()) {
+        AclnnMatmulLease310P &lease = _aclnnMatmulLeases310P.front();
+        if (lease.event != nullptr) {
+            (void)aclrtDestroyEvent(lease.event);
+        }
+        if (lease.cleanup) {
+            lease.cleanup();
+        }
+        for (XTensor *tensor : lease.tensors) {
+            if (tensor != nullptr) {
+                PutTensor(*tensor);
+            }
+        }
+        _aclnnMatmulLeases310P.pop_front();
+    }
     XliteM200Matmul310PDestroy(*this);
 #endif
     FiniXcclComm();
@@ -307,6 +325,57 @@ void XRuntime::SetMatmulBackend310P(const std::string &backend)
 const char *XRuntime::MatmulBackend310PName(void) const
 {
     return _matmulBackend310P == XMatmulBackend310P::M200_ASR ? "m200_asr" : "aclnn";
+}
+
+void XRuntime::ReapAclnnMatmulLeases310P(bool waitOldest)
+{
+    if (_aclnnMatmulLeases310P.empty()) {
+        return;
+    }
+    if (waitOldest) {
+        CHECK_ACL(aclrtSynchronizeEvent(_aclnnMatmulLeases310P.front().event));
+        ++_aclnnMatmulEventWaits;
+    }
+    while (!_aclnnMatmulLeases310P.empty()) {
+        AclnnMatmulLease310P &lease = _aclnnMatmulLeases310P.front();
+        aclrtEventRecordedStatus status = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+        CHECK_ACL(aclrtQueryEventStatus(lease.event, &status));
+        if (status != ACL_EVENT_RECORDED_STATUS_COMPLETE) {
+            break;
+        }
+        CHECK_ACL(aclrtDestroyEvent(lease.event));
+        if (lease.cleanup) {
+            lease.cleanup();
+        }
+        for (XTensor *tensor : lease.tensors) {
+            if (tensor != nullptr) {
+                PutTensor(*tensor);
+            }
+        }
+        _aclnnMatmulLeases310P.pop_front();
+        ++_aclnnMatmulEventRetirements;
+    }
+}
+
+void XRuntime::RetireAclnnMatmulResources310P(std::vector<XTensor *> tensors,
+                                               std::function<void()> cleanup,
+                                               bool lmHead)
+{
+    constexpr size_t kMaxInflightAclnnMatmuls = 8;
+    ReapAclnnMatmulLeases310P(false);
+    if (_aclnnMatmulLeases310P.size() >= kMaxInflightAclnnMatmuls) {
+        ReapAclnnMatmulLeases310P(true);
+    }
+    AclnnMatmulLease310P lease;
+    CHECK_ACL(aclrtCreateEventWithFlag(&lease.event, ACL_EVENT_SYNC));
+    CHECK_ACL(aclrtRecordEvent(lease.event, stream));
+    lease.tensors = std::move(tensors);
+    lease.cleanup = std::move(cleanup);
+    _aclnnMatmulLeases310P.emplace_back(std::move(lease));
+    ++_aclnnMatmulEventLeases;
+    _aclnnMatmulPeakInflight =
+        std::max<uint64_t>(_aclnnMatmulPeakInflight, _aclnnMatmulLeases310P.size());
+    (void)lmHead;
 }
 
 void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)

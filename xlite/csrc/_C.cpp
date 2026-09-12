@@ -3028,6 +3028,7 @@ PYBIND11_MODULE(_C, m)
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;
+        info["aclnn_matmul_event_lease"] = true;
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";
@@ -3087,6 +3088,12 @@ PYBIND11_MODULE(_C, m)
         stats["aclnn_matmul_synchronizations"] =
             rt.AclnnMatmulSynchronizations();
         stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
+        stats["aclnn_matmul_event_leases"] = rt.AclnnMatmulEventLeases();
+        stats["aclnn_matmul_event_retirements"] =
+            rt.AclnnMatmulEventRetirements();
+        stats["aclnn_matmul_event_waits"] = rt.AclnnMatmulEventWaits();
+        stats["aclnn_matmul_peak_inflight"] = rt.AclnnMatmulPeakInflight();
+        stats["aclnn_matmul_async"] = rt.UseAclnnMatmulAsync310P();
         stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
         stats["legacy_decode_attention_requests"] =
             rt.LegacyDecodeAttentionRequests();
@@ -3150,6 +3157,8 @@ PYBIND11_MODULE(_C, m)
 #ifdef XLITE_ARCH_310P
         .def("set_matmul_backend_310p", &XRuntime::SetMatmulBackend310P,
              py::arg("backend"))
+        .def("set_aclnn_matmul_async_310p", &XRuntime::SetAclnnMatmulAsync310P,
+             py::arg("enabled"))
         .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend310P,
              py::arg("backend"))
         .def("set_direct_atb_setup_reuse_310p",
@@ -3212,6 +3221,12 @@ PYBIND11_MODULE(_C, m)
             stats["aclnn_matmul_synchronizations"] =
                 rt.AclnnMatmulSynchronizations();
             stats["lm_head_synchronizations"] = rt.LmHeadSynchronizations();
+            stats["aclnn_matmul_event_leases"] = rt.AclnnMatmulEventLeases();
+            stats["aclnn_matmul_event_retirements"] =
+                rt.AclnnMatmulEventRetirements();
+            stats["aclnn_matmul_event_waits"] = rt.AclnnMatmulEventWaits();
+            stats["aclnn_matmul_peak_inflight"] = rt.AclnnMatmulPeakInflight();
+            stats["aclnn_matmul_async"] = rt.UseAclnnMatmulAsync310P();
             stats["legacy_attention_requests"] = rt.LegacyAttentionRequests();
             stats["legacy_decode_attention_requests"] =
                 rt.LegacyDecodeAttentionRequests();

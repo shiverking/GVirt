@@ -114,15 +114,31 @@ static XTensor *GetWorkspace(XRuntime &rt, uint64_t workspaceSize, bool attentio
         throw std::runtime_error("ACLNN workspace request " + std::to_string(workspaceSize) +
                                  " bytes exceeds the 512 MiB reserved 310P TensorPool budget");
     }
-    XTensor &workspace = rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
-    if (attention) {
-        rt.RecordAttentionWorkspace(workspace.ptr);
+    if (!attention && rt.UseAclnnMatmulAsync310P()) {
+        rt.ReapAclnnMatmulLeases310P(false);
     }
-    return &workspace;
+    XTensor *workspace = nullptr;
+    try {
+        workspace = &rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
+    } catch (const std::runtime_error &) {
+        if (attention || !rt.UseAclnnMatmulAsync310P()) {
+            throw;
+        }
+        // Bounded TensorPool pressure is the back-pressure mechanism: wait
+        // only for the oldest ACLNN event, retire completed leases, and retry.
+        rt.ReapAclnnMatmulLeases310P(true);
+        workspace = &rt.GetTensor({static_cast<size_t>(workspaceSize)}, INT8, DBG_LOC);
+    }
+    if (attention) {
+        rt.RecordAttentionWorkspace(workspace->ptr);
+    }
+    return workspace;
 }
 
 static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention,
-                        bool lmHead = false)
+                        bool lmHead = false,
+                        std::vector<XTensor *> retainedTensors = {},
+                        std::function<void()> cleanup = {})
 {
     if (attention) {
         rt.RecordAttentionAclnnLaunch();
@@ -135,11 +151,22 @@ static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention,
             rt.Synchronize();
         }
     } else {
+        if (rt.UseAclnnMatmulAsync310P()) {
+            if (workspace != nullptr) {
+                retainedTensors.push_back(workspace);
+            }
+            rt.RetireAclnnMatmulResources310P(
+                std::move(retainedTensors), std::move(cleanup), lmHead);
+            return;
+        }
         rt.RecordAclnnMatmulSynchronization(lmHead);
         rt.Synchronize();
     }
     if (workspace != nullptr) {
         rt.PutTensor(*workspace);
+    }
+    if (cleanup) {
+        cleanup();
     }
 }
 
@@ -521,21 +548,22 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         const std::vector<int64_t> inDims{m, k};
         const std::vector<int64_t> weightDims{k, currentN};
         const std::vector<int64_t> outDims{m, currentN};
-        AclTensorGuard aclIn(
+        auto aclIn = std::make_shared<AclTensorGuard>(
             CreateTensor(inDims, ContiguousStrides(inDims), ACL_FLOAT16, in.ptr));
-        AclTensorGuard aclWeight(CreateTensor(weightDims, weightStrides, ACL_FLOAT16, weightData,
-                                              weightStorage));
-        AclTensorGuard aclOut(
+        auto aclWeight = std::make_shared<AclTensorGuard>(CreateTensor(
+            weightDims, weightStrides, ACL_FLOAT16, weightData, weightStorage));
+        auto aclOut = std::make_shared<AclTensorGuard>(
             CreateTensor(outDims, ContiguousStrides(outDims), ACL_FLOAT16, outputData));
 
         uint64_t workspaceSize = 0;
         aclOpExecutor *executor = nullptr;
-        CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn.get(), aclWeight.get(), aclOut.get(), 0,
+        CHECK_ACL(aclnnMatmulGetWorkspaceSize(aclIn->get(), aclWeight->get(), aclOut->get(), 0,
                                               &workspaceSize, &executor));
         XTensor *workspace = GetWorkspace(rt, workspaceSize, false);
         CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr, workspaceSize,
                               executor, rt.stream));
-        FinishAclnn(rt, workspace, false);
+        FinishAclnn(rt, workspace, false, false, {},
+                    [aclIn, aclWeight, aclOut]() {});
     };
 
     if (!transpose && n > static_cast<int64_t>(XLITE_310P_MATMUL_N_CHUNK)) {
@@ -558,8 +586,8 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         // experiment while replacing 13 host synchronizations with one.
         XTensor &chunkOutput =
             rt.GetTensor({static_cast<size_t>(m), XLITE_310P_MATMUL_N_CHUNK}, FP16, DBG_LOC);
-        std::vector<PendingChunk> pending;
-        pending.reserve(static_cast<size_t>((n + chunkLimit - 1) / chunkLimit));
+        auto pending = std::make_shared<std::vector<PendingChunk>>();
+        pending->reserve(static_cast<size_t>((n + chunkLimit - 1) / chunkLimit));
         uint64_t maxWorkspaceSize = 0;
         for (int64_t offset = 0; offset < n; offset += chunkLimit) {
             const int64_t currentN = std::min(chunkLimit, n - offset);
@@ -581,11 +609,11 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
             maxWorkspaceSize = std::max(maxWorkspaceSize, chunk.workspaceSize);
             chunk.offset = offset;
             chunk.width = currentN;
-            pending.emplace_back(std::move(chunk));
+            pending->emplace_back(std::move(chunk));
         }
 
         XTensor *workspace = GetWorkspace(rt, maxWorkspaceSize, false);
-        for (const PendingChunk &chunk : pending) {
+        for (const PendingChunk &chunk : *pending) {
             CHECK_ACL(aclnnMatmul(workspace == nullptr ? nullptr : workspace->ptr,
                                   chunk.workspaceSize, chunk.executor, rt.stream));
             void *outputData = static_cast<void *>(
@@ -596,12 +624,7 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                 static_cast<size_t>(chunk.width) * sizeof(uint16_t), static_cast<size_t>(m),
                 ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
-        rt.RecordAclnnMatmulSynchronization(true);
-        rt.Synchronize();
-        if (workspace != nullptr) {
-            rt.PutTensor(*workspace);
-        }
-        rt.PutTensor(chunkOutput);
+        FinishAclnn(rt, workspace, false, true, {&chunkOutput}, [pending]() {});
         return;
     }
 

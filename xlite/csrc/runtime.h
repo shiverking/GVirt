@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <string>
@@ -146,6 +147,10 @@ public:
 #ifdef XLITE_ARCH_310P
     void SetMatmulBackend310P(const std::string &backend);
     void SetDecodeAttentionBackend310P(const std::string &backend);
+    void SetAclnnMatmulAsync310P(bool enabled)
+    {
+        _aclnnMatmulAsync310P = enabled;
+    }
     void SetDirectAtbSetupReuse310P(bool enabled)
     {
         _directAtbSetupReuse310P = enabled;
@@ -155,6 +160,14 @@ public:
         _enableBatchedPrefillAttention310P = enabled;
     }
     [[nodiscard]] const char *MatmulBackend310PName(void) const;
+    [[nodiscard]] bool UseAclnnMatmulAsync310P(void) const
+    {
+        return _aclnnMatmulAsync310P;
+    }
+    void ReapAclnnMatmulLeases310P(bool waitOldest);
+    void RetireAclnnMatmulResources310P(std::vector<XTensor *> tensors,
+                                        std::function<void()> cleanup,
+                                        bool lmHead);
     [[nodiscard]] bool UseM200Matmul310P(void) const
     {
         return _matmulBackend310P == XMatmulBackend310P::M200_ASR;
@@ -402,6 +415,22 @@ public:
     [[nodiscard]] uint64_t LmHeadSynchronizations(void) const
     {
         return _lmHeadSynchronizations;
+    }
+    [[nodiscard]] uint64_t AclnnMatmulEventLeases(void) const
+    {
+        return _aclnnMatmulEventLeases;
+    }
+    [[nodiscard]] uint64_t AclnnMatmulEventRetirements(void) const
+    {
+        return _aclnnMatmulEventRetirements;
+    }
+    [[nodiscard]] uint64_t AclnnMatmulEventWaits(void) const
+    {
+        return _aclnnMatmulEventWaits;
+    }
+    [[nodiscard]] uint64_t AclnnMatmulPeakInflight(void) const
+    {
+        return _aclnnMatmulPeakInflight;
     }
     [[nodiscard]] uint64_t BatchedDecodeAttentionLaunches(void) const
     {
@@ -688,6 +717,16 @@ protected:
     // The V2 batch path is retained for targeted shape diagnosis, but real
     // long/chunked ASR prefills have not passed transcript equivalence yet.
     bool _enableBatchedPrefillAttention310P = false;
+    // ACLNN may retain workspace and tensor descriptors until queued work has
+    // completed. Event leases preserve those lifetimes without synchronizing
+    // the complete Runtime stream after every MatMul.
+    bool _aclnnMatmulAsync310P = false;
+    struct AclnnMatmulLease310P {
+        aclrtEvent event = nullptr;
+        std::vector<XTensor *> tensors;
+        std::function<void()> cleanup;
+    };
+    std::deque<AclnnMatmulLease310P> _aclnnMatmulLeases310P;
 #endif
     int GetNodeIps(void);
     int InitHcclComm(void);
@@ -729,6 +768,10 @@ protected:
     std::map<std::string, uint64_t> _prefillBatchShapeHistogram;
     uint64_t _aclnnMatmulSynchronizations = 0;
     uint64_t _lmHeadSynchronizations = 0;
+    uint64_t _aclnnMatmulEventLeases = 0;
+    uint64_t _aclnnMatmulEventRetirements = 0;
+    uint64_t _aclnnMatmulEventWaits = 0;
+    uint64_t _aclnnMatmulPeakInflight = 0;
     uint64_t _legacyAttentionRequests = 0;
     uint64_t _legacyDecodeAttentionRequests = 0;
     uint64_t _legacyPrefillAttentionRequests = 0;
