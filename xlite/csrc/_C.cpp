@@ -2984,7 +2984,7 @@ PYBIND11_MODULE(_C, m)
         info["direct_decode_attention"] = true;
         info["direct_decode_attention_api"] = "atb::Operation::Setup/Execute";
         info["direct_decode_execution"] = "xlite_runtime_stream";
-        info["direct_atb_runtime_version"] = 7;
+        info["direct_atb_runtime_version"] = 8;
         info["direct_atb_operation_scope"] = "per_layer_batch";
         info["direct_atb_setup_cache"] = true;
         info["direct_atb_fused_rope_staging"] = true;
@@ -2993,7 +2993,8 @@ PYBIND11_MODULE(_C, m)
         info["direct_atb_plan_cache"] = "layer_batch";
         info["direct_atb_metadata_upload"] = "once_per_forward";
         info["direct_atb_pure_decode_direct_output"] = false;
-        info["direct_atb_metadata_single_h2d"] = true;
+        info["direct_atb_metadata_single_h2d"] = false;
+        info["direct_atb_metadata_actual_batch"] = true;
         info["batched_prefill_attention"] = true;
         info["batched_prefill_attention_api"] = "PromptFlashAttentionV1_exact_shape";
         info["batched_prefill_micro_batch"] = 4;
