@@ -15,6 +15,7 @@
 namespace {
 
 constexpr uint32_t kMaxDecodeBatch = 20;
+constexpr uint32_t kMaxAsrBatchedTokens = 4096;
 constexpr uint32_t kLmHeadN = 151936;
 constexpr uint32_t kLmHeadChunkN = 12288;
 constexpr uint32_t kLmHeadRowGroup = 8;
@@ -121,7 +122,7 @@ void Launch(XRuntime &rt, void *a, void *b, void *c, uint32_t m, uint32_t n, uin
 bool XliteM200Matmul310PSupported(const XTensor &in, const XTensor &weight,
                                   const XTensor &out, bool weightNZ,
                                   const XTensor &bias, const XTensor &deqScale,
-                                  bool transpose)
+                                  bool transpose, bool enablePrefill)
 {
     if (weightNZ || transpose || bias.ptr != nullptr || deqScale.ptr != nullptr ||
         in.dtype != FP16 || weight.dtype != FP16 || out.dtype != FP16 ||
@@ -135,7 +136,8 @@ bool XliteM200Matmul310PSupported(const XTensor &in, const XTensor &weight,
     // close in cosine, small logit-order changes can alter greedy decoding and
     // then amplify autoregressively. Decoder projections remain on M200.
     const bool decoderProjection = n != kLmHeadN;
-    return m >= 1 && m <= kMaxDecodeBatch && decoderProjection && weight.shape[1] == k &&
+    const uint32_t maxM = enablePrefill ? kMaxAsrBatchedTokens : kMaxDecodeBatch;
+    return m >= 1 && m <= maxM && decoderProjection && weight.shape[1] == k &&
            out.shape[0] == m && out.shape[1] == n && IsAsrProjection(n, k);
 }
 

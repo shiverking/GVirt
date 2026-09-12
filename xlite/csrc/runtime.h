@@ -80,6 +80,7 @@ enum commType {
 enum class XMatmulBackend310P {
     ACLNN,
     M200_ASR,
+    M200_ASR_PREFILL,
 };
 enum class XDecodeAttentionBackend310P {
     LEGACY,
@@ -170,7 +171,12 @@ public:
                                         bool lmHead);
     [[nodiscard]] bool UseM200Matmul310P(void) const
     {
-        return _matmulBackend310P == XMatmulBackend310P::M200_ASR;
+        return _matmulBackend310P == XMatmulBackend310P::M200_ASR ||
+               _matmulBackend310P == XMatmulBackend310P::M200_ASR_PREFILL;
+    }
+    [[nodiscard]] bool UseM200PrefillMatmul310P(void) const
+    {
+        return _matmulBackend310P == XMatmulBackend310P::M200_ASR_PREFILL;
     }
     [[nodiscard]] bool UseBatchedDecodeAttention310P(void) const
     {
@@ -599,8 +605,10 @@ public:
     uint64_t m200MatmulRequests = 0;
     uint64_t m200MatmulKernelLaunches = 0;
     uint64_t aclnnMatmulRequests = 0;
-    std::array<uint64_t, 21> m200MatmulRequestsByM{};
-    std::array<uint64_t, 21> aclnnMatmulRequestsByM{};
+    // Keep exact M telemetry through the configured 310P batched-token limit.
+    // This is intentionally fixed-size: recording a request must not allocate.
+    std::array<uint64_t, 4097> m200MatmulRequestsByM{};
+    std::array<uint64_t, 4097> aclnnMatmulRequestsByM{};
 #endif
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;

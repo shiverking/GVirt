@@ -42,20 +42,10 @@ extern "C" __global__ __aicore__ void xlite_m200_matmul_float16(
     const uint32_t mBlocks = XliteM200CeilDiv(tiling.M, tiling.singleCoreM);
     const uint32_t nBlocks = XliteM200CeilDiv(tiling.N, tiling.singleCoreN);
     const uint32_t blockIdx = GetBlockIdx();
-    if (blockIdx >= tiling.usedCoreNum || blockIdx >= mBlocks * nBlocks) {
+    const uint32_t totalBlocks = mBlocks * nBlocks;
+    if (blockIdx >= tiling.usedCoreNum || blockIdx >= totalBlocks) {
         return;
     }
-
-    const uint32_t mIndex = blockIdx % mBlocks;
-    const uint32_t nIndex = blockIdx / mBlocks;
-    const uint32_t offsetA = mIndex * tiling.Ka * tiling.singleCoreM;
-    const uint32_t offsetB = nIndex * tiling.singleCoreN * tiling.Kb;
-    const uint32_t offsetC = mIndex * tiling.N * tiling.singleCoreM +
-                             nIndex * tiling.singleCoreN;
-    const uint32_t remainingM = tiling.M - mIndex * tiling.singleCoreM;
-    const uint32_t remainingN = tiling.N - nIndex * tiling.singleCoreN;
-    const uint32_t tailM = remainingM < tiling.singleCoreM ? remainingM : tiling.singleCoreM;
-    const uint32_t tailN = remainingN < tiling.singleCoreN ? remainingN : tiling.singleCoreN;
 
     AscendC::GlobalTensor<half> aGlobal;
     AscendC::GlobalTensor<half> bGlobal;
@@ -73,10 +63,27 @@ extern "C" __global__ __aicore__ void xlite_m200_matmul_float16(
     auto workspaceTensor = localWorkspace.Get<uint8_t>(localMemSize);
     mm.SetLocalWorkspace(workspaceTensor);
     mm.SetOrgShape(tiling.M, tiling.N, tiling.Ka, tiling.Kb);
-    mm.SetTensorA(aGlobal[offsetA], false);
-    // Xlite stores linear weights as physical [N,K].
-    mm.SetTensorB(bGlobal[offsetB], true);
-    mm.SetTail(tailM, tailN);
-    mm.IterateAll(cGlobal[offsetC]);
+    // A large prefill exposes more (M,N) tiles than physical Cube cores. Each
+    // core owns a deterministic grid-stride sequence so a single host launch
+    // covers the complete output without adding per-tile dispatch overhead.
+    for (uint32_t task = blockIdx; task < totalBlocks; task += tiling.usedCoreNum) {
+        const uint32_t mIndex = task % mBlocks;
+        const uint32_t nIndex = task / mBlocks;
+        const uint32_t offsetA = mIndex * tiling.Ka * tiling.singleCoreM;
+        const uint32_t offsetB = nIndex * tiling.singleCoreN * tiling.Kb;
+        const uint32_t offsetC = mIndex * tiling.N * tiling.singleCoreM +
+                                 nIndex * tiling.singleCoreN;
+        const uint32_t remainingM = tiling.M - mIndex * tiling.singleCoreM;
+        const uint32_t remainingN = tiling.N - nIndex * tiling.singleCoreN;
+        const uint32_t tailM =
+            remainingM < tiling.singleCoreM ? remainingM : tiling.singleCoreM;
+        const uint32_t tailN =
+            remainingN < tiling.singleCoreN ? remainingN : tiling.singleCoreN;
+        mm.SetTensorA(aGlobal[offsetA], false);
+        // Xlite stores linear weights as physical [N,K].
+        mm.SetTensorB(bGlobal[offsetB], true);
+        mm.SetTail(tailM, tailN);
+        mm.IterateAll(cGlobal[offsetC]);
+    }
     mm.End();
 }

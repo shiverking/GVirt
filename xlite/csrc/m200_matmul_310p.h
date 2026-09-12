@@ -12,7 +12,7 @@
 bool XliteM200Matmul310PSupported(const XTensor &in, const XTensor &weight,
                                   const XTensor &out, bool weightNZ,
                                   const XTensor &bias, const XTensor &deqScale,
-                                  bool transpose);
+                                  bool transpose, bool enablePrefill);
 void XliteM200Matmul310P(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out);
 void XliteM200Matmul310PDestroy(XRuntime &rt);
 

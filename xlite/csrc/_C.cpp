@@ -3023,8 +3023,11 @@ PYBIND11_MODULE(_C, m)
         info["attention_execution"] = "async_single_stream";
         info["cross_stream_handoff"] = "split_acl_event_sync";
         info["matmul_backend"] = "runtime_selectable";
-        info["matmul_backends"] = py::make_tuple("m200_asr", "aclnn");
+        info["matmul_backends"] =
+            py::make_tuple("m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
+        info["m200_asr_prefill"] = true;
+        info["m200_asr_prefill_max_m"] = 4096;
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;
