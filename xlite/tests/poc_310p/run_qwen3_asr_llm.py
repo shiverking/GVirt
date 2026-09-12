@@ -92,7 +92,7 @@ def main() -> int:
     parser.add_argument("--stability-iters", type=int, default=50)
     parser.add_argument(
         "--aclnn-matmul-async", action="store_true",
-        help="retire 310P ACLNN MatMul resources with completion events",
+        help="event-retire Decoder ACLNN MatMul resources; keep LM Head synchronized",
     )
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))

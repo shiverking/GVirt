@@ -151,7 +151,11 @@ static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention,
             rt.Synchronize();
         }
     } else {
-        if (rt.UseAclnnMatmulAsync310P()) {
+        // Keep the full-vocabulary LM Head as the sole synchronization
+        // boundary. Its logits are consumed immediately by PyTorch sampling,
+        // while the remaining Decoder ACLNN projections can retire through
+        // completion events without changing autoregressive decisions.
+        if (rt.UseAclnnMatmulAsync310P() && !lmHead) {
             if (workspace != nullptr) {
                 retainedTensors.push_back(workspace);
             }
@@ -161,9 +165,17 @@ static void FinishAclnn(XRuntime &rt, XTensor *workspace, bool attention,
         }
         rt.RecordAclnnMatmulSynchronization(lmHead);
         rt.Synchronize();
+        if (rt.UseAclnnMatmulAsync310P()) {
+            rt.ReapAclnnMatmulLeases310P(false);
+        }
     }
     if (workspace != nullptr) {
         rt.PutTensor(*workspace);
+    }
+    for (XTensor *tensor : retainedTensors) {
+        if (tensor != nullptr && tensor != workspace) {
+            rt.PutTensor(*tensor);
+        }
     }
     if (cleanup) {
         cleanup();

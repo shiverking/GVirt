@@ -3029,6 +3029,7 @@ PYBIND11_MODULE(_C, m)
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;
         info["aclnn_matmul_event_lease"] = true;
+        info["aclnn_matmul_event_lease_scope"] = "decoder_non_lm_head";
 #else
         info["abi"] = 0;
         info["cache_layout"] = "native";
