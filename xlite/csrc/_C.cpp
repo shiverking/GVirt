@@ -214,8 +214,6 @@ private:
     std::vector<std::vector<at::Tensor>> _nativeKv310P;
 #ifdef XLITE_DIRECT_ATB_310P
     std::unique_ptr<XliteDirectAtb310P> _directAtb310P;
-    std::unique_ptr<XliteDirectAtb310P> _directAtbGraph310P;
-    bool _capturingDecodeGraph310P = false;
 #endif
     at::Tensor _nativeQueryStage310P;
     at::Tensor _nativeKeyStage310P;
@@ -227,9 +225,13 @@ private:
     std::vector<uint8_t> _directAtbRopeStaged310P;
 #ifdef XLITE_ARCH_310P
     struct DecodeGraph310P {
-        aclmdlRI modelRI = nullptr;
+        std::vector<aclmdlRI> preLayerRI;
+        std::vector<aclmdlRI> postLayerRI;
         at::Tensor input;
         at::Tensor output;
+        at::Tensor hidden;
+        at::Tensor qkv;
+        at::Tensor attn;
         uint32_t warmups = 0;
     };
     std::vector<DecodeGraph310P> _decodeGraphs310P;
@@ -829,14 +831,21 @@ _CModel::~_CModel(void)
 {
 #ifdef XLITE_ARCH_310P
     for (auto &graph : _decodeGraphs310P) {
-        if (graph.modelRI != nullptr) {
-            (void)aclmdlRIDestroy(graph.modelRI);
-            graph.modelRI = nullptr;
+        for (aclmdlRI &modelRI : graph.preLayerRI) {
+            if (modelRI != nullptr) {
+                (void)aclmdlRIDestroy(modelRI);
+                modelRI = nullptr;
+            }
+        }
+        for (aclmdlRI &modelRI : graph.postLayerRI) {
+            if (modelRI != nullptr) {
+                (void)aclmdlRIDestroy(modelRI);
+                modelRI = nullptr;
+            }
         }
     }
 #endif
 #ifdef XLITE_DIRECT_ATB_310P
-    _directAtbGraph310P.reset();
     _directAtb310P.reset();
 #endif
     if (_model != nullptr) {
@@ -1116,17 +1125,12 @@ bool _CModel::RunNativeAtbAttention310P(
 
 #ifdef XLITE_DIRECT_ATB_310P
     if (rt.UseDirectAtbDecodeAttention310P()) {
-        std::unique_ptr<XliteDirectAtb310P> &directAtbOwner =
-            _capturingDecodeGraph310P ? _directAtbGraph310P : _directAtb310P;
-        if (directAtbOwner == nullptr) {
-            directAtbOwner = std::make_unique<XliteDirectAtb310P>();
+        if (_directAtb310P == nullptr) {
+            _directAtb310P = std::make_unique<XliteDirectAtb310P>();
         }
-        XliteDirectAtb310P &directAtb = *directAtbOwner;
+        XliteDirectAtb310P &directAtb = *_directAtb310P;
         directAtb.SetStream(rt.stream);
         directAtb.SetSetupReuse(rt.UseDirectAtbSetupReuse310P());
-        if (_capturingDecodeGraph310P) {
-            directAtb.SetGraphLaunchMode();
-        }
         XTensor *workspaceTensor = nullptr;
         const auto acquire = [&rt, &workspaceTensor](size_t bytes) -> void * {
             workspaceTensor = &rt.GetTensor({bytes}, INT8, DBG_LOC);
@@ -1718,10 +1722,17 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                         input.options());
                 graph.output = at::empty({static_cast<int64_t>(graphBatch), output.size(1)},
                                          output.options());
+                graph.hidden = at::empty_like(graph.input);
+                graph.qkv = at::empty({static_cast<int64_t>(graphBatch), 4096},
+                                       input.options());
+                graph.attn = at::empty_like(graph.input);
             }
-            XTensor graphInput, graphOutput;
+            XTensor graphInput, graphOutput, graphHidden, graphQkv, graphAttn;
             InitXTensor(graphInput, graph.input);
             InitXTensor(graphOutput, graph.output);
+            InitXTensor(graphHidden, graph.hidden);
+            InitXTensor(graphQkv, graph.qkv);
+            InitXTensor(graphAttn, graph.attn);
             CHECK_ACL(aclrtMemcpyAsync(graphInput.ptr, graphInput.bytes, _input.ptr,
                                        graphInput.bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             // Attention metadata changes every decode step and is deliberately
@@ -1736,31 +1747,70 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                 graph.warmups = 1;
                 rt.RecordDecodeGraphWarmup310P();
             } else {
-                if (graph.modelRI == nullptr) {
-                    _capturingDecodeGraph310P = true;
-                    CHECK_ACL(aclmdlRICaptureBegin(
-                        rt.stream, ACL_MODEL_RI_CAPTURE_MODE_RELAXED));
-                    try {
-                        _model->ForwardWithInputsEmbedsPrepared(
-                            rt, graphInput, _kv, _deepstackInputEmbeds,
-                            _freqsCis, graphOutput);
-                        CHECK_ACL(aclmdlRICaptureEnd(rt.stream, &graph.modelRI));
-                    } catch (...) {
-                        _capturingDecodeGraph310P = false;
-                        throw;
+                const uint32_t nLayers = _model->NumLayers();
+                rt._directAtbProcessedRequests.assign(graphBatch, 0);
+                if (graph.preLayerRI.empty()) {
+                    graph.preLayerRI.assign(nLayers, nullptr);
+                    graph.postLayerRI.assign(nLayers, nullptr);
+                    // Capture only Xlite/M200 work. Direct ATB remains outside
+                    // Model-RI: CANN 9.1 reports 507011 when an ATB Operation is
+                    // replayed from the same RI, even with PRELAUNCH and fixed
+                    // workspace addresses. Synchronizations below are one-time
+                    // capture barriers and never run on steady-state replay.
+                    for (uint32_t layer = 0; layer < nLayers; ++layer) {
+                        CHECK_ACL(aclmdlRICaptureBegin(
+                            rt.stream, ACL_MODEL_RI_CAPTURE_MODE_RELAXED));
+                        _model->ForwardDecodeLayerPre310P(
+                            rt, layer, _kv, _freqsCis, graphInput,
+                            graphHidden, graphQkv);
+                        CHECK_ACL(aclmdlRICaptureEnd(
+                            rt.stream, &graph.preLayerRI[layer]));
+                        CHECK_ACL(aclmdlRIExecuteAsync(
+                            graph.preLayerRI[layer], rt.stream));
+                        rt.Synchronize();
+
+                        _directAtbRopeStaged310P[layer] = 1;
+                        const bool handled = RunNativeAtbAttention310P(
+                            rt, graphQkv, _kv[layer][0], _kv[layer][1],
+                            graphAttn, rt._attnSlotMapping[0],
+                            rt._attnBlockTables[0], rt._attnTotalLens,
+                            16, 8, 128, graphBatch);
+                        if (!handled) {
+                            throw std::runtime_error(
+                                "segmented decode graph requires pure Direct ATB decode");
+                        }
+                        rt.Synchronize();
+
+                        CHECK_ACL(aclmdlRICaptureBegin(
+                            rt.stream, ACL_MODEL_RI_CAPTURE_MODE_RELAXED));
+                        _model->ForwardDecodeLayerPost310P(
+                            rt, layer, graphInput, graphHidden,
+                            graphAttn, graphOutput);
+                        CHECK_ACL(aclmdlRICaptureEnd(
+                            rt.stream, &graph.postLayerRI[layer]));
+                        CHECK_ACL(aclmdlRIExecuteAsync(
+                            graph.postLayerRI[layer], rt.stream));
+                        rt.Synchronize();
                     }
-                    _capturingDecodeGraph310P = false;
                     rt.RecordDecodeGraphCapture310P();
                 } else {
-#ifdef XLITE_DIRECT_ATB_310P
-                    if (_directAtbGraph310P == nullptr) {
-                        throw std::runtime_error(
-                            "310P Decode Graph lost its direct ATB graph context");
+                    for (uint32_t layer = 0; layer < nLayers; ++layer) {
+                        CHECK_ACL(aclmdlRIExecuteAsync(
+                            graph.preLayerRI[layer], rt.stream));
+                        _directAtbRopeStaged310P[layer] = 1;
+                        const bool handled = RunNativeAtbAttention310P(
+                            rt, graphQkv, _kv[layer][0], _kv[layer][1],
+                            graphAttn, rt._attnSlotMapping[0],
+                            rt._attnBlockTables[0], rt._attnTotalLens,
+                            16, 8, 128, graphBatch);
+                        if (!handled) {
+                            throw std::runtime_error(
+                                "segmented decode graph requires pure Direct ATB decode");
+                        }
+                        CHECK_ACL(aclmdlRIExecuteAsync(
+                            graph.postLayerRI[layer], rt.stream));
                     }
-                    _directAtbGraph310P->PrepareGraphReplay(graphBatch);
-#endif
                 }
-                CHECK_ACL(aclmdlRIExecuteAsync(graph.modelRI, rt.stream));
                 rt.RecordDecodeGraphReplay310P();
             }
             CHECK_ACL(aclrtMemcpyAsync(_output.ptr, _output.bytes, graphOutput.ptr,
@@ -3135,8 +3185,9 @@ PYBIND11_MODULE(_C, m)
         info["m200_asr_prefill_max_m"] = 4096;
         info["decode_graph_310p"] = true;
         info["decode_graph_310p_mode"] =
-            "direct_atb_external_capture_prelaunch_m200_asr_decode_only";
-        info["decode_graph_310p_atb_workspace"] = "capture_address_reuse";
+            "segmented_m200_model_ri_with_eager_direct_atb_decode_only";
+        info["decode_graph_310p_attention"] = "outside_model_ri";
+        info["decode_graph_310p_segments_per_layer"] = 2;
         info["m200_lm_head_max_batch"] = 0;
         info["lm_head_backend"] = "aclnn_batched_submit";
         info["lm_head_synchronizations_per_call"] = 1;

@@ -695,6 +695,56 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(attn);
 }
 
+void XModel::ForwardDecodeLayerPre310P(
+    XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
+    XTensor &freqsCis, XTensor &residual, XTensor &hidden, XTensor &qkv)
+{
+    if (_c.attnType != XMODEL_ATTN_MHA || _c.defTpSize != 1 || _c.addBias ||
+        _c.attnOutputGate || _c.qkNormFull || layer >= _c.nLayers ||
+        qkv.shape.size() != 2 || qkv.shape[1] !=
+            (_c.nHeads + 2 * _c.nKvHeads) * _c.headDim) {
+        throw std::runtime_error(
+            "310P segmented decode graph requires TP1 bias-free MHA without output gate");
+    }
+    if (layer == 0) {
+        XliteOpRmsNorm(rt, residual, attnNorm[0], hidden, _c.normEps,
+                       residual.shape[1], true, attnNormBias[0]);
+    }
+    ForwardLinear(rt, layer, hidden, mhaQKV, qkv, mhaQKVBias);
+    if (_c.qkNorm) {
+        XliteOpQkRmsNorm(rt, qkv, mhaQNorm[layer], mhaQNormBias[layer],
+                         mhaKNorm[layer], mhaKNormBias[layer], qkv, _c.normEps,
+                         _c.headDim, _c.nHeads, _c.headDim, _c.nKvHeads,
+                         _c.nHeads * _c.headDim, true);
+    }
+    XliteOpRopeCache(rt, qkv, kvCache[layer][0], kvCache[layer][1],
+                     rt._attnPosition, freqsCis, rt._attnSlotMapping[0],
+                     _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim,
+                     _c.blockSizes[0], _c.ropeType == XMODEL_ROPE_NEOX,
+                     _mropeMaskH, _mropeMaskW);
+}
+
+void XModel::ForwardDecodeLayerPost310P(XRuntime &rt, uint32_t layer,
+                                        XTensor &residual, XTensor &hidden,
+                                        XTensor &attn, XTensor &output)
+{
+    if (_c.attnType != XMODEL_ATTN_MHA || _c.defTpSize != 1 ||
+        _c.attnOutputGate || layer >= _c.nLayers) {
+        throw std::runtime_error("unsupported 310P segmented decode graph model");
+    }
+    ForwardLinear(rt, layer, attn, attnOut, hidden);
+    XliteOpAddAndRmsNorm(rt, hidden, residual, mlpNorm[layer], _c.normEps,
+                         hidden, mlpNormBias[layer]);
+    ForwardFFN(rt, layer, hidden);
+    if (layer + 1 < _c.nLayers) {
+        XliteOpAddAndRmsNorm(rt, hidden, residual, attnNorm[layer + 1],
+                             _c.normEps, hidden, attnNormBias[layer + 1]);
+    } else {
+        XliteOpAddAndRmsNorm(rt, hidden, residual, norm, _c.normEps, output,
+                             normBias);
+    }
+}
+
 namespace
 {
 

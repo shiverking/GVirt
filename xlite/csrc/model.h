@@ -161,6 +161,17 @@ public:
                                          std::vector<std::vector<XTensor>> &kvCache,
                                          std::vector<XTensor> &deepstackInputEmbeds,
                                          XTensor &freqsCis, XTensor &output);
+    // Ascend310P ASR decode graph segments. Attention is deliberately executed
+    // by the caller between these two methods because Direct ATB operations
+    // cannot be nested reliably in a Model-RI capture on CANN 9.1.
+    void ForwardDecodeLayerPre310P(XRuntime &rt, uint32_t layer,
+                                   std::vector<std::vector<XTensor>> &kvCache,
+                                   XTensor &freqsCis, XTensor &residual,
+                                   XTensor &hidden, XTensor &qkv);
+    void ForwardDecodeLayerPost310P(XRuntime &rt, uint32_t layer,
+                                    XTensor &residual, XTensor &hidden,
+                                    XTensor &attn, XTensor &output);
+    uint32_t NumLayers() const { return _c.nLayers; }
     size_t GetTensorPoolSize(int dbg);
     // whether to use communication optimization
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)
