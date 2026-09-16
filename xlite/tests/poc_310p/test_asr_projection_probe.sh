@@ -4,7 +4,7 @@ set -uo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_dir="${script_dir}/asr_projection_probe"
 build_dir=${XLITE_ASR_PROJECTION_BUILD_DIR:-/tmp/xlite_asr_projection_probe_release}
-cann_path=${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/cann-9.1.0-beta.1}
+cann_path=${1:-${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/cann-9.1.0-beta.1}}
 jobs=${XLITE_BUILD_JOBS:-8}
 warmup=${XLITE_ASR_PROJECTION_WARMUP:-3}
 iterations=${XLITE_ASR_PROJECTION_ITERATIONS:-20}
