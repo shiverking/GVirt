@@ -3258,6 +3258,16 @@ PYBIND11_MODULE(_C, m)
         info["matmul_backends"] =
             py::make_tuple("m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
+        // The pure low-level AscendC ASR backend is deliberately not exposed
+        // as selectable until its kernels and exact-token acceptance pass.
+        // These fields let integration code distinguish design-gate builds
+        // from a build that can execute the backend without silently routing
+        // to the historical high-level Matmul/ATB implementations.
+        info["ascendc_asr_backend"] = false;
+        info["ascendc_asr_backend_status"] = "design_gates";
+        info["ascendc_asr_contract_version"] = 1;
+        info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
+        info["ascendc_asr_requires_npu_arch"] = 2002;
         info["m200_asr_prefill"] = true;
         info["m200_asr_prefill_max_m"] = 4096;
         info["decode_graph_310p"] = true;
