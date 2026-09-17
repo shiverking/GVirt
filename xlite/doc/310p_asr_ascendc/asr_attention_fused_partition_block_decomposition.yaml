@@ -1,0 +1,36 @@
+op_name: asr_attention_fused_partition_probe
+target: Ascend310P3
+status: scratch_free_fused_partition_probe
+work_item: [request, query_head]
+blocks:
+  - {phase: q, block: direct-gm-nd-to-l1-nz, executions_per_work_item: 1}
+  - {phase: kv, block: paged-bshd-rows-to-l1-nz, tile_tokens: 16}
+  - {phase: qk, block: low-level-mmad, shape: [16, 16, 128]}
+  - {phase: partition_softmax, block: online-softmax-state, arithmetic: fp32, partition_tokens: 512}
+  - {phase: pv, block: low-level-mmad, shape: [16, 128, 16]}
+  - {phase: partition_merge, block: stable-on-chip-merge, arithmetic: fp32, max_partitions: 4}
+  - {phase: output, block: fp32-normalize-fp16-store, stores_per_work_item: 1}
+resources:
+  ub_bytes: 18240
+  l1_bytes: 12288
+  l0a_bytes: 4096
+  l0b_bytes: 4096
+  l0c_bytes: 8192
+  gm_intermediate_scratch_bytes: 0
+  kernel_launches_per_attention_layer: 1
+events:
+  dynamic_only: true
+  pairs: [V_MTE3, MTE3_MTE2, MTE3_MTE1, MTE2_MTE1, MTE1_M, M_MTE1, M_V, V_M, V_S, S_V, MTE3_V]
+invariants:
+  - each_work_item_has_private_l1_l0_ub_state
+  - global_accumulator_initialized_before_first_merge
+  - partition_accumulator_initialized_before_each_partition
+  - all_vector_scalar_handoffs_use_explicit_v_s_and_s_v
+  - all_dynamic_vector_scalars_are_mutable_local_float
+  - no_read_before_write_ub_or_l1
+  - output_guards_unchanged
+  - cache_bitwise_unchanged
+  - no_gm_partition_state
+forbidden: [fixed_EVENT_ID, high_level_Matmul, FixPipe, DataCopyPad, LoadDataWithTranspose, aclnn, atb]
+runtime_eligible: false
+next_gate: independent_device_probe_then_promote_exact_kernel_to_runtime

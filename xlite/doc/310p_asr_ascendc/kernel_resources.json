@@ -89,6 +89,19 @@
       "scratch_bytes_batch20": 737280,
       "runtime_eligible": false
     },
+    "asr_attention_fused_partition_probe": {
+      "status": "scratch_free_fused_partition_probe",
+      "ub_bytes": 18240,
+      "l1_bytes": 12288,
+      "l0a_bytes": 4096,
+      "l0b_bytes": 4096,
+      "l0c_bytes": 8192,
+      "event_pairs": 11,
+      "shape": {"max_batch": 20, "q_heads": 16, "max_partitions": 4, "head_dim": 128, "max_kv": 2048},
+      "gm_intermediate_scratch_bytes": 0,
+      "kernel_launches_per_attention_layer": 1,
+      "runtime_eligible": false
+    },
     "asr_add_rmsnorm_fp16": {
       "status": "production_decode_vector",
       "ub_bytes": 65536,

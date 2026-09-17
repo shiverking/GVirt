@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "acl/acl.h"
+#include "aclrtlaunch_asr_attention_fused_partition_probe.h"
 #include "aclrtlaunch_asr_attention_partition_merge_probe.h"
 #include "aclrtlaunch_asr_attention_partition_state_probe.h"
 
@@ -73,8 +74,8 @@ std::vector<int32_t> ParseLengths(const std::string &text)
         throw std::invalid_argument("batch must be in 1..20");
     }
     for (int32_t value : values) {
-        if (value < 513 || value > 2048) {
-            throw std::invalid_argument("KV length must be in 513..2048");
+        if (value < 1 || value > 2048) {
+            throw std::invalid_argument("KV length must be in 1..2048");
         }
     }
     return values;
@@ -195,7 +196,7 @@ void CopyToDevice(DeviceBuffer &device, const void *host, size_t bytes,
 }
 
 void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
-         uint32_t iterations)
+         uint32_t iterations, bool fused)
 {
     if (iterations == 0) throw std::invalid_argument("iterations must be positive");
     const uint32_t batch = static_cast<uint32_t>(lengths.size());
@@ -211,8 +212,8 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
     std::vector<uint16_t> expected(static_cast<size_t>(batch) * kQDim);
     std::vector<uint16_t> guardedOutput(expected.size() +
                                         2 * kGuardElements, kOutputGuard);
-    const size_t stateElements = static_cast<size_t>(batch) * kQHeads *
-                                 kPartitions * kStateStride;
+    const size_t stateElements = fused ? 0 :
+        static_cast<size_t>(batch) * kQHeads * kPartitions * kStateStride;
     std::vector<float> guardedStates(stateElements + 2 * kGuardElements,
                                      kStateGuard);
     std::fill(guardedStates.begin() + kGuardElements,
@@ -278,11 +279,19 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
     const uint32_t stateBlocks = std::min(8U, batch * kQHeads * kPartitions);
     const uint32_t mergeBlocks = std::min(8U, batch * kQHeads);
     const auto chain = [&]() {
-        ACLRT_LAUNCH_KERNEL(asr_attention_partition_state_probe)
-        (stateBlocks, stream, qkvDevice.ptr, kDevice.ptr, vDevice.ptr,
-         tableDevice.ptr, lengthsDevice.ptr, states, batch, kTableStride);
-        ACLRT_LAUNCH_KERNEL(asr_attention_partition_merge_probe)
-        (mergeBlocks, stream, states, output, batch);
+        if (fused) {
+            ACLRT_LAUNCH_KERNEL(asr_attention_fused_partition_probe)
+            (mergeBlocks, stream, qkvDevice.ptr, kDevice.ptr, vDevice.ptr,
+             tableDevice.ptr, lengthsDevice.ptr, output, batch,
+             kTableStride);
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_attention_partition_state_probe)
+            (stateBlocks, stream, qkvDevice.ptr, kDevice.ptr, vDevice.ptr,
+             tableDevice.ptr, lengthsDevice.ptr, states, batch,
+             kTableStride);
+            ACLRT_LAUNCH_KERNEL(asr_attention_partition_merge_probe)
+            (mergeBlocks, stream, states, output, batch);
+        }
     };
     for (uint32_t i = 0; i < warmup; ++i) chain();
     Check(aclrtSynchronizeStream(stream), "warmup sync");
@@ -324,7 +333,7 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
     const Metrics metrics = Compare(actual, expected);
     const float *stateData = guardedStates.data() + kGuardElements;
     size_t stateErrors = 0;
-    for (uint32_t request = 0; request < batch; ++request) {
+    for (uint32_t request = 0; !fused && request < batch; ++request) {
         for (uint32_t head = 0; head < kQHeads; ++head) {
             for (uint32_t partition = 0; partition < kPartitions; ++partition) {
                 const float *state = stateData +
@@ -372,10 +381,13 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
         throw std::runtime_error("partition state and merge chain failed");
     }
     std::cout << std::fixed << std::setprecision(6)
-              << "ASR attention partition chain PASS: batch=" << batch
+              << "ASR attention " << (fused ? "fused partition" : "partition chain")
+              << " PASS: batch=" << batch
               << ", average_ms=" << averageMs
               << ", cosine=" << metrics.cosine
               << ", max_abs=" << metrics.maxAbs
+              << ", gm_scratch_bytes="
+              << (stateElements * sizeof(float))
               << ", state_errors=" << stateErrors
               << ", guards=" << outputGuardErrors + stateGuardErrors
               << ", cache_changed=" << cacheChanged << std::endl;
@@ -384,16 +396,21 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
 
 int main(int argc, char **argv)
 {
-    if (argc != 4) {
+    if (argc != 4 && argc != 5) {
         std::cerr << "usage: " << argv[0]
-                  << " KV_LENGTHS WARMUP ITERATIONS" << std::endl;
+                  << " KV_LENGTHS WARMUP ITERATIONS [chain|fused]"
+                  << std::endl;
         return 2;
     }
     try {
+        const std::string mode = argc == 5 ? argv[4] : "chain";
+        if (mode != "chain" && mode != "fused") {
+            throw std::invalid_argument("mode must be chain or fused");
+        }
         Check(aclInit(nullptr), "aclInit");
         Check(aclrtSetDevice(0), "set device");
         Run(ParseLengths(argv[1]), static_cast<uint32_t>(std::stoul(argv[2])),
-            static_cast<uint32_t>(std::stoul(argv[3])));
+            static_cast<uint32_t>(std::stoul(argv[3])), mode == "fused");
         Check(aclrtResetDevice(0), "reset device");
         Check(aclFinalize(), "aclFinalize");
         return 0;

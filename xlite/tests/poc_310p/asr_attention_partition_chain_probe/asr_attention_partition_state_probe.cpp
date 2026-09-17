@@ -13,6 +13,7 @@ constexpr uint32_t kHeadDim = 128;
 constexpr uint32_t kQHeads = 16;
 constexpr uint32_t kKvHeads = 8;
 constexpr uint32_t kQkvDim = 4096;
+constexpr uint32_t kQDim = kQHeads * kHeadDim;
 constexpr uint32_t kBlockSize = 128;
 constexpr uint32_t kTileTokens = 16;
 constexpr uint32_t kPartitions = 4;
@@ -64,15 +65,37 @@ public:
                                 GM_ADDR states, uint32_t batch,
                                 uint32_t tableStride)
     {
+        InitCommon(qkv, kCache, vCache, blockTable, kvLengths,
+                   batch, tableStride);
+        states_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(states));
+        Bind(stateOutF_, TPosition::VECCALC, 16960);
+    }
+
+    __aicore__ inline void InitFused(GM_ADDR qkv, GM_ADDR kCache,
+                                     GM_ADDR vCache, GM_ADDR blockTable,
+                                     GM_ADDR kvLengths, GM_ADDR output,
+                                     uint32_t batch, uint32_t tableStride)
+    {
+        InitCommon(qkv, kCache, vCache, blockTable, kvLengths,
+                   batch, tableStride);
+        output_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(output));
+        Bind(globalAccF_, TPosition::VECCALC, 16960);
+        Bind(scaledPartitionF_, TPosition::VECCALC, 17472);
+        Bind(outputH_, TPosition::VECCALC, 17984);
+    }
+
+    __aicore__ inline void InitCommon(GM_ADDR qkv, GM_ADDR kCache,
+                                      GM_ADDR vCache, GM_ADDR blockTable,
+                                      GM_ADDR kvLengths, uint32_t batch,
+                                      uint32_t tableStride)
+    {
         qkv_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(qkv));
         kCache_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(kCache));
         vCache_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(vCache));
         blockTable_ = reinterpret_cast<__gm__ int32_t *>(blockTable);
         kvLengths_ = reinterpret_cast<__gm__ int32_t *>(kvLengths);
-        states_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(states));
         batch_ = batch;
         tableStride_ = tableStride;
-
         Bind(l1Q_, TPosition::A1, 0);
         Bind(l1B_, TPosition::B1, 4096);
         Bind(l1P_, TPosition::A1, 8192);
@@ -91,7 +114,6 @@ public:
         Bind(accBF_, TPosition::VECCALC, 15424);
         Bind(correctedF_, TPosition::VECCALC, 15936);
         Bind(scalarF_, TPosition::VECCALC, 16448);
-        Bind(stateOutF_, TPosition::VECCALC, 16960);
     }
 
     __aicore__ inline void Process()
@@ -112,6 +134,29 @@ public:
                 continue;
             }
             RunPartition(item, request, queryHead, partition,
+                         static_cast<uint32_t>(lengthSigned));
+        }
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
+        pipe_barrier(PIPE_ALL);
+    }
+
+    __aicore__ inline void ProcessFused()
+    {
+        set_atomic_none();
+        set_mask_norm();
+        FetchEvents();
+        SetFlag<HardEvent::MTE3_V>(mte3ToV_);
+        const uint32_t work = batch_ * kQHeads;
+        for (uint32_t item = GetBlockIdx(); item < work;
+             item += GetBlockNum()) {
+            const uint32_t request = item / kQHeads;
+            const uint32_t queryHead = item % kQHeads;
+            const int32_t lengthSigned = kvLengths_[request];
+            if (lengthSigned <= 0 ||
+                lengthSigned > static_cast<int32_t>(kMaxKv)) {
+                continue;
+            }
+            RunFusedHead(request, queryHead,
                          static_cast<uint32_t>(lengthSigned));
         }
         WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
@@ -414,6 +459,135 @@ private:
         WriteState(item, runningMax, runningSum, accumulator);
     }
 
+    __aicore__ inline void MergePartition(float &globalMax,
+                                           float &globalSum,
+                                           float partitionMax,
+                                           float partitionSum,
+                                           __ubuf__ float *partitionOutput)
+    {
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        const float newMax = globalMax > partitionMax ?
+            globalMax : partitionMax;
+        F(expInputF_)[0] = globalMax - newMax;
+        F(expInputF_)[1] = partitionMax - newMax;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(0, 3);
+        vexp(F(expOutputF_), F(expInputF_), 1, 1, 1, 8, 8);
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        float correction = F(expOutputF_)[0];
+        float partitionScale = F(expOutputF_)[1];
+        globalSum = globalSum * correction +
+                    partitionSum * partitionScale;
+        globalMax = newMax;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(scalarF_), correction, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(correctedF_), F(globalAccF_), F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vector_dup(F(scalarF_), partitionScale, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(scaledPartitionF_), partitionOutput, F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vadd(F(globalAccF_), F(correctedF_), F(scaledPartitionF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+    }
+
+    __aicore__ inline void StoreFusedOutput(uint32_t request,
+                                            uint32_t queryHead,
+                                            float globalSum)
+    {
+        float inverseSum = 1.0F / globalSum;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(scalarF_), inverseSum, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(correctedF_), F(globalAccF_), F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
+        vconv_f322f16(H(outputH_), F(correctedF_), 2, 1, 1, 4, 8);
+        pipe_barrier(PIPE_V);
+        SetFlag<HardEvent::V_MTE3>(vToMte3_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3_);
+        DataCopyParams store{1, kHeadDim * sizeof(half) / 32, 0, 0};
+        const uint64_t outputOffset =
+            static_cast<uint64_t>(request) * kQDim +
+            queryHead * kHeadDim;
+        DataCopy(output_[outputOffset], outputH_, store);
+        SetFlag<HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void RunFusedHead(uint32_t request,
+                                        uint32_t queryHead,
+                                        uint32_t kvLength)
+    {
+        float zero = 0.0F;
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(globalAccF_), zero, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        float globalMax = -65504.0F;
+        float globalSum = 0.0F;
+        const uint32_t kvHead = queryHead / 2;
+        StageQuery(request, queryHead);
+
+        for (uint32_t partitionStart = 0; partitionStart < kvLength;
+             partitionStart += kPartitionTokens) {
+            set_vector_mask(static_cast<uint64_t>(-1),
+                            static_cast<uint64_t>(-1));
+            vector_dup(F(accAF_), zero, 2, 1, 1, 8, 1);
+            vector_dup(F(accBF_), zero, 2, 1, 1, 8, 1);
+            pipe_barrier(PIPE_V);
+            __ubuf__ float *accumulator = F(accAF_);
+            __ubuf__ float *nextAccumulator = F(accBF_);
+            float partitionMax = -65504.0F;
+            float partitionSum = 0.0F;
+            const uint32_t partitionEnd =
+                kvLength < partitionStart + kPartitionTokens ?
+                kvLength : partitionStart + kPartitionTokens;
+
+            for (uint32_t logicalStart = partitionStart;
+                 logicalStart < partitionEnd;
+                 logicalStart += kTileTokens) {
+                const uint32_t remaining = partitionEnd - logicalStart;
+                const uint32_t validTokens = remaining < kTileTokens ?
+                    remaining : kTileTokens;
+                StageCacheRows(kCache_, request, logicalStart,
+                               validTokens, kvHead);
+                L1ToL0A(l0A_, l1Q_, 8);
+                L1ToL0B(l0B_, l1B_, 1, 8);
+                RunMmad(16, 16, 128);
+                DrainL0C(qkF_, 16 * 16);
+                float correction = 0.0F;
+                BuildProbabilities(partitionMax, partitionSum,
+                                   validTokens, correction);
+                StageProbabilities();
+                StageCacheRows(vCache_, request, logicalStart,
+                               validTokens, kvHead);
+                L1ToL0BTranspose(l0B_, l1B_, 8);
+                RunMmad(16, 128, 16);
+                DrainL0C(pvF_, 16 * 128);
+                CompactPvRow();
+                UpdateAccumulator(accumulator, nextAccumulator, correction);
+            }
+            MergePartition(globalMax, globalSum, partitionMax,
+                           partitionSum, accumulator);
+        }
+        StoreFusedOutput(request, queryHead, globalSum);
+    }
+
     template <typename T>
     __aicore__ inline void Bind(LocalTensor<T> &tensor,
                                  TPosition position, uint32_t offset)
@@ -427,7 +601,7 @@ private:
     { return reinterpret_cast<__ubuf__ float *>(tensor.GetPhyAddr()); }
 
     TPipe pipe_;
-    GlobalTensor<half> qkv_, kCache_, vCache_;
+    GlobalTensor<half> qkv_, kCache_, vCache_, output_;
     GlobalTensor<float> states_;
     __gm__ int32_t *blockTable_ = nullptr;
     __gm__ int32_t *kvLengths_ = nullptr;
@@ -437,6 +611,8 @@ private:
     LocalTensor<float> qkF_, pvF_, expInputF_, expOutputF_;
     LocalTensor<float> weightF_, pvCompactF_, accAF_, accBF_;
     LocalTensor<float> correctedF_, scalarF_, stateOutF_;
+    LocalTensor<float> globalAccF_, scaledPartitionF_;
+    LocalTensor<half> outputH_;
     uint32_t batch_ = 0;
     uint32_t tableStride_ = 0;
     event_t vToMte3_, mte3ToMte2_, mte3ToMte1_, mte2ToMte1_;
@@ -460,4 +636,22 @@ extern "C" __global__ __aicore__ void asr_attention_partition_state_probe(
     probe.Init(qkv, kCache, vCache, blockTable, kvLengths, states,
                batch, tableStride);
     probe.Process();
+}
+
+extern "C" __global__ __aicore__ void asr_attention_fused_partition_probe(
+    GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
+    GM_ADDR kvLengths, GM_ADDR output, uint32_t batch, uint32_t tableStride)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_attention_fused_partition_probe requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch || tableStride == 0 ||
+        tableStride > 16) {
+        return;
+    }
+    AsrAttentionPartitionStateProbe probe;
+    probe.InitFused(qkv, kCache, vCache, blockTable, kvLengths, output,
+                    batch, tableStride);
+    probe.ProcessFused();
 }
