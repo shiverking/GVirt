@@ -616,6 +616,20 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out
         throw std::runtime_error(
             "Ascend310P RMSNorm requires FP16 I/O/weight and the standard no-bias path");
     }
+    const bool pureDecode = in.shape.size() == 2 && in.shape[0] >= 1 && in.shape[0] <= 20 &&
+        rt._hostLens.size() == in.shape[0] &&
+        std::all_of(rt._hostLens.begin(), rt._hostLens.end(),
+                    [](uint32_t length) { return length == 1; });
+    if (rt.UseAscendCAsrMatmul310P() && pureDecode && normDim == 2048 &&
+        cntPerToken == 1 && inStartOffset == 0 && outStartOffset == 0 &&
+        in.shape[1] == 2048 && out.shape.size() == 2 && out.shape[1] == 2048) {
+        const uint32_t tokens = static_cast<uint32_t>(in.shape[0]);
+        ACLRT_LAUNCH_KERNEL(asr_rmsnorm_fp16)
+        (std::min<uint32_t>(8, tokens), rt.stream, in.ptr, norm.ptr, out.ptr,
+         tokens, normEps);
+        ++rt.ascendcAsrRmsNormRequests;
+        return;
+    }
 #endif
     KERNEL_PTR_TYPE(norm) * launchKernel;
     if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
@@ -918,6 +932,18 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
     if (!EachXDtype(FP16, in, out) || out.shape.size() != 2 || out.shape[1] != 6144) {
         throw std::runtime_error(
             "Ascend310P SiLU-and-Mul requires FP16 and intermediate_size=6144");
+    }
+    const bool pureDecode = in.shape.size() == 2 && in.shape[0] >= 1 && in.shape[0] <= 20 &&
+        rt._hostLens.size() == in.shape[0] &&
+        std::all_of(rt._hostLens.begin(), rt._hostLens.end(),
+                    [](uint32_t length) { return length == 1; });
+    if (rt.UseAscendCAsrMatmul310P() && pureDecode && in.shape[1] == 12288 &&
+        num.ptr == nullptr && swigluLimit == 0.0F) {
+        const uint32_t tokens = static_cast<uint32_t>(in.shape[0]);
+        ACLRT_LAUNCH_KERNEL(asr_silu_mul_fp16)
+        (std::min<uint32_t>(8, tokens), rt.stream, in.ptr, out.ptr, tokens);
+        ++rt.ascendcAsrSiluMulRequests;
+        return;
     }
 #endif
 #ifdef XLITE_ARCH_310P

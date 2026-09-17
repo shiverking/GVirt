@@ -3258,17 +3258,19 @@ PYBIND11_MODULE(_C, m)
         info["matmul_backends"] =
             py::make_tuple("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
-        // Phase-2 capability: the fixed decode projections are selectable.
-        // Prefill projections and LM Head remain explicit, counted ACLNN
-        // boundaries until their dedicated AscendC kernels are accepted.
+        // Fixed decode projections and the first two AIV-only vector kernels
+        // are selectable. Prefill, fused QK/RoPE/cache, fused residual norm,
+        // paged attention and LM Head remain explicit boundaries.
         info["ascendc_asr_backend"] = true;
-        info["ascendc_asr_backend_status"] = "decode_projections";
-        info["ascendc_asr_contract_version"] = 1;
+        info["ascendc_asr_backend_status"] = "decode_projections_rmsnorm_silu";
+        info["ascendc_asr_contract_version"] = 2;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
         info["ascendc_asr_projection_shapes"] =
             py::make_tuple("qkv", "o", "gate_up", "down");
+        info["ascendc_asr_rmsnorm"] = true;
+        info["ascendc_asr_silu_mul"] = true;
         info["ascendc_asr_prefill"] = false;
         info["ascendc_asr_lm_head"] = false;
         info["m200_asr_prefill"] = true;
@@ -3299,6 +3301,8 @@ PYBIND11_MODULE(_C, m)
         stats["ascendc_asr_requests"] = rt.ascendcAsrMatmulRequests;
         stats["ascendc_asr_kernel_launches"] = rt.ascendcAsrMatmulKernelLaunches;
         stats["ascendc_asr_bypass_requests"] = rt.ascendcAsrMatmulBypassRequests;
+        stats["ascendc_asr_rmsnorm_requests"] = rt.ascendcAsrRmsNormRequests;
+        stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
         stats["matmul_backend"] = rt.MatmulBackend310PName();
         py::dict m200ByM;
         py::dict aclnnByM;
@@ -3446,6 +3450,8 @@ PYBIND11_MODULE(_C, m)
                 rt.ascendcAsrMatmulKernelLaunches;
             stats["ascendc_asr_bypass_requests"] =
                 rt.ascendcAsrMatmulBypassRequests;
+            stats["ascendc_asr_rmsnorm_requests"] = rt.ascendcAsrRmsNormRequests;
+            stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
             stats["matmul_backend"] = rt.MatmulBackend310PName();
             py::dict m200ByM;
             py::dict aclnnByM;

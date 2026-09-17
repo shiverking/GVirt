@@ -23,10 +23,20 @@ failures=()
 executed=0
 cases=(
     "rmsnorm-m1:rmsnorm:1"
+    "rmsnorm-m2:rmsnorm:2"
+    "rmsnorm-m4:rmsnorm:4"
+    "rmsnorm-m6:rmsnorm:6"
     "rmsnorm-m8:rmsnorm:8"
+    "rmsnorm-m12:rmsnorm:12"
+    "rmsnorm-m16:rmsnorm:16"
     "rmsnorm-m20:rmsnorm:20"
     "silu-m1:silu:1"
+    "silu-m2:silu:2"
+    "silu-m4:silu:4"
+    "silu-m6:silu:6"
     "silu-m8:silu:8"
+    "silu-m12:silu:12"
+    "silu-m16:silu:16"
     "silu-m20:silu:20"
 )
 for spec in "${cases[@]}"; do

@@ -231,6 +231,12 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     set(KERNEL_FILES_310P_ASR_ASCENDC
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_projection_fp16.cpp
     )
+    # Keep AIV-only ASR vector kernels separate from the AIC-only projection
+    # library. Mixing object types changes CANN 9.1's legacy merge route.
+    set(KERNEL_FILES_310P_ASR_VECTOR
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_rmsnorm_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_silu_mul_fp16.cpp
+    )
     list(REMOVE_ITEM KERNEL_FILES_F16
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_float16_t.cpp
@@ -269,6 +275,10 @@ if(XLITE_BUILD_ARCH_310P)
         ${KERNEL_FILES_310P_ASR_ASCENDC})
     ascendc_compile_definitions(xlite_kernels_asr_ascendc_310p_${RUN_MODE} PRIVATE
         CUSTOM_ASCEND310P)
+    ascendc_library(xlite_kernels_asr_vector_310p_${RUN_MODE} SHARED
+        ${KERNEL_FILES_310P_ASR_VECTOR})
+    ascendc_compile_definitions(xlite_kernels_asr_vector_310p_${RUN_MODE} PRIVATE
+        CUSTOM_ASCEND310P)
     # CANN's host tiling libraries use the legacy libstdc++ ABI, while Torch
     # may use the new ABI. Keep them behind a pure-C shared-library boundary so
     # their usage requirements cannot alter libxlite.so's C++ symbol ABI.
@@ -306,6 +316,7 @@ if(XLITE_BUILD_ARCH_310P)
         xlite_kernels_baseline_310p_${RUN_MODE}
         xlite_kernels_m200_matmul_310p_${RUN_MODE}
         xlite_kernels_asr_ascendc_310p_${RUN_MODE}
+        xlite_kernels_asr_vector_310p_${RUN_MODE}
     )
 endif()
 add_custom_command(
@@ -347,6 +358,8 @@ if(NOT _xlite_dbg_enabled)
         ascendc_compile_definitions(xlite_kernels_m200_matmul_310p_${RUN_MODE}
             PRIVATE ASCENDC_DUMP=0)
         ascendc_compile_definitions(xlite_kernels_asr_ascendc_310p_${RUN_MODE}
+            PRIVATE ASCENDC_DUMP=0)
+        ascendc_compile_definitions(xlite_kernels_asr_vector_310p_${RUN_MODE}
             PRIVATE ASCENDC_DUMP=0)
     endif()
 endif()
@@ -471,6 +484,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         xlite_kernels_baseline_310p_${RUN_MODE}
         xlite_kernels_m200_matmul_310p_${RUN_MODE}
         xlite_kernels_asr_ascendc_310p_${RUN_MODE}
+        xlite_kernels_asr_vector_310p_${RUN_MODE}
         xlite_m200_tiling_310p
         ${XLITE_NNOPBASE_LIBRARY}
         ${XLITE_OPAPI_LIBRARY}
@@ -590,6 +604,7 @@ if(XLITE_BUILD_ARCH_310P)
         xlite_kernels_baseline_310p_${RUN_MODE}
         xlite_kernels_m200_matmul_310p_${RUN_MODE}
         xlite_kernels_asr_ascendc_310p_${RUN_MODE}
+        xlite_kernels_asr_vector_310p_${RUN_MODE}
         xlite_m200_tiling_310p
         LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
     )
