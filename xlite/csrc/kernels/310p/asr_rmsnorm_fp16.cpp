@@ -10,6 +10,7 @@ namespace {
 
 constexpr uint32_t kHidden = 2048;
 constexpr uint32_t kFp32Lanes = 64;
+constexpr float kInvHidden = 0.00048828125F;
 
 __aicore__ inline void SetFp32Mask(uint32_t len)
 {
@@ -46,9 +47,9 @@ public:
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR weight, GM_ADDR output,
                                 uint32_t tokens, float eps)
     {
-        input_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(input), tokens * kHidden);
-        weight_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(weight), kHidden);
-        output_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(output), tokens * kHidden);
+        input_ = reinterpret_cast<__gm__ half *>(input);
+        weight_ = reinterpret_cast<__gm__ half *>(weight);
+        output_ = reinterpret_cast<__gm__ half *>(output);
         tokens_ = tokens;
         eps_ = eps;
 
@@ -85,8 +86,7 @@ public:
         constexpr uint32_t fp16ToFp32Repeats = kHidden / kFp32Lanes;
 
         copy_gm_to_ubuf(reinterpret_cast<__ubuf__ half *>(weightUb_.GetPhyAddr()),
-                        reinterpret_cast<__gm__ half *>(weight_.GetPhyAddr()),
-                        0, 1, halfBlocks, 0, 0);
+                        weight_, 0, 1, halfBlocks, 0, 0);
         SetFlag<HardEvent::MTE2_V>(loadEvent);
         WaitFlag<HardEvent::MTE2_V>(loadEvent);
         vconv_f162f32(reinterpret_cast<__ubuf__ float *>(weightFp32_.GetPhyAddr()),
@@ -99,8 +99,7 @@ public:
         for (uint32_t row = GetBlockIdx(); row < tokens_; row += GetBlockNum()) {
             WaitFlag<HardEvent::V_MTE2>(inputFreeEvent);
             copy_gm_to_ubuf(reinterpret_cast<__ubuf__ half *>(inputUb_.GetPhyAddr()),
-                            reinterpret_cast<__gm__ half *>(input_.GetPhyAddr()) +
-                                row * kHidden,
+                            input_ + row * kHidden,
                             0, 1, halfBlocks, 0, 0);
             SetFlag<HardEvent::MTE2_V>(loadEvent);
             WaitFlag<HardEvent::MTE2_V>(loadEvent);
@@ -115,7 +114,7 @@ public:
             vmul(square, inputFp32, inputFp32, kHidden / kFp32Lanes,
                  1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
-            vmuls(square, square, 1.0F / static_cast<float>(kHidden),
+            vmuls(square, square, kInvHidden,
                   kHidden / kFp32Lanes, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
             ReducePowerOfTwoFp32(square);
@@ -146,8 +145,7 @@ public:
 
             SetFlag<HardEvent::V_MTE3>(storeEvent);
             WaitFlag<HardEvent::V_MTE3>(storeEvent);
-            copy_ubuf_to_gm(reinterpret_cast<__gm__ half *>(output_.GetPhyAddr()) +
-                                row * kHidden,
+            copy_ubuf_to_gm(output_ + row * kHidden,
                             reinterpret_cast<__ubuf__ half *>(outputUb_.GetPhyAddr()),
                             0, 1, halfBlocks, 0, 0);
             SetFlag<HardEvent::MTE3_V>(outputFreeEvent);
@@ -159,9 +157,9 @@ public:
 
 private:
     TPipe pipe_;
-    GlobalTensor<half> input_;
-    GlobalTensor<half> weight_;
-    GlobalTensor<half> output_;
+    __gm__ half *input_ = nullptr;
+    __gm__ half *weight_ = nullptr;
+    __gm__ half *output_ = nullptr;
     LocalTensor<half> inputUb_;
     LocalTensor<half> weightUb_;
     LocalTensor<half> outputUb_;

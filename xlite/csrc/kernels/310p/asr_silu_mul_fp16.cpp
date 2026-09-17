@@ -17,8 +17,8 @@ class AsrSiluMulKernel {
 public:
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint32_t tokens)
     {
-        input_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(input), tokens * kInputWidth);
-        output_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(output), tokens * kIntermediate);
+        input_ = reinterpret_cast<__gm__ half *>(input);
+        output_ = reinterpret_cast<__gm__ half *>(output);
         tokens_ = tokens;
         gateUb_.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
         gateUb_.address_.bufferAddr = 0;
@@ -48,12 +48,10 @@ public:
                 const uint32_t inputBase = row * kInputWidth + offset;
                 WaitFlag<HardEvent::MTE3_MTE2>(bufferFreeEvent);
                 copy_gm_to_ubuf(reinterpret_cast<__ubuf__ half *>(gateUb_.GetPhyAddr()),
-                                reinterpret_cast<__gm__ half *>(input_.GetPhyAddr()) +
-                                    inputBase,
+                                input_ + inputBase,
                                 0, 1, blocks, 0, 0);
                 copy_gm_to_ubuf(reinterpret_cast<__ubuf__ half *>(upUb_.GetPhyAddr()),
-                                reinterpret_cast<__gm__ half *>(input_.GetPhyAddr()) +
-                                    inputBase + kIntermediate,
+                                input_ + inputBase + kIntermediate,
                                 0, 1, blocks, 0, 0);
                 SetFlag<HardEvent::MTE2_V>(loadEvent);
                 WaitFlag<HardEvent::MTE2_V>(loadEvent);
@@ -75,8 +73,7 @@ public:
                 SetFlag<HardEvent::V_MTE3>(storeEvent);
                 WaitFlag<HardEvent::V_MTE3>(storeEvent);
                 copy_ubuf_to_gm(
-                    reinterpret_cast<__gm__ half *>(output_.GetPhyAddr()) +
-                    row * kIntermediate + offset,
+                    output_ + row * kIntermediate + offset,
                     gate, 0, 1, blocks, 0, 0);
                 SetFlag<HardEvent::MTE3_MTE2>(bufferFreeEvent);
             }
@@ -87,8 +84,8 @@ public:
 
 private:
     TPipe pipe_;
-    GlobalTensor<half> input_;
-    GlobalTensor<half> output_;
+    __gm__ half *input_ = nullptr;
+    __gm__ half *output_ = nullptr;
     LocalTensor<half> gateUb_;
     LocalTensor<half> upUb_;
     LocalTensor<half> tmpUb_;
