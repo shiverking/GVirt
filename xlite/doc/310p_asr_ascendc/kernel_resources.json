@@ -14,7 +14,7 @@
       "l0a_bytes": 8192,
       "l0b_bytes": 32768,
       "l0c_bytes": 16384,
-      "event_pairs": 7,
+      "event_pairs": 8,
       "tile": {"m": 32, "n": 128, "k": 128}
     },
     "asr_rmsnorm_fp16": {"status": "planned", "ub_bytes": null, "event_pairs": null},

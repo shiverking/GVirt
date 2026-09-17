@@ -103,12 +103,17 @@ private:
         const uint32_t nBlocks = nPadded / kNBlock;
         const uint32_t kTiles = (k_ + kTileK - 1) / kTileK;
 
+        // L1 is single-buffered.  Prime its ownership and return it from
+        // MTE1 to MTE2 after every L1-to-L0 transfer before the next K
+        // slice is allowed to overwrite it.
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         for (uint32_t kTile = 0; kTile < kTiles; ++kTile) {
             const uint32_t kOffset = kTile * kTileK;
             const uint32_t kActual = k_ - kOffset < kTileK ? k_ - kOffset : kTileK;
             const uint32_t kPadded = AsrAlignUp(kActual, kKBlock);
             const uint32_t kBlocks = kPadded / kKBlock;
 
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
             AsrGmToL1Nz(l1A_, aGm_[kOffset], m_, kActual, k_, mPadded);
             AsrGmToL1Nz(l1B_, bGm_[nOffset * k_ + kOffset], nActual,
                         kActual, k_, nPadded);
@@ -117,6 +122,7 @@ private:
 
             AsrL1ToL0A(l0A_, l1A_, mBlocks, kBlocks);
             AsrL1ToL0BTranspose(l0B_, l1B_, nBlocks, kBlocks);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
             SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
 
@@ -130,6 +136,7 @@ private:
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
             WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
         }
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
 
         // Ascend310P3 has no usable FixPipe path from L0C directly to GM.
         // Drain the FP32 accumulator through the unified core's V pipe.

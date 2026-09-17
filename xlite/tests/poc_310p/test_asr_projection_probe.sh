@@ -5,6 +5,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_dir="${script_dir}/asr_projection_probe"
 build_dir=${XLITE_ASR_PROJECTION_BUILD_DIR:-/tmp/xlite_asr_projection_probe_release}
 cann_path=${1:-${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/cann-9.1.0-beta.1}}
+case_filter=${2:-all}
 jobs=${XLITE_BUILD_JOBS:-8}
 warmup=${XLITE_ASR_PROJECTION_WARMUP:-3}
 iterations=${XLITE_ASR_PROJECTION_ITERATIONS:-20}
@@ -20,6 +21,7 @@ cmake --build "${build_dir}" --parallel "${jobs}" || exit $?
 
 export LD_LIBRARY_PATH="${build_dir}/lib:${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
+executed=0
 cases=(
     "qkv-m1:1:4096:2048"
     "qkv-m8:8:4096:2048"
@@ -31,6 +33,10 @@ cases=(
 
 for spec in "${cases[@]}"; do
     IFS=: read -r name m n k <<<"${spec}"
+    if [[ "${case_filter}" != "all" && "${case_filter}" != "${name}" ]]; then
+        continue
+    fi
+    executed=$((executed + 1))
     log="${build_dir}/${name}.log"
     echo "[ RUN      ] ${name} M=${m} N=${n} K=${k}"
     "${build_dir}/xlite_asr_projection_probe_runner" \
@@ -46,7 +52,11 @@ for spec in "${cases[@]}"; do
 done
 
 echo
-echo "ASR projection probe summary: $((6 - ${#failures[@]})) passed, ${#failures[@]} failed"
+if [[ ${executed} -eq 0 ]]; then
+    echo "Unknown ASR projection case: ${case_filter}" >&2
+    exit 2
+fi
+echo "ASR projection probe summary: $((executed - ${#failures[@]})) passed, ${#failures[@]} failed"
 if [[ ${#failures[@]} -ne 0 ]]; then
     echo
     echo "================================================================================"

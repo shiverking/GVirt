@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -51,6 +52,13 @@ float WeightValue(uint32_t row)
 {
     static constexpr float values[] = {0.25F, 0.5F, 1.0F, -0.5F};
     return values[row & 3U];
+}
+
+float HalfValue(uint16_t bits)
+{
+    __fp16 value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return static_cast<float>(value);
 }
 
 void Run(uint32_t m, uint32_t n, uint32_t k, uint32_t warmup, uint32_t iterations)
@@ -105,18 +113,35 @@ void Run(uint32_t m, uint32_t n, uint32_t k, uint32_t warmup, uint32_t iteration
 
     size_t mismatches = 0;
     size_t sentinels = 0;
+    size_t finite = 0;
+    size_t nonzero = 0;
+    size_t reported = 0;
     for (uint32_t row = 0; row < m; ++row) {
         const float activation = (row & 1U) == 0 ? 1.0F : 0.5F;
         for (uint32_t col = 0; col < n; ++col) {
             const uint16_t actual = c[static_cast<size_t>(row) * n + col];
             const uint16_t expected = HalfBits(activation * WeightValue(col) * k);
             sentinels += actual == kHalfNan;
-            mismatches += actual != expected;
+            const float actualValue = HalfValue(actual);
+            finite += std::isfinite(actualValue);
+            nonzero += actualValue != 0.0F;
+            if (actual != expected) {
+                ++mismatches;
+                if (reported < 12) {
+                    std::cerr << "mismatch[" << row << "," << col << "] actual="
+                              << actualValue << " bits=0x" << std::hex << actual
+                              << std::dec << " expected=" << HalfValue(expected)
+                              << " bits=0x" << std::hex << expected << std::dec << '\n';
+                    ++reported;
+                }
+            }
         }
     }
     if (sentinels != 0 || mismatches != 0) {
         throw std::runtime_error("incorrect output: sentinel=" + std::to_string(sentinels) +
-                                 ", mismatches=" + std::to_string(mismatches));
+                                 ", mismatches=" + std::to_string(mismatches) +
+                                 ", finite=" + std::to_string(finite) +
+                                 ", nonzero=" + std::to_string(nonzero));
     }
 
     const double elapsedMs =
