@@ -178,8 +178,14 @@ public:
                 SetFlag<HardEvent::S_V>(scalarToVector);
                 WaitFlag<HardEvent::S_V>(scalarToVector);
                 set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-                vmuls(nextAccumulator, accumulator, correction, 2, 1, 1, 8, 8);
-                vmuls(F(weightedF_), F(vF_), weight, 2, 1, 1, 8, 8);
+                // CANN 9.1 beta1 does not accept a runtime Scalar value as the
+                // third vmuls operand on M200.  Materialize both scalars in UB
+                // after the explicit S_V handoff, then use ordinary vmul.
+                vector_dup(F(kF_), correction, 2, 1, 1, 8, 1);
+                vector_dup(F(productF_), weight, 2, 1, 1, 8, 1);
+                pipe_barrier(PIPE_V);
+                vmul(nextAccumulator, accumulator, F(kF_), 2, 1, 1, 1, 8, 8, 8);
+                vmul(F(weightedF_), F(vF_), F(productF_), 2, 1, 1, 1, 8, 8, 8);
                 pipe_barrier(PIPE_V);
                 vadd(nextAccumulator, nextAccumulator, F(weightedF_),
                      2, 1, 1, 1, 8, 8, 8);
@@ -193,7 +199,9 @@ public:
             SetFlag<HardEvent::S_V>(scalarToVector);
             WaitFlag<HardEvent::S_V>(scalarToVector);
             set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-            vmuls(F(weightedF_), accumulator, inverseSum, 2, 1, 1, 8, 8);
+            vector_dup(F(kF_), inverseSum, 2, 1, 1, 8, 1);
+            pipe_barrier(PIPE_V);
+            vmul(F(weightedF_), accumulator, F(kF_), 2, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
             WaitFlag<HardEvent::MTE3_V>(storeFree);
             vconv_f322f16(H(outH_), F(weightedF_), 2, 1, 1, 4, 8);

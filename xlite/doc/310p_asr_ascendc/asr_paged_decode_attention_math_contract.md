@@ -33,6 +33,9 @@ The first token initializes `m=score`, `l=1`, `a=v`. Exponent input and output
 use separate UB buffers. The 128-lane dot reduction is a power-of-two fold with
 no vector mask wider than 64 lanes. Vector-to-scalar and scalar-to-vector
 handoffs use dynamically allocated `V_S` and `S_V` events.
+Runtime scalar weights are materialized with `vector_dup` into dedicated/reused
+FP32 UB vectors after `S_V`, then consumed by `vmul`; they are never passed as
+runtime scalar operands to `vmuls` on CANN 9.1 beta1.
 
 ## Probe acceptance
 
