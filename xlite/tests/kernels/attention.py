@@ -167,8 +167,17 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
             env["XLITE_ATTENTION_SHAPE_CASES"] = str(test_args.shape_cases.resolve())
         with log_path.open("w", encoding="utf-8") as log:
             try:
+                child_command = [sys.executable, str(Path(__file__).resolve())]
+                # Preserve the explicitly requested backend in each isolated
+                # shape process.  Merely copying XLITE_ATTENTION_CASE_INDEX
+                # leaves the child on Runtime's intentional legacy default and
+                # makes a batched test silently exercise per-request attention.
+                if test_args.batched_decode_only:
+                    child_command.append("--batched-decode-only")
+                if test_args.batched_prefill_only:
+                    child_command.append("--batched-prefill-only")
                 result = subprocess.run(
-                    [sys.executable, str(Path(__file__).resolve())], env=env,
+                    child_command, env=env,
                     stdout=log, stderr=subprocess.STDOUT, timeout=1200, check=False)
                 status = result.returncode
             except subprocess.TimeoutExpired:
@@ -199,7 +208,11 @@ if poc_case_index is not None:
 
 torch.npu.set_device(0)
 rt = Runtime(0, 3000)
-if os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
+if test_args.batched_decode_only:
+    # Backend selection is explicit by design: the production default remains
+    # legacy until a candidate backend passes correctness and performance gates.
+    rt.set_decode_attention_backend("batched_aclnn")
+elif os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
     rt.set_decode_attention_backend("direct_atb")
     rt.set_batched_prefill_attention_310p(True)
 
