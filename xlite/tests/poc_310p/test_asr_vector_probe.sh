@@ -49,7 +49,8 @@ cases=(
 )
 for spec in "${cases[@]}"; do
     IFS=: read -r name op tokens <<<"${spec}"
-    if [[ "${case_filter}" != "all" && "${case_filter}" != "${name}" ]]; then
+    if [[ "${case_filter}" != "all" && "${case_filter}" != "${op}" &&
+          "${case_filter}" != "${name}" ]]; then
         continue
     fi
     executed=$((executed + 1))
