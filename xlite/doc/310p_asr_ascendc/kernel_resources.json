@@ -36,7 +36,19 @@
       "shape": {"max_tokens": 20, "q_heads": 16, "kv_heads": 8, "head_dim": 128},
       "arithmetic": "fp32_rmsnorm_fp16_mrope_and_cache"
     },
-    "asr_paged_decode_attention_fp16": {"status": "planned", "ub_bytes": null, "event_pairs": null},
+    "asr_paged_decode_attention_fp16": {
+      "status": "probe_paged_addressing_online_softmax",
+      "ub_bytes": 5184,
+      "l1_bytes": 0,
+      "l0a_bytes": 0,
+      "l0b_bytes": 0,
+      "l0c_bytes": 0,
+      "event_pairs": 6,
+      "shape": {"max_batch": 20, "q_heads": 16, "kv_heads": 8, "head_dim": 128, "max_kv": 2048},
+      "arithmetic": "fp32_vector_dot_online_softmax_probe",
+      "runtime_eligible": false,
+      "event_protocol": ["MTE2_V", "V_MTE2", "V_S", "S_V", "V_MTE3", "MTE3_V"]
+    },
     "asr_add_rmsnorm_fp16": {
       "status": "production_decode_vector",
       "ub_bytes": 65536,

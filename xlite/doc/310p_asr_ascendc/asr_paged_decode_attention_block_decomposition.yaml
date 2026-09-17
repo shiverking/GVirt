@@ -1,0 +1,34 @@
+kernel: asr_paged_decode_attention_fp16
+stage: correctness_probe
+blocks:
+  - name: paged_kv_load
+    implementation: direct_bshd_gm_to_ub
+    validates: [non_contiguous_block_table, valid_kv_only]
+  - name: fp32_dot_reduce
+    implementation: vector_probe
+    replacement: low_level_load_data_mmad
+    reduction: power_of_two_128_to_1
+  - name: online_softmax_token_state
+    implementation: fp32
+    state: [running_max, exponential_sum, unnormalized_output_128]
+  - name: weighted_v_update
+    implementation: vector_probe
+    replacement: low_level_load_data_mmad
+  - name: final_normalize_store
+    implementation: fp32_to_fp16_mte3
+resources:
+  ub_bytes: 5184
+  l1_bytes: 0
+  l0a_bytes: 0
+  l0b_bytes: 0
+  l0c_bytes: 0
+events:
+  dynamic_only: true
+  pairs: [MTE2_V, V_MTE2, V_S, S_V, V_MTE3, MTE3_V]
+forbidden:
+  - fixed_event_id
+  - high_level_matmul
+  - DataCopyPad
+  - LoadDataWithTranspose
+  - aclnn
+  - atb

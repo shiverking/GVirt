@@ -1,0 +1,25 @@
+kernel: asr_paged_decode_attention_fp16
+status: probe_paged_addressing_online_softmax
+target:
+  soc: Ascend310P3
+  npu_arch: 2002
+  dtype: fp16
+shape:
+  batch: [1, 20]
+  q_heads: 16
+  kv_heads: 8
+  head_dim: 128
+  block_size: 128
+  max_kv_length: 2048
+cache_layout: [num_blocks, 128, 8, 128]
+q_pre_scaled: true
+accumulation: fp32
+softmax: fp32_online
+addressing: direct_block_table
+runtime_eligible: false
+next_gate: low_level_mmad_qk_pv_and_partition_merge
+acceptance:
+  cosine_min: 0.999
+  max_abs_max: 0.01
+  cache_bitwise_unchanged: true
+  output_guards_unchanged: true

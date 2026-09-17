@@ -15,6 +15,11 @@ Matmul interface is deliberately prohibited. The existing
 `m200_matmul_float16.cpp` is a historical fallback and is not an implementation
 of this backend.
 
+`asr_paged_decode_attention_fp16.cpp` is currently an explicitly non-production
+correctness probe. Its vector QK/PV blocks validate paged addressing and online
+softmax only; `kernel_resources.json` keeps `runtime_eligible=false` until the
+audited low-level MMAD and long-KV partition/merge implementation passes.
+
 Before committing a production kernel, fill in its exact UB use and event-pair
 count in `kernel_resources.json`, then run:
 

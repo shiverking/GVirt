@@ -44,6 +44,10 @@ def _check_sources(errors: list[str]) -> None:
         for label, pattern in FORBIDDEN.items():
             if pattern.search(text):
                 errors.append(f"{path.relative_to(XLITE_ROOT)}: {label}")
+        # The already-shipped projection kernel predates the dynamic-event rule.
+        # Do not allow that debt to spread to any subsequent ASR kernel.
+        if path.stem != "asr_m200_projection_fp16" and re.search(r"\bEVENT_ID\d+\b", text):
+            errors.append(f"{path.relative_to(XLITE_ROOT)}: fixed event identifier")
         if "__NPU_ARCH__" not in text or "2002" not in text:
             errors.append(
                 f"{path.relative_to(XLITE_ROOT)}: missing guarded __NPU_ARCH__=2002 gate"

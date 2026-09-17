@@ -34,6 +34,8 @@ run_stage() {
 run_stage static-gates python3 tests/poc_310p/check_ascendc_asr_gates.py
 run_stage projection bash tests/poc_310p/test_asr_projection_probe.sh "${cann_path}" all
 run_stage vector-fused bash tests/poc_310p/test_asr_vector_probe.sh "${cann_path}" all
+run_stage paged-attention-probe bash \
+    tests/poc_310p/test_asr_paged_attention_probe.sh "${cann_path}" all
 run_stage compatibility-runtime-vector python3 tests/poc_310p/test_vector_kernels.py
 run_stage compatibility-qk-mrope-cache env XLITE_TEST_FP16_ONLY=1 python3 tests/kernels/rope_and_cache.py
 run_stage compatibility-decode-attention env XLITE_TEST_FP16_ONLY=1 \
