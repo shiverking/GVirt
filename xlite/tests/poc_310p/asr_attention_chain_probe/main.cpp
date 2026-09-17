@@ -64,7 +64,16 @@ void Run(uint32_t start,uint32_t valid,uint32_t head,uint32_t warmup,uint32_t it
         ACLRT_LAUNCH_KERNEL(asr_attention_mmad_block_probe)(1,stream,qd.ptr,ks,qo,16,16,128);
         ACLRT_LAUNCH_KERNEL(asr_attention_mmad_block_probe)(1,stream,pd.ptr,vs,po,16,128,16);
     };
-    for(uint32_t i=0;i<warmup;++i)chain();Check(aclrtSynchronizeStream(stream),"warmup sync");auto begin=std::chrono::steady_clock::now();for(uint32_t i=0;i<iterations;++i)chain();Check(aclrtSynchronizeStream(stream),"timed sync");auto end=std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < warmup; ++i) {
+        chain();
+    }
+    Check(aclrtSynchronizeStream(stream), "warmup sync");
+    const auto begin = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < iterations; ++i) {
+        chain();
+    }
+    Check(aclrtSynchronizeStream(stream), "timed sync");
+    const auto end = std::chrono::steady_clock::now();
     Check(aclrtMemcpy(kScratch.data(),kScratch.size()*2,ksd.ptr,kScratch.size()*2,ACL_MEMCPY_DEVICE_TO_HOST),"copy K scratch back");Check(aclrtMemcpy(vScratch.data(),vScratch.size()*2,vsd.ptr,vScratch.size()*2,ACL_MEMCPY_DEVICE_TO_HOST),"copy V scratch back");Check(aclrtMemcpy(qOut.data(),qOut.size()*2,qod.ptr,qOut.size()*2,ACL_MEMCPY_DEVICE_TO_HOST),"copy Q output back");Check(aclrtMemcpy(pOut.data(),pOut.size()*2,pod.ptr,pOut.size()*2,ACL_MEMCPY_DEVICE_TO_HOST),"copy P output back");Check(aclrtMemcpy(kc.data(),kc.size()*2,kcd.ptr,kc.size()*2,ACL_MEMCPY_DEVICE_TO_HOST),"copy K cache back");Check(aclrtMemcpy(vc.data(),vc.size()*2,vcd.ptr,vc.size()*2,ACL_MEMCPY_DEVICE_TO_HOST),"copy V cache back");Check(aclrtDestroyStream(stream),"destroy stream");
     std::vector<uint16_t> qa(qOut.begin()+16,qOut.end()-16),pa(pOut.begin()+16,pOut.end()-16);Metric qm=Compare(qa,expectedQ),pm=Compare(pa,expectedP);
     size_t guards=GuardErrors(kScratch)+GuardErrors(vScratch)+GuardErrors(qOut)+GuardErrors(pOut);size_t cacheChanged=!std::equal(kc.begin(),kc.end(),kb.begin())+!std::equal(vc.begin(),vc.end(),vb.begin());double ms=std::chrono::duration<double,std::milli>(end-begin).count()/iterations;
