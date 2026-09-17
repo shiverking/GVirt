@@ -30,6 +30,7 @@ from transformers import AutoTokenizer
 
 from tests.models.llama import Llama
 from tests.models.qwen3 import Qwen3ModelArgs
+from xlite import _C as xlite_c
 from xlite.poc_310p import load_qwen3_asr_llm_args
 
 
@@ -133,6 +134,23 @@ def main() -> int:
     if not hasattr(model.xlite_rt, "set_matmul_backend_310p"):
         raise RuntimeError("installed Xlite does not expose selectable 310P MatMul backends")
     model.xlite_rt.set_matmul_backend_310p(args.matmul_backend)
+    if args.matmul_backend == "ascendc_asr":
+        required_stats = {
+            "ascendc_asr_requests",
+            "ascendc_asr_kernel_launches",
+            "ascendc_asr_bypass_requests",
+            "ascendc_asr_rmsnorm_requests",
+            "ascendc_asr_silu_mul_requests",
+        }
+        available_stats = set(dict(model.xlite_rt.get_stats()))
+        missing_stats = sorted(required_stats - available_stats)
+        if missing_stats:
+            raise RuntimeError(
+                "loaded Xlite extension is stale for ascendc_asr: "
+                f"extension={Path(xlite_c.__file__).resolve()}, "
+                f"missing runtime stats={missing_stats}; rebuild with "
+                "'pip install -v -e . --no-build-isolation'"
+            )
     if args.aclnn_matmul_async:
         if not hasattr(model.xlite_rt, "set_aclnn_matmul_async_310p"):
             raise RuntimeError("installed Xlite does not expose ACLNN MatMul event leases")
@@ -261,6 +279,8 @@ def main() -> int:
     report = {
         "device": device_name,
         "dtype": "float16",
+        "xlite_extension": str(Path(xlite_c.__file__).resolve()),
+        "xlite_build_info": dict(xlite_c.get_build_info()),
         "weight_load": model.weight_load_report,
         "batch_size": 1,
         "num_layers": model_args.n_layers,

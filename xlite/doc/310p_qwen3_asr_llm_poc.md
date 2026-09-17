@@ -21,6 +21,13 @@ export XLITE_KERNEL_SET=llm_fp16
 pip install -v -e . --no-build-isolation
 ```
 
+Use the editable form above when running tests from this checkout.  A regular
+`pip install .` updates site-packages, but Python launched from the repository
+can still import an older `xlite/_C*.so` left in the source tree.  The 310P
+whole-model probe records the resolved extension path and build information,
+and rejects an `ascendc_asr` extension that lacks the required per-kernel
+runtime-stat keys.
+
 CANN 9.1 beta1 packaging can expose `SOC_VERSION=ascend310p1` on the target
 Ascend310P3 deployment.  `setup.py` treats that value only as a packaging
 alias, canonicalizes it to `Ascend310P3`, and infers `llm_fp16` when the kernel
