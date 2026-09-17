@@ -1,0 +1,29 @@
+op_name: asr_attention_partition_merge_probe
+target: Ascend310P3
+status: stable_four_partition_merge_probe
+blocks:
+  - {phase: load, block: gm-fp32-state-to-ub, aligned_floats: 144}
+  - {phase: scalar, block: skip-empty-partition, predicate: "partition_sum <= 0"}
+  - {phase: scale, block: stable-max-exp-rescale, arithmetic: fp32}
+  - {phase: accumulate, block: fp32-vector-rescaled-sum, elements: 128}
+  - {phase: output, block: fp32-normalize-cast-fp16-store}
+resources:
+  ub_bytes: 3968
+  l1_bytes: 0
+  l0a_bytes: 0
+  l0b_bytes: 0
+  l0c_bytes: 0
+  probe_state_gm_bytes_batch20: 737280
+events:
+  dynamic_only: true
+  pairs: [MTE2_V, V_MTE2, V_S, S_V, V_MTE3, MTE3_V]
+invariants:
+  - no_read_before_write_ub
+  - empty_partition_payload_may_be_nan
+  - aligned_padding_may_be_nan
+  - input_states_bitwise_unchanged
+  - output_guards_unchanged
+findings:
+  - "Batch20 four-partition FP32 states require 737280 bytes; the earlier 256 KiB production scratch estimate cannot hold this aligned contract"
+forbidden: [fixed_EVENT_ID, high_level_Matmul, DataCopyPad, LoadDataWithTranspose, aclnn, atb]
+next_gate: device_partition_state_generation_and_merge_chain

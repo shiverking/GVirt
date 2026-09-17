@@ -1,0 +1,37 @@
+op_name: asr_attention_partition_merge_probe
+operator_class: stable_attention_partition_merge
+target: {soc: Ascend310P3, npu_arch: 2002}
+inputs:
+  - {name: states, required: true, dtypes_chip_supported: [fp32], format: ND, shape: [B, QH, P, S]}
+outputs:
+  - {name: output, dtypes_chip_supported: [fp16], format: ND, shape: [B, QH, D]}
+attrs:
+  - {name: partitions, dtype: int32, default: 4}
+  - {name: state_stride, dtype: int32, default: 144}
+shape_contract:
+  reduction_axes: [P]
+  broadcast_axes: [B, QH, D]
+  constraints: ["1 <= B <= 20", "QH == 16", "P == 4", "D == 128", "S == 144"]
+dtype_contract:
+  intermediate: fp32
+  cast_rules:
+    - "partition state fp32 -> stable merge fp32 -> output fp16"
+precision_target:
+  cosine_threshold: 0.999
+  max_absolute_error: 0.01
+  nan_policy: "empty partition poison must be skipped when sum == 0"
+  inf_policy: clamp_via_max_subtraction
+  denormal_policy: flush_to_zero
+compute_equations:
+  forward:
+    - "M = max_p(m_p) over partitions with l_p > 0"
+    - "L = sum_p(l_p * exp(m_p - M))"
+    - "O[d] = sum_p(o_p[d] * exp(m_p - M)) / L"
+  backward: null
+boundary_conditions:
+  - "l_p == 0 marks an empty partition; m_p, o_p and padding are not consumed"
+  - "state padding [130,144) is never consumed"
+  - "at least one partition is non-empty"
+source_citations:
+  - {file: doc/310p_asr_ascendc/asr_paged_decode_attention_math_contract.yaml, lines: [1, 24], role: parent_attention_contract}
+  - {file: doc/310p_asr_ascendc/asr_attention_partition_merge_block_decomposition.yaml, lines: [1, 31], role: block_decomposition}

@@ -62,6 +62,20 @@
       "runtime_eligible": false,
       "gm_intermediate_scratch_bytes": 0
     },
+    "asr_attention_partition_merge_probe": {
+      "status": "stable_four_partition_merge_probe",
+      "ub_bytes": 3968,
+      "l1_bytes": 0,
+      "l0a_bytes": 0,
+      "l0b_bytes": 0,
+      "l0c_bytes": 0,
+      "event_pairs": 6,
+      "shape": {"max_batch": 20, "q_heads": 16, "partitions": 4, "head_dim": 128},
+      "state_stride_fp32": 144,
+      "probe_state_gm_bytes_batch20": 737280,
+      "arithmetic": "fp32_stable_partition_merge",
+      "runtime_eligible": false
+    },
     "asr_add_rmsnorm_fp16": {
       "status": "production_decode_vector",
       "ub_bytes": 65536,
