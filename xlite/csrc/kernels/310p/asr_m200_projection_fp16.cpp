@@ -78,8 +78,10 @@ public:
         l0B_.address_.bufferAddr = 0;
         l0C_.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0C_.address_.bufferAddr = 0;
-        outUb_.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
-        outUb_.address_.bufferAddr = 0;
+        outFp32Ub_.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
+        outFp32Ub_.address_.bufferAddr = 0;
+        outFp16Ub_.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
+        outFp16Ub_.address_.bufferAddr = kTileM * kTileN * sizeof(float);
     }
 
     __aicore__ inline void Process()
@@ -139,15 +141,18 @@ private:
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
 
         // Ascend310P3 has no usable FixPipe path from L0C directly to GM.
-        // Drain the FP32 accumulator through the unified core's V pipe.
-        // The 310P L0C-to-UB path retains NZ layout; requesting implicit
-        // NZ-to-ND here is not reliable on dav-m200.  Keep the compact NZ
-        // tile in UB and scatter its 16-column fractals with MTE3 below.
+        // The fused FP32-to-FP16 copy is a FixPipe conversion mode and
+        // produces corrupt values on the unified-core L0C-to-UB path. Keep
+        // the accumulator FP32 during the copy, then perform the conversion
+        // explicitly on the V pipe.  Both UB tensors retain NZ layout.
         DataCopyCO12DstParams drain(nActual, m_, mPadded, mPadded,
-                                    F322F16, 0, 0, 0);
+                                    NoQuant, 0, 0, 0);
         SetFlag<HardEvent::M_V>(EVENT_ID0);
         WaitFlag<HardEvent::M_V>(EVENT_ID0);
-        DataCopy(outUb_, l0C_, drain);
+        DataCopy(outFp32Ub_, l0C_, drain);
+        PipeBarrier<PIPE_V>();
+        Cast(outFp16Ub_, outFp32Ub_, RoundMode::CAST_NONE,
+             mPadded * nPadded);
         SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
 
@@ -159,7 +164,7 @@ private:
         for (uint32_t nb = 0; nb < nBlocks; ++nb) {
             const uint32_t ubOffset = nb * mPadded * kNBlock;
             const uint32_t gmOffset = nOffset + nb * kNBlock;
-            DataCopy(cGm_[gmOffset], outUb_[ubOffset], write);
+            DataCopy(cGm_[gmOffset], outFp16Ub_[ubOffset], write);
         }
         SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
@@ -174,7 +179,8 @@ private:
     LocalTensor<half> l1B_;
     LocalTensor<half> l0A_;
     LocalTensor<half> l0B_;
-    LocalTensor<half> outUb_;
+    LocalTensor<float> outFp32Ub_;
+    LocalTensor<half> outFp16Ub_;
     LocalTensor<float> l0C_;
     uint32_t m_ = 0;
     uint32_t n_ = 0;
