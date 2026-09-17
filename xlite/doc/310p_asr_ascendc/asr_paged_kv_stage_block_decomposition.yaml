@@ -1,0 +1,15 @@
+op_name: asr_paged_kv_stage
+target: Ascend310P3
+status: isolated_probe
+blocks:
+  - {phase: init, block: explicit_fp16_zero_padding}
+  - {phase: k, block: paged_token_head_load}
+  - {phase: v, block: paged_16_dimension_load}
+  - {phase: v, block: basic_16x16_vtranspose}
+  - {phase: store, block: contiguous_tile_write}
+resources: {ub_bytes: 5120, l1_bytes: 0, l0a_bytes: 0, l0b_bytes: 0, l0c_bytes: 0}
+events:
+  dynamic_only: true
+  pairs: [MTE2_V, V_MTE2, V_MTE3, MTE3_V]
+forbidden: [fixed_EVENT_ID, DataCopyPad, LoadDataWithTranspose, high_level_Matmul]
+next_gate: combine_with_qk_pv_mmad_candidate

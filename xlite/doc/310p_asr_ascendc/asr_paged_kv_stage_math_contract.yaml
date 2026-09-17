@@ -1,0 +1,20 @@
+op_name: asr_paged_kv_stage
+status: isolated_probe
+target: {soc: Ascend310P3, npu_arch: 2002, dtype: fp16}
+inputs:
+  - {name: k_cache, format: BSHD, shape: [num_blocks, 128, 8, 128]}
+  - {name: v_cache, format: BSHD, shape: [num_blocks, 128, 8, 128]}
+  - {name: block_table, format: ND, shape: [16]}
+outputs:
+  - {name: k_tile, format: NK, shape: [16, 128]}
+  - {name: v_transpose_tile, format: NK, shape: [128, 16]}
+shape_contract:
+  constraints: ["1 <= valid_tokens <= 16", "0 <= logical_start", "logical_start + valid_tokens <= 2048", "0 <= kv_head < 8"]
+dtype_contract: {input: fp16, output: fp16, index: int32}
+precision_target: {bitwise_exact: true, cache_bitwise_unchanged: true}
+compute_equations:
+  k: "K_tile[t,d] = K_cache[block_table[(start+t)/128], (start+t)%128, head, d]"
+  vt: "Vt_tile[d,t] = V_cache[block_table[(start+t)/128], (start+t)%128, head, d]"
+  padding: "t >= valid_tokens -> K_tile[t,:]=0 and Vt_tile[:,t]=0"
+boundary_conditions: ["physical block may change inside one 16-token tile", "unused block-table entries must not be read"]
+runtime_eligible: false

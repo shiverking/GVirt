@@ -38,6 +38,8 @@ run_stage paged-attention-probe bash \
     tests/poc_310p/test_asr_paged_attention_probe.sh "${cann_path}" all
 run_stage attention-mmad-blocks bash \
     tests/poc_310p/test_asr_attention_mmad_probe.sh "${cann_path}" all
+run_stage paged-kv-stage bash \
+    tests/poc_310p/test_asr_paged_kv_stage_probe.sh "${cann_path}" all
 run_stage compatibility-runtime-vector python3 tests/poc_310p/test_vector_kernels.py
 run_stage compatibility-qk-mrope-cache env XLITE_TEST_FP16_ONLY=1 python3 tests/kernels/rope_and_cache.py
 run_stage compatibility-decode-attention env XLITE_TEST_FP16_ONLY=1 \
