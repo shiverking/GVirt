@@ -78,6 +78,8 @@ public:
         l0B_.address_.bufferAddr = 0;
         l0C_.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0C_.address_.bufferAddr = 0;
+        outUb_.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
+        outUb_.address_.bufferAddr = 0;
     }
 
     __aicore__ inline void Process()
@@ -129,14 +131,27 @@ private:
             WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
         }
 
-        GlobalTensor<half> out = cGm_[nOffset];
-        DataCopyCO12DstParams copy(nActual, m_, n_, mPadded, F322F16, 0, 0, 1);
-        SetFixpipeNz2ndFlag(1, 1, 1);
-        SetFlag<HardEvent::M_FIX>(EVENT_ID0);
-        WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-        DataCopy(out, l0C_, copy);
-        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        // Ascend310P3 has no usable FixPipe path from L0C directly to GM.
+        // Drain the FP32 accumulator through the unified core's V pipe,
+        // converting NZ to row-major FP16 in UB, then let MTE3 write GM.
+        DataCopyCO12DstParams drain(nActual, m_, nPadded, mPadded,
+                                    F322F16, 0, 0, 1);
+        SetFlag<HardEvent::M_V>(EVENT_ID0);
+        WaitFlag<HardEvent::M_V>(EVENT_ID0);
+        DataCopy(outUb_, l0C_, drain);
+        SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+        WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+
+        DataCopyParams write;
+        write.blockCount = m_;
+        write.blockLen = nActual * sizeof(half) / 32;
+        write.srcStride = (nPadded - nActual) * sizeof(half) / 32;
+        write.dstStride = (n_ - nActual) * sizeof(half) / 32;
+        DataCopy(cGm_[nOffset], outUb_, write);
+        SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+        SetFlag<HardEvent::V_M>(EVENT_ID0);
+        WaitFlag<HardEvent::V_M>(EVENT_ID0);
     }
 
     GlobalTensor<half> aGm_;
@@ -146,6 +161,7 @@ private:
     LocalTensor<half> l1B_;
     LocalTensor<half> l0A_;
     LocalTensor<half> l0B_;
+    LocalTensor<half> outUb_;
     LocalTensor<float> l0C_;
     uint32_t m_ = 0;
     uint32_t n_ = 0;
