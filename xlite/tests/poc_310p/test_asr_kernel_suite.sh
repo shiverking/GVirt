@@ -9,6 +9,7 @@ xlite_dir=$(cd -- "${script_dir}/../.." && pwd)
 cann_path=${1:-/usr/local/Ascend/cann-9.1.0-beta.1}
 report_dir=${2:-asr_kernel_suite_report}
 mkdir -p "${report_dir}"
+report_dir=$(cd -- "${report_dir}" && pwd)
 
 passed=()
 failed=()
@@ -33,10 +34,10 @@ run_stage() {
 run_stage static-gates python3 tests/poc_310p/check_ascendc_asr_gates.py
 run_stage projection bash tests/poc_310p/test_asr_projection_probe.sh "${cann_path}" all
 run_stage vector-fused bash tests/poc_310p/test_asr_vector_probe.sh "${cann_path}" all
-run_stage runtime-vector python3 tests/poc_310p/test_vector_kernels.py
-run_stage qk-mrope-cache env XLITE_TEST_FP16_ONLY=1 python3 tests/kernels/rope_and_cache.py
-run_stage decode-attention python3 tests/kernels/attention.py --batched-decode-only
-run_stage lm-head python3 tests/poc_310p/test_matmul.py \
+run_stage compatibility-runtime-vector python3 tests/poc_310p/test_vector_kernels.py
+run_stage compatibility-qk-mrope-cache env XLITE_TEST_FP16_ONLY=1 python3 tests/kernels/rope_and_cache.py
+run_stage compatibility-decode-attention python3 tests/kernels/attention.py --batched-decode-only
+run_stage compatibility-lm-head python3 tests/poc_310p/test_matmul.py \
     --case lm-head-m1 --case lm-head-m8 --case lm-head-m20 \
     --report-dir "${report_dir}/lm_head"
 
