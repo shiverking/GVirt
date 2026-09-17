@@ -1,0 +1,44 @@
+op_name: asr_attention_single_partition_probe
+operator_class: paged_decode_attention
+target: {soc: Ascend310P3, npu_arch: 2002}
+inputs:
+  - {name: qkv, required: true, dtypes_chip_supported: [fp16], format: ND, shape: [B, QKV]}
+  - {name: k_cache, required: true, dtypes_chip_supported: [fp16], format: BSHD, shape: [NB, BS, KVH, D]}
+  - {name: v_cache, required: true, dtypes_chip_supported: [fp16], format: BSHD, shape: [NB, BS, KVH, D]}
+  - {name: block_table, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B, BT]}
+  - {name: kv_lengths, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B]}
+outputs:
+  - {name: output, dtypes_chip_supported: [fp16], format: ND, shape: [B, QD]}
+attrs:
+  - {name: q_pre_scaled, dtype: bool, default: true}
+shape_contract:
+  reduction_axes: [D, KV]
+  broadcast_axes: []
+  constraints: ["1 <= B <= 20", "1 <= kv_length <= 512", "head_dim == 128", "block_size == 128"]
+dtype_contract:
+  intermediate: fp32
+  cast_rules:
+    - "Q/K/V fp16 -> MMAD fp32 accumulator"
+    - "online-softmax fp32 -> probability fp16 -> PV MMAD fp32"
+    - "normalized output fp32 -> fp16"
+precision_target:
+  cosine_threshold: 0.999
+  max_absolute_error: 0.01
+  nan_policy: error
+  inf_policy: clamp_via_min_before_exp
+  denormal_policy: flush_to_zero
+compute_equations:
+  forward:
+    - "score[t] = dot(q, K[block_table[t/128], t%128, q_head/2, :])"
+    - "m_j = max(m_(j-1), max(score_tile_j))"
+    - "l_j = l_(j-1)*exp(m_(j-1)-m_j) + sum(exp(score_tile_j-m_j))"
+    - "o_j = o_(j-1)*exp(m_(j-1)-m_j) + exp(score_tile_j-m_j) @ V_tile_j"
+    - "output = fp16(o_last / l_last)"
+  backward: null
+boundary_conditions:
+  - "tail tokens are explicit zero in L1 before MMAD"
+  - "block-table padding and cache slots outside kv_length are not read"
+  - "Q is pre-scaled; this kernel must not apply 1/sqrt(128) again"
+source_citations:
+  - {file: doc/310p_asr_ascendc/asr_paged_decode_attention_math_contract.yaml, lines: [1, 24], role: predecessor_math_contract}
+  - {file: doc/310p_asr_ascendc/asr_attention_single_partition_block_decomposition.yaml, lines: [1, 30], role: block_decomposition}

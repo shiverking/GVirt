@@ -1,0 +1,29 @@
+op_name: asr_attention_single_partition_probe
+target: Ascend310P3
+status: unified_core_single_partition_probe
+blocks:
+  - {phase: q, block: direct_gm_nd_to_l1_nz}
+  - {phase: kv, block: paged_bshd_rows_to_l1_nz, tile_tokens: 16}
+  - {phase: qk, block: low_level_mmad, shape: [16, 16, 128]}
+  - {phase: qk, block: l0c_to_ub_matrix_readout, dtype: fp32}
+  - {phase: softmax, block: online_softmax, arithmetic: fp32}
+  - {phase: pv, block: low_level_mmad, shape: [16, 128, 16]}
+  - {phase: pv, block: l0c_to_ub_matrix_readout, dtype: fp32}
+  - {phase: output, block: fp32_accumulate_normalize_store}
+resources:
+  ub_bytes: 17472
+  l1_bytes: 12288
+  l0a_bytes: 4096
+  l0b_bytes: 4096
+  l0c_bytes: 8192
+events:
+  dynamic_only: true
+  pairs: [V_MTE3, MTE3_MTE2, MTE3_MTE1, MTE2_MTE1, MTE1_M, M_MTE1, M_V, V_M, V_S, S_V, MTE3_V]
+invariants:
+  - no_gm_intermediate_scratch
+  - no_read_before_write_ub_l1
+  - fp16_duplicate_at_most_128_elements
+  - no_host_sync_inside_kernel
+  - cache_bitwise_unchanged
+forbidden: [fixed_EVENT_ID, high_level_Matmul, FixPipe, DataCopyPad, LoadDataWithTranspose, aclnn, atb]
+next_gate: device_probe_kv_1_16_127_128_129_512_and_batch20

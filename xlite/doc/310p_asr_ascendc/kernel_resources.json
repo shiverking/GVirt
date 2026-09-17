@@ -49,6 +49,19 @@
       "runtime_eligible": false,
       "event_protocol": ["MTE2_V", "V_MTE2", "V_S", "S_V", "V_MTE3", "MTE3_V"]
     },
+    "asr_attention_single_partition_probe": {
+      "status": "unified_core_single_partition_probe",
+      "ub_bytes": 17472,
+      "l1_bytes": 12288,
+      "l0a_bytes": 4096,
+      "l0b_bytes": 4096,
+      "l0c_bytes": 8192,
+      "event_pairs": 11,
+      "shape": {"max_batch": 20, "q_heads": 16, "kv_heads": 8, "head_dim": 128, "max_kv": 512},
+      "arithmetic": "fp32_qk_online_softmax_pv",
+      "runtime_eligible": false,
+      "gm_intermediate_scratch_bytes": 0
+    },
     "asr_add_rmsnorm_fp16": {
       "status": "production_decode_vector",
       "ub_bytes": 65536,
