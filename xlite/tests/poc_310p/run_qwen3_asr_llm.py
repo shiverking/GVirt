@@ -141,6 +141,7 @@ def main() -> int:
             "ascendc_asr_bypass_requests",
             "ascendc_asr_rmsnorm_requests",
             "ascendc_asr_add_rmsnorm_requests",
+            "ascendc_asr_qk_norm_mrope_cache_requests",
             "ascendc_asr_silu_mul_requests",
         }
         available_stats = set(dict(model.xlite_rt.get_stats()))
@@ -289,6 +290,9 @@ def main() -> int:
             "ascendc_asr_rmsnorm_hit": runtime_stats["ascendc_asr_rmsnorm_requests"] > 0,
             "ascendc_asr_add_rmsnorm_hit": (
                 runtime_stats["ascendc_asr_add_rmsnorm_requests"] > 0
+            ),
+            "ascendc_asr_qk_norm_mrope_cache_hit": (
+                runtime_stats["ascendc_asr_qk_norm_mrope_cache_requests"] > 0
             ),
             "ascendc_asr_silu_mul_hit": runtime_stats["ascendc_asr_silu_mul_requests"] > 0,
         }

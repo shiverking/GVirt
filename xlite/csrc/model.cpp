@@ -579,6 +579,40 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     rt.PutTensor(attnOutput);
 }
 
+#ifdef XLITE_ARCH_310P
+static bool UseAscendCAsrQkNormMropeCache(const XRuntime &rt)
+{
+    return rt.UseAscendCAsrMatmul310P() && rt._linearDecodeStep;
+}
+
+static void CheckAscendCAsrQkNormMropeCacheContract(
+    const XModelConfig &config, const XRuntime &rt, const XTensor &qkv,
+    const XTensor &qNormBias, const XTensor &kNormBias, uint64_t mropeMaskH,
+    uint64_t mropeMaskW)
+{
+    constexpr uint64_t expectedMaskH = 0x0492492492492492ULL;
+    constexpr uint64_t expectedMaskW = 0x0924924924924924ULL;
+    const std::vector<uint32_t> expectedSections = {24, 20, 20};
+    const bool allSingleToken = rt._hostLens.size() == qkv.shape[0] &&
+        std::all_of(rt._hostLens.begin(), rt._hostLens.end(),
+                    [](uint32_t length) { return length == 1; });
+    if (config.defTpSize != 1 || !config.qkNorm || config.qkNormFull ||
+        config.nHeads != 16 || config.nKvHeads != 8 || config.headDim != 128 ||
+        config.ropeHeadDim != 128 || config.blockSizes.empty() ||
+        config.blockSizes[0] != 128 || config.ropeType != XMODEL_ROPE_NEOX ||
+        !config.mropeInterleaved || config.mropeSection != expectedSections ||
+        mropeMaskH != expectedMaskH || mropeMaskW != expectedMaskW ||
+        qNormBias.ptr != nullptr || kNormBias.ptr != nullptr ||
+        qkv.shape.size() != 2 || qkv.shape[0] == 0 || qkv.shape[0] > 20 ||
+        qkv.shape[1] != 4096 || !allSingleToken) {
+        throw std::runtime_error(
+            "ascendc_asr fused QK Norm/MRoPE/Cache contract mismatch: expected TP1, "
+            "bias-free Q16/KV8/head_dim=128, block_size=128, NeoX three-axis "
+            "interleaved MRoPE [24,20,20] and a pure Decode batch <=20");
+    }
+}
+#endif
+
 void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                             std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                             XTensor &hiddenState)
@@ -612,12 +646,24 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     }
     XTensor &qkv = *qkvPtr;
 
-    if (_c.qkNorm && !_c.qkNormFull) {
+    bool fusedAsrQkNormMropeCache = false;
+#ifdef XLITE_ARCH_310P
+    fusedAsrQkNormMropeCache = UseAscendCAsrQkNormMropeCache(rt);
+    if (fusedAsrQkNormMropeCache) {
+        CheckAscendCAsrQkNormMropeCacheContract(
+            _c, rt, qkv, mhaQNormBias[layer], mhaKNormBias[layer],
+            _mropeMaskH, _mropeMaskW);
+        XliteOpAsrQkNormMropeCache310P(
+            rt, qkv, mhaQNorm[layer], mhaKNorm[layer], kCache, vCache,
+            rt._attnPosition, freqsCis, rt._attnSlotMapping[0], _c.normEps);
+    }
+#endif
+    if (!fusedAsrQkNormMropeCache && _c.qkNorm && !_c.qkNormFull) {
         XliteOpQkRmsNorm(rt, qkv, mhaQNorm[layer], mhaQNormBias[layer], mhaKNorm[layer],
                          mhaKNormBias[layer], qkv, _c.normEps, _c.headDim, qHeads, _c.headDim,
                          kHeads, qHeads * _c.headDim, true);
     }
-    if (_c.qkNormFull) {
+    if (!fusedAsrQkNormMropeCache && _c.qkNormFull) {
         size_t rows = qkv.shape[0];
         size_t bytesPerVar = rows * XDtypeBit(FP32) / 8;
         XTensor &packedVar = rt.GetTensor({rows * 2, 1}, FP32, DBG_LOC);
@@ -640,9 +686,12 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                          qHeads * _c.headDim, true, qLocalVariance, kLocalVariance);
         rt.PutTensor(packedVar);
     }
-    XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping[0],
-                     _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSizes[0],
-                     _c.ropeType == XMODEL_ROPE_NEOX, _mropeMaskH, _mropeMaskW);
+    if (!fusedAsrQkNormMropeCache) {
+        XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis,
+                         rt._attnSlotMapping[0], _c.nHeads, _c.nKvHeads, _c.headDim,
+                         _c.ropeHeadDim, _c.blockSizes[0],
+                         _c.ropeType == XMODEL_ROPE_NEOX, _mropeMaskH, _mropeMaskW);
+    }
 
     XTensor &attn =
         rt.GetTensor({hiddenState.shape[0], qHeads * _c.headDim}, hiddenState.dtype, DBG_LOC);
@@ -711,17 +760,32 @@ void XModel::ForwardDecodeLayerPre310P(
                        residual.shape[1], true, attnNormBias[0]);
     }
     ForwardLinear(rt, layer, hidden, mhaQKV, qkv, mhaQKVBias);
-    if (_c.qkNorm) {
+    bool fusedAsrQkNormMropeCache = false;
+#ifdef XLITE_ARCH_310P
+    fusedAsrQkNormMropeCache = UseAscendCAsrQkNormMropeCache(rt);
+    if (fusedAsrQkNormMropeCache) {
+        CheckAscendCAsrQkNormMropeCacheContract(
+            _c, rt, qkv, mhaQNormBias[layer], mhaKNormBias[layer],
+            _mropeMaskH, _mropeMaskW);
+        XliteOpAsrQkNormMropeCache310P(
+            rt, qkv, mhaQNorm[layer], mhaKNorm[layer], kvCache[layer][0],
+            kvCache[layer][1], rt._attnPosition, freqsCis,
+            rt._attnSlotMapping[0], _c.normEps);
+    }
+#endif
+    if (!fusedAsrQkNormMropeCache && _c.qkNorm) {
         XliteOpQkRmsNorm(rt, qkv, mhaQNorm[layer], mhaQNormBias[layer],
                          mhaKNorm[layer], mhaKNormBias[layer], qkv, _c.normEps,
                          _c.headDim, _c.nHeads, _c.headDim, _c.nKvHeads,
                          _c.nHeads * _c.headDim, true);
     }
-    XliteOpRopeCache(rt, qkv, kvCache[layer][0], kvCache[layer][1],
-                     rt._attnPosition, freqsCis, rt._attnSlotMapping[0],
-                     _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim,
-                     _c.blockSizes[0], _c.ropeType == XMODEL_ROPE_NEOX,
-                     _mropeMaskH, _mropeMaskW);
+    if (!fusedAsrQkNormMropeCache) {
+        XliteOpRopeCache(rt, qkv, kvCache[layer][0], kvCache[layer][1],
+                         rt._attnPosition, freqsCis, rt._attnSlotMapping[0],
+                         _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim,
+                         _c.blockSizes[0], _c.ropeType == XMODEL_ROPE_NEOX,
+                         _mropeMaskH, _mropeMaskW);
+    }
 }
 
 void XModel::ForwardDecodeLayerPost310P(XRuntime &rt, uint32_t layer,

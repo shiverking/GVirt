@@ -642,6 +642,7 @@ public:
     uint64_t ascendcAsrMatmulBypassRequests = 0;
     uint64_t ascendcAsrRmsNormRequests = 0;
     uint64_t ascendcAsrAddRmsNormRequests = 0;
+    uint64_t ascendcAsrQkNormMropeCacheRequests = 0;
     uint64_t ascendcAsrSiluMulRequests = 0;
     // Keep exact M telemetry through the configured 310P batched-token limit.
     // This is intentionally fixed-size: recording a request must not allocate.

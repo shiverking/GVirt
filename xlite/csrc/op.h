@@ -87,6 +87,10 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ = false,
                         bool transpose = false);
+void XliteOpAsrQkNormMropeCache310P(XRuntime &rt, XTensor &qkv, XTensor &qNorm,
+                                    XTensor &kNorm, XTensor &kCache, XTensor &vCache,
+                                    XTensor &position, XTensor &cossin,
+                                    XTensor &slotMapping, float normEps);
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
                       XTensor &position, XTensor &cossin, XTensor &slotMapping, uint32_t nHeads,
                       uint32_t nKvHeads, uint32_t headDim, uint32_t rotDim, uint32_t blockSize,

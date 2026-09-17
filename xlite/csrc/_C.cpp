@@ -3258,13 +3258,13 @@ PYBIND11_MODULE(_C, m)
         info["matmul_backends"] =
             py::make_tuple("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
-        // Fixed decode projections plus RMSNorm, fused residual AddRMSNorm and
-        // SiLU-Mul are selectable. Prefill, fused QK/RoPE/cache, paged
+        // Fixed decode projections, RMSNorm, fused residual AddRMSNorm,
+        // QK-Norm/MRoPE/cache and SiLU-Mul are selectable. Prefill, paged
         // attention and LM Head remain explicit boundaries.
         info["ascendc_asr_backend"] = true;
         info["ascendc_asr_backend_status"] =
-            "decode_projections_rmsnorm_add_rmsnorm_silu";
-        info["ascendc_asr_contract_version"] = 3;
+            "decode_projections_rmsnorm_add_rmsnorm_qk_mrope_cache_silu";
+        info["ascendc_asr_contract_version"] = 4;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
@@ -3272,6 +3272,7 @@ PYBIND11_MODULE(_C, m)
             py::make_tuple("qkv", "o", "gate_up", "down");
         info["ascendc_asr_rmsnorm"] = true;
         info["ascendc_asr_add_rmsnorm"] = true;
+        info["ascendc_asr_qk_norm_mrope_cache"] = true;
         info["ascendc_asr_silu_mul"] = true;
         info["ascendc_asr_prefill"] = false;
         info["ascendc_asr_lm_head"] = false;
@@ -3306,6 +3307,8 @@ PYBIND11_MODULE(_C, m)
         stats["ascendc_asr_rmsnorm_requests"] = rt.ascendcAsrRmsNormRequests;
         stats["ascendc_asr_add_rmsnorm_requests"] =
             rt.ascendcAsrAddRmsNormRequests;
+        stats["ascendc_asr_qk_norm_mrope_cache_requests"] =
+            rt.ascendcAsrQkNormMropeCacheRequests;
         stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
         stats["matmul_backend"] = rt.MatmulBackend310PName();
         py::dict m200ByM;
@@ -3457,6 +3460,8 @@ PYBIND11_MODULE(_C, m)
             stats["ascendc_asr_rmsnorm_requests"] = rt.ascendcAsrRmsNormRequests;
             stats["ascendc_asr_add_rmsnorm_requests"] =
                 rt.ascendcAsrAddRmsNormRequests;
+            stats["ascendc_asr_qk_norm_mrope_cache_requests"] =
+                rt.ascendcAsrQkNormMropeCacheRequests;
             stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
             stats["matmul_backend"] = rt.MatmulBackend310PName();
             py::dict m200ByM;

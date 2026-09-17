@@ -1075,6 +1075,52 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                  rt.defaultMatmulSwizzle);
 }
 
+void XliteOpAsrQkNormMropeCache310P(XRuntime &rt, XTensor &qkv, XTensor &qNorm,
+                                    XTensor &kNorm, XTensor &kCache, XTensor &vCache,
+                                    XTensor &position, XTensor &cossin,
+                                    XTensor &slotMapping, float normEps)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+#ifdef XLITE_ARCH_310P
+    const size_t tokens = qkv.shape.empty() ? 0 : qkv.shape[0];
+    const bool cacheShape = kCache.shape.size() == 4 && vCache.shape.size() == 4 &&
+                            kCache.shape == vCache.shape && kCache.shape[1] == 128 &&
+                            kCache.shape[2] == 8 && kCache.shape[3] == 128;
+    const bool positionShape = position.shape.size() == 2 && position.shape[0] == 3 &&
+                               position.shape[1] == tokens;
+    if (!rt.UseAscendCAsrMatmul310P() || !rt._linearDecodeStep ||
+        !EachXDtype(FP16, qkv, qNorm, kNorm, kCache, vCache, cossin) ||
+        position.dtype != INT64 || slotMapping.dtype != INT32 ||
+        qkv.shape.size() != 2 || tokens == 0 || tokens > 20 || qkv.shape[1] != 4096 ||
+        qNorm.numel != 128 || kNorm.numel != 128 || !cacheShape || !positionShape ||
+        slotMapping.numel < tokens) {
+        throw std::runtime_error(
+            "ascendc_asr fused QK Norm/MRoPE/Cache requires a pure Decode step, FP16 "
+            "Q16/KV8/head_dim=128 tensors, positions=[3,batch], INT32 slots and "
+            "BSHD cache=[blocks,128,8,128]");
+    }
+    const float qScale = 1.0F / sqrtf(128.0F);
+    ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_fp16)
+    (8, rt.stream, qkv.ptr, qNorm.ptr, kNorm.ptr, position.ptr, cossin.ptr,
+     slotMapping.ptr, kCache.ptr, vCache.ptr, static_cast<uint32_t>(tokens),
+     normEps, qScale);
+    ++rt.ascendcAsrQkNormMropeCacheRequests;
+#else
+    (void)qkv;
+    (void)qNorm;
+    (void)kNorm;
+    (void)kCache;
+    (void)vCache;
+    (void)position;
+    (void)cossin;
+    (void)slotMapping;
+    (void)normEps;
+    throw std::runtime_error("ascendc_asr fused QK Norm/MRoPE/Cache is unavailable");
+#endif
+}
+
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
                       XTensor &position, XTensor &cossin, XTensor &slotMapping, uint32_t nHeads,
                       uint32_t nKvHeads, uint32_t headDim, uint32_t rotDim, uint32_t blockSize,

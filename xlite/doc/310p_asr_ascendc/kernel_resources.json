@@ -26,7 +26,7 @@
       "event_protocol": ["MTE2_V", "V_MTE3", "V_MTE2", "MTE3_V", "V_S", "S_V"]
     },
     "asr_qk_norm_mrope_cache_fp16": {
-      "status": "probe",
+      "status": "production_decode_vector",
       "ub_bytes": 4608,
       "l1_bytes": 0,
       "l0a_bytes": 0,
