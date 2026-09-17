@@ -10,7 +10,6 @@ namespace {
 
 constexpr uint32_t kHidden = 2048;
 constexpr uint32_t kFp32Lanes = 64;
-constexpr float kInvHidden = 0.00048828125F;
 
 __aicore__ inline void SetFp32Mask(uint32_t len)
 {
@@ -84,6 +83,9 @@ public:
             GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
         constexpr uint32_t halfBlocks = kHidden * sizeof(half) / 32;
         constexpr uint32_t fp16ToFp32Repeats = kHidden / kFp32Lanes;
+        // M200 places file-scope floating constants in GM. Vector scalar
+        // operands must instead be stack-local scalar values.
+        float invHidden = 0.00048828125F;
 
         copy_gm_to_ubuf(reinterpret_cast<__ubuf__ half *>(weightUb_.GetPhyAddr()),
                         weight_, 0, 1, halfBlocks, 0, 0);
@@ -114,7 +116,7 @@ public:
             vmul(square, inputFp32, inputFp32, kHidden / kFp32Lanes,
                  1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
-            vmuls(square, square, kInvHidden,
+            vmuls(square, square, invHidden,
                   kHidden / kFp32Lanes, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
             ReducePowerOfTwoFp32(square);
@@ -127,7 +129,8 @@ public:
             // On M200 scalar reads are synchronous with V. A scalar FP32
             // reciprocal is more accurate than the approximate vrec path and
             // does not require the redundant C220-style V_S/S_V event pair.
-            const float inverseRms = 1.0F / *square;
+            float inverseRms = *square;
+            inverseRms = 1.0F / inverseRms;
             set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
             vector_dup(square, inverseRms, kHidden / kFp32Lanes, 1, 1, 8, 1);
             pipe_barrier(PIPE_V);
