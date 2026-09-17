@@ -132,10 +132,12 @@ private:
         }
 
         // Ascend310P3 has no usable FixPipe path from L0C directly to GM.
-        // Drain the FP32 accumulator through the unified core's V pipe,
-        // converting NZ to row-major FP16 in UB, then let MTE3 write GM.
-        DataCopyCO12DstParams drain(nActual, m_, nPadded, mPadded,
-                                    F322F16, 0, 0, 1);
+        // Drain the FP32 accumulator through the unified core's V pipe.
+        // The 310P L0C-to-UB path retains NZ layout; requesting implicit
+        // NZ-to-ND here is not reliable on dav-m200.  Keep the compact NZ
+        // tile in UB and scatter its 16-column fractals with MTE3 below.
+        DataCopyCO12DstParams drain(nActual, m_, mPadded, mPadded,
+                                    F322F16, 0, 0, 0);
         SetFlag<HardEvent::M_V>(EVENT_ID0);
         WaitFlag<HardEvent::M_V>(EVENT_ID0);
         DataCopy(outUb_, l0C_, drain);
@@ -144,10 +146,14 @@ private:
 
         DataCopyParams write;
         write.blockCount = m_;
-        write.blockLen = nActual * sizeof(half) / 32;
-        write.srcStride = (nPadded - nActual) * sizeof(half) / 32;
-        write.dstStride = (n_ - nActual) * sizeof(half) / 32;
-        DataCopy(cGm_[nOffset], outUb_, write);
+        write.blockLen = kNBlock * sizeof(half) / 32;
+        write.srcStride = 0;
+        write.dstStride = n_ * sizeof(half) / 32 - write.blockLen;
+        for (uint32_t nb = 0; nb < nBlocks; ++nb) {
+            const uint32_t ubOffset = nb * mPadded * kNBlock;
+            const uint32_t gmOffset = nOffset + nb * kNBlock;
+            DataCopy(cGm_[gmOffset], outUb_[ubOffset], write);
+        }
         SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
         SetFlag<HardEvent::V_M>(EVENT_ID0);
