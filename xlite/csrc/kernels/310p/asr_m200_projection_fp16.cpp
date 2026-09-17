@@ -168,10 +168,18 @@ private:
 
         DataCopyParams write;
         write.blockCount = m_;
-        write.blockLen = nActual * sizeof(half) / 32;
-        write.srcStride = (nPadded - nActual) * sizeof(half) / 32;
-        write.dstStride = (n_ - nActual) * sizeof(half) / 32;
-        DataCopy(cGm_[nOffset], outFp16Ub_, write);
+        write.blockLen = kNBlock * sizeof(half) / 32;
+        write.srcStride = 0;
+        write.dstStride = n_ * sizeof(half) / 32 - write.blockLen;
+        // Enhanced L0C readback preserves the cube's canonical NZ order:
+        // [N/16][M/16][16 rows][16 columns].  Scatter each 16-column
+        // fractal directly to its ND GM columns; treating UB as one ND row
+        // makes only the first 16 columns correct.
+        for (uint32_t nb = 0; nb < nBlocks; ++nb) {
+            const uint32_t ubOffset = nb * mPadded * kNBlock;
+            const uint32_t gmOffset = nOffset + nb * kNBlock;
+            DataCopy(cGm_[gmOffset], outFp16Ub_[ubOffset], write);
+        }
         SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
         SetFlag<HardEvent::V_M>(EVENT_ID0);
