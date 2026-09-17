@@ -70,7 +70,17 @@ def run_shape(m: int, n: int, k: int) -> None:
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
     use_m200 = (backend == "m200_asr" and m <= 20 and n != 151936) or (
         backend == "m200_asr_prefill" and m <= 4096 and n != 151936)
-    if use_m200:
+    use_ascendc_asr = backend == "ascendc_asr" and m <= 20 and n != 151936
+    if use_ascendc_asr:
+        if (backend_stats["ascendc_asr_requests"] != 1 or
+                backend_stats["ascendc_asr_kernel_launches"] != 1 or
+                backend_stats["ascendc_asr_bypass_requests"] != 0 or
+                backend_stats["m200_requests"] != 0 or
+                backend_stats["aclnn_requests"] != 0):
+            raise AssertionError(
+                "supported decode projection did not exclusively use the "
+                f"AscendC ASR backend: {backend_stats}")
+    elif use_m200:
         expected_launches = 13 if n == 151936 else 1
         if (backend_stats["m200_requests"] != 1 or
                 backend_stats["m200_kernel_launches"] != expected_launches or
@@ -78,9 +88,15 @@ def run_shape(m: int, n: int, k: int) -> None:
             raise AssertionError(
                 f"supported ASR shape did not exclusively use M200 Cube: {backend_stats}")
     elif (backend_stats["m200_requests"] != 0 or
+          backend_stats["ascendc_asr_requests"] != 0 or
           backend_stats["aclnn_requests"] != 1):
         raise AssertionError(
             f"shape outside the verified M200 range did not use ACLNN fallback: {backend_stats}")
+    if backend == "ascendc_asr" and not use_ascendc_asr:
+        if backend_stats["ascendc_asr_bypass_requests"] != 1:
+            raise AssertionError(
+                "staged AscendC ASR prefill/LM-head boundary was not counted: "
+                f"{backend_stats}")
     if n == 151936:
         if (backend_stats.get("lm_head_synchronizations") != 1 or
                 backend_stats.get("aclnn_matmul_synchronizations") != 1):
@@ -93,7 +109,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-dir", type=Path, default=Path("matmul_310p_report"))
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per shape")
-    parser.add_argument("--backend", choices=("m200_asr_prefill", "m200_asr", "aclnn"),
+    parser.add_argument("--backend", choices=("ascendc_asr", "m200_asr_prefill",
+                                               "m200_asr", "aclnn"),
                         default="m200_asr",
                         help="Force one 310P MatMul backend in every selected case")
     parser.add_argument("--list", action="store_true", help="List shapes without loading NPU")

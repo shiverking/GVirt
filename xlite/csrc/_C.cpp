@@ -3256,18 +3256,21 @@ PYBIND11_MODULE(_C, m)
         info["cross_stream_handoff"] = "split_acl_event_sync";
         info["matmul_backend"] = "runtime_selectable";
         info["matmul_backends"] =
-            py::make_tuple("m200_asr_prefill", "m200_asr", "aclnn");
+            py::make_tuple("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
-        // The pure low-level AscendC ASR backend is deliberately not exposed
-        // as selectable until its kernels and exact-token acceptance pass.
-        // These fields let integration code distinguish design-gate builds
-        // from a build that can execute the backend without silently routing
-        // to the historical high-level Matmul/ATB implementations.
-        info["ascendc_asr_backend"] = false;
-        info["ascendc_asr_backend_status"] = "design_gates";
+        // Phase-2 capability: the fixed decode projections are selectable.
+        // Prefill projections and LM Head remain explicit, counted ACLNN
+        // boundaries until their dedicated AscendC kernels are accepted.
+        info["ascendc_asr_backend"] = true;
+        info["ascendc_asr_backend_status"] = "decode_projections";
         info["ascendc_asr_contract_version"] = 1;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
+        info["ascendc_asr_projection_max_batch"] = 20;
+        info["ascendc_asr_projection_shapes"] =
+            py::make_tuple("qkv", "o", "gate_up", "down");
+        info["ascendc_asr_prefill"] = false;
+        info["ascendc_asr_lm_head"] = false;
         info["m200_asr_prefill"] = true;
         info["m200_asr_prefill_max_m"] = 4096;
         info["decode_graph_310p"] = true;
@@ -3293,9 +3296,13 @@ PYBIND11_MODULE(_C, m)
         stats["m200_requests"] = rt.m200MatmulRequests;
         stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
         stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+        stats["ascendc_asr_requests"] = rt.ascendcAsrMatmulRequests;
+        stats["ascendc_asr_kernel_launches"] = rt.ascendcAsrMatmulKernelLaunches;
+        stats["ascendc_asr_bypass_requests"] = rt.ascendcAsrMatmulBypassRequests;
         stats["matmul_backend"] = rt.MatmulBackend310PName();
         py::dict m200ByM;
         py::dict aclnnByM;
+        py::dict ascendcAsrByM;
         for (size_t batch = 1; batch < rt.m200MatmulRequestsByM.size(); ++batch) {
             if (rt.m200MatmulRequestsByM[batch] != 0) {
                 m200ByM[py::int_(batch)] = rt.m200MatmulRequestsByM[batch];
@@ -3303,9 +3310,14 @@ PYBIND11_MODULE(_C, m)
             if (rt.aclnnMatmulRequestsByM[batch] != 0) {
                 aclnnByM[py::int_(batch)] = rt.aclnnMatmulRequestsByM[batch];
             }
+            if (rt.ascendcAsrMatmulRequestsByM[batch] != 0) {
+                ascendcAsrByM[py::int_(batch)] =
+                    rt.ascendcAsrMatmulRequestsByM[batch];
+            }
         }
         stats["m200_requests_by_m"] = m200ByM;
         stats["aclnn_requests_by_m"] = aclnnByM;
+        stats["ascendc_asr_requests_by_m"] = ascendcAsrByM;
         stats["stream_synchronizations"] = rt.StreamSynchronizations();
         stats["prepare_attn_synchronizations"] = rt.PrepareAttnSynchronizations();
         stats["attention_metadata_d2h_bytes"] = rt.AttentionMetadataD2HBytes();
@@ -3429,9 +3441,15 @@ PYBIND11_MODULE(_C, m)
             stats["m200_requests"] = rt.m200MatmulRequests;
             stats["m200_kernel_launches"] = rt.m200MatmulKernelLaunches;
             stats["aclnn_requests"] = rt.aclnnMatmulRequests;
+            stats["ascendc_asr_requests"] = rt.ascendcAsrMatmulRequests;
+            stats["ascendc_asr_kernel_launches"] =
+                rt.ascendcAsrMatmulKernelLaunches;
+            stats["ascendc_asr_bypass_requests"] =
+                rt.ascendcAsrMatmulBypassRequests;
             stats["matmul_backend"] = rt.MatmulBackend310PName();
             py::dict m200ByM;
             py::dict aclnnByM;
+            py::dict ascendcAsrByM;
             for (size_t batch = 1; batch < rt.m200MatmulRequestsByM.size(); ++batch) {
                 if (rt.m200MatmulRequestsByM[batch] != 0) {
                     m200ByM[py::int_(batch)] = rt.m200MatmulRequestsByM[batch];
@@ -3439,9 +3457,14 @@ PYBIND11_MODULE(_C, m)
                 if (rt.aclnnMatmulRequestsByM[batch] != 0) {
                     aclnnByM[py::int_(batch)] = rt.aclnnMatmulRequestsByM[batch];
                 }
+                if (rt.ascendcAsrMatmulRequestsByM[batch] != 0) {
+                    ascendcAsrByM[py::int_(batch)] =
+                        rt.ascendcAsrMatmulRequestsByM[batch];
+                }
             }
             stats["m200_requests_by_m"] = m200ByM;
             stats["aclnn_requests_by_m"] = aclnnByM;
+            stats["ascendc_asr_requests_by_m"] = ascendcAsrByM;
             stats["decode_graph_warmups"] = rt.DecodeGraphWarmups310P();
             stats["decode_graph_captures"] = rt.DecodeGraphCaptures310P();
             stats["decode_graph_replays"] = rt.DecodeGraphReplays310P();

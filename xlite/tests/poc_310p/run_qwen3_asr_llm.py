@@ -96,9 +96,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--matmul-backend",
-        choices=("m200_asr_prefill", "m200_asr", "aclnn"),
+        choices=("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn"),
         default="m200_asr",
-        help="310P MatMul backend; m200_asr_prefill is experimental",
+        help=("310P MatMul backend; ascendc_asr currently accelerates fixed "
+              "decode projections while prefill and LM Head remain explicit "
+              "ACLNN boundaries"),
     )
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))

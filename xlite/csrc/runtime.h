@@ -81,6 +81,7 @@ enum class XMatmulBackend310P {
     ACLNN,
     M200_ASR,
     M200_ASR_PREFILL,
+    ASCENDC_ASR,
 };
 enum class XDecodeAttentionBackend310P {
     LEGACY,
@@ -194,6 +195,10 @@ public:
     {
         return _matmulBackend310P == XMatmulBackend310P::M200_ASR_PREFILL;
     }
+    [[nodiscard]] bool UseAscendCAsrMatmul310P(void) const
+    {
+        return _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR;
+    }
     [[nodiscard]] bool UseBatchedDecodeAttention310P(void) const
     {
         return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::BATCHED_ACLNN;
@@ -238,6 +243,17 @@ public:
         if (m < aclnnMatmulRequestsByM.size()) {
             ++aclnnMatmulRequestsByM[m];
         }
+    }
+    void RecordAscendCAsrMatmul310P(uint32_t m)
+    {
+        ++ascendcAsrMatmulRequests;
+        if (m < ascendcAsrMatmulRequestsByM.size()) {
+            ++ascendcAsrMatmulRequestsByM[m];
+        }
+    }
+    void RecordAscendCAsrMatmulBypass310P()
+    {
+        ++ascendcAsrMatmulBypassRequests;
     }
     void RecordAclnnMatmulSynchronization(bool lmHead)
     {
@@ -621,10 +637,14 @@ public:
     uint64_t m200MatmulRequests = 0;
     uint64_t m200MatmulKernelLaunches = 0;
     uint64_t aclnnMatmulRequests = 0;
+    uint64_t ascendcAsrMatmulRequests = 0;
+    uint64_t ascendcAsrMatmulKernelLaunches = 0;
+    uint64_t ascendcAsrMatmulBypassRequests = 0;
     // Keep exact M telemetry through the configured 310P batched-token limit.
     // This is intentionally fixed-size: recording a request must not allocate.
     std::array<uint64_t, 4097> m200MatmulRequestsByM{};
     std::array<uint64_t, 4097> aclnnMatmulRequestsByM{};
+    std::array<uint64_t, 4097> ascendcAsrMatmulRequestsByM{};
 #endif
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;

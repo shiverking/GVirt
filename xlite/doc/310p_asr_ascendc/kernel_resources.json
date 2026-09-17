@@ -8,7 +8,7 @@
   "l0c_limit_bytes": 262144,
   "kernels": {
     "asr_m200_projection_fp16": {
-      "status": "probe",
+      "status": "production_decode_projection",
       "ub_bytes": 24576,
       "l1_bytes": 40960,
       "l0a_bytes": 8192,

@@ -13,6 +13,7 @@
 #include "trace/trace.h"
 #ifdef XLITE_ARCH_310P
 #include "aclnn_310p.h"
+#include "ascendc_asr_matmul_310p.h"
 #include "m200_matmul_310p.h"
 
 // Implemented in the Bisheng host object emitted from the isolated official
@@ -755,6 +756,25 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         return;
     }
 #ifdef XLITE_ARCH_310P
+    if (rt.UseAscendCAsrMatmul310P()) {
+        if (XliteAscendCAsrProjection310PSupported(
+                in, weight, out, weightNZ, bias, deqScale, transpose)) {
+            XliteAscendCAsrProjection310P(rt, in, weight, out);
+            return;
+        }
+        // Prefill projections and LM Head are intentionally outside this
+        // first production slice. They use the established correctness path
+        // and are counted so this staged boundary is never a silent fallback.
+        if (XliteAscendCAsrKnownMatmul310P(
+                in, weight, out, weightNZ, bias, deqScale, transpose)) {
+            rt.RecordAscendCAsrMatmulBypass310P();
+            XliteAclnn310PMatmul(rt, in, weight, out, weightNZ, bias, deqScale,
+                                transpose);
+            return;
+        }
+        throw std::runtime_error(
+            "ascendc_asr received a MatMul outside the fixed Qwen3-ASR contract");
+    }
     if (rt.UseM200Matmul310P() &&
         XliteM200Matmul310PSupported(in, weight, out, weightNZ, bias, deqScale, transpose,
                                     rt.UseM200PrefillMatmul310P())) {
