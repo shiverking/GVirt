@@ -21,6 +21,12 @@ export XLITE_KERNEL_SET=llm_fp16
 pip install -v -e . --no-build-isolation
 ```
 
+CANN 9.1 beta1 packaging can expose `SOC_VERSION=ascend310p1` on the target
+Ascend310P3 deployment.  `setup.py` treats that value only as a packaging
+alias, canonicalizes it to `Ascend310P3`, and infers `llm_fp16` when the kernel
+set is omitted.  The device compiler must still provide `__NPU_ARCH__ == 2002`;
+the alias does not relax the production-kernel architecture gate.
+
 The profile defines the project-owned `XLITE_ARCH_310P` macro; it never fakes
 `__DAV_C220_VEC__` or `__DAV_C220_CUBE__`. Device compilation additionally
 requires the compiler-provided `__NPU_ARCH__` to equal `2002`. The profile

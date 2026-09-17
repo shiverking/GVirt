@@ -284,12 +284,40 @@ class CMakeBuild(build_ext):
             f"-DXLITE_EDITABLE_BUILD={'ON' if is_editable else 'OFF'}",
         ]
         configure_cmd.append(f"-DXLITE_VERSION={_read_version()}")
-        for env_name in ("SOC_VERSION", "XLITE_KERNEL_SET", "ASCEND_CANN_PACKAGE_PATH"):
-            env_value = os.environ.get(env_name)
+
+        cmake_options = {
+            env_name: os.environ.get(env_name)
+            for env_name in ("SOC_VERSION", "XLITE_KERNEL_SET", "ASCEND_CANN_PACKAGE_PATH")
+        }
+        soc_input = cmake_options["SOC_VERSION"]
+        if soc_input:
+            soc_lower = soc_input.lower()
+            # CANN 9.1 beta1 may export ``ascend310p1`` on an Ascend310P3
+            # deployment.  AscendC itself expects the canonical product name
+            # used by the working standalone probes.  This is only a build
+            # boundary alias: every 310P device source still rejects anything
+            # other than compiler-provided __NPU_ARCH__ == 2002.
+            if soc_lower == "ascend310p1":
+                cmake_options["SOC_VERSION"] = "Ascend310P3"
+                print(
+                    "CMakeBuild: normalized CANN SOC alias "
+                    f"'{soc_input}' -> 'Ascend310P3'; device arch gate remains 2002"
+                )
+                soc_lower = "ascend310p3"
+
+            # The 310P implementation intentionally has no general/full
+            # kernel build.  Infer the sole valid profile when packaging did
+            # not explicitly provide one; an explicitly incompatible value
+            # is still rejected by CMake.
+            if soc_lower.startswith("ascend310p") and not cmake_options["XLITE_KERNEL_SET"]:
+                cmake_options["XLITE_KERNEL_SET"] = "llm_fp16"
+                print("CMakeBuild: inferred XLITE_KERNEL_SET=llm_fp16 for Ascend310P")
+
+        for env_name, env_value in cmake_options.items():
             if env_value:
                 configure_cmd.append(f"-D{env_name}={env_value}")
         build_cmd = ["cmake", "--build", str(build_temp)]
-        if os.environ.get("XLITE_KERNEL_SET") == "llm_fp16":
+        if cmake_options["XLITE_KERNEL_SET"] == "llm_fp16":
             build_cmd.append("--verbose")
         build_cmd.append("-j")
         install_cmd = ["cmake", "--install", str(build_temp)]
