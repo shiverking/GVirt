@@ -35,7 +35,8 @@ no vector mask wider than 64 lanes. Vector-to-scalar and scalar-to-vector
 handoffs use dynamically allocated `V_S` and `S_V` events.
 Runtime scalar weights are materialized with `vector_dup` into dedicated/reused
 FP32 UB vectors after `S_V`, then consumed by `vmul`; they are never passed as
-runtime scalar operands to `vmuls` on CANN 9.1 beta1.
+runtime scalar operands to `vmuls` on CANN 9.1 beta1. The `vector_dup` scalar is
+an exact mutable stack-local `float`; CANN 9.1 rejects the `const float` form.
 
 ## Probe acceptance
 

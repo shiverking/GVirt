@@ -171,8 +171,10 @@ public:
                 vexp(F(expOutputF_), F(expInputF_), 1, 1, 1, 8, 8);
                 SetFlag<HardEvent::V_S>(vectorToScalar);
                 WaitFlag<HardEvent::V_S>(vectorToScalar);
-                const float correction = F(expOutputF_)[0];
-                const float weight = F(expOutputF_)[1];
+                // The M200 dynamic scalar overload requires an exact mutable
+                // stack-local float.  const float is rejected by CANN 9.1.
+                float correction = F(expOutputF_)[0];
+                float weight = F(expOutputF_)[1];
                 runningSum = runningSum * correction + weight;
                 runningMax = newMax;
                 SetFlag<HardEvent::S_V>(scalarToVector);
@@ -195,7 +197,7 @@ public:
                 nextAccumulator = old;
             }
 
-            const float inverseSum = one / runningSum;
+            float inverseSum = one / runningSum;
             SetFlag<HardEvent::S_V>(scalarToVector);
             WaitFlag<HardEvent::S_V>(scalarToVector);
             set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
