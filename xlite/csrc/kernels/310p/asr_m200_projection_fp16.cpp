@@ -141,15 +141,22 @@ private:
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
 
         // Ascend310P3 has no usable FixPipe path from L0C directly to GM.
-        // The fused FP32-to-FP16 copy is a FixPipe conversion mode and
-        // produces corrupt values on the unified-core L0C-to-UB path. Keep
-        // the accumulator FP32 during the copy, then perform the conversion
-        // explicitly on the V pipe.  Both UB tensors retain NZ layout.
-        DataCopyCO12DstParams drain(nActual, m_, mPadded, mPadded,
-                                    NoQuant, 0, 0, 0);
+        // Design reference: l0c-ub-nd-readout.md, pinned by
+        // doc/310p_asr_ascendc/shared_assets.json.
+        // On Ascend310P, enhanced DataCopy is the only supported L0C-to-UB
+        // readback path.  One MATRIX-mode burst covers the complete padded
+        // FP32 tile; per-fractal/basic copies silently return corrupt data.
+        DataCopyParams drain;
+        drain.blockCount = 1;
+        drain.blockLen = mPadded * nPadded * sizeof(float) / 1024;
+        drain.srcStride = 0;
+        drain.dstStride = 0;
+        DataCopyEnhancedParams enhanced;
+        enhanced.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+        enhanced.deqScale = DeqScale::DEQ_NONE;
         SetFlag<HardEvent::M_V>(EVENT_ID0);
         WaitFlag<HardEvent::M_V>(EVENT_ID0);
-        DataCopy(outFp32Ub_, l0C_, drain);
+        DataCopy(outFp32Ub_, l0C_, drain, enhanced);
         PipeBarrier<PIPE_V>();
         Cast(outFp16Ub_, outFp32Ub_, RoundMode::CAST_NONE,
              mPadded * nPadded);
@@ -158,14 +165,10 @@ private:
 
         DataCopyParams write;
         write.blockCount = m_;
-        write.blockLen = kNBlock * sizeof(half) / 32;
-        write.srcStride = 0;
-        write.dstStride = n_ * sizeof(half) / 32 - write.blockLen;
-        for (uint32_t nb = 0; nb < nBlocks; ++nb) {
-            const uint32_t ubOffset = nb * mPadded * kNBlock;
-            const uint32_t gmOffset = nOffset + nb * kNBlock;
-            DataCopy(cGm_[gmOffset], outFp16Ub_[ubOffset], write);
-        }
+        write.blockLen = nActual * sizeof(half) / 32;
+        write.srcStride = (nPadded - nActual) * sizeof(half) / 32;
+        write.dstStride = (n_ - nActual) * sizeof(half) / 32;
+        DataCopy(cGm_[nOffset], outFp16Ub_, write);
         SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
         SetFlag<HardEvent::V_M>(EVENT_ID0);
