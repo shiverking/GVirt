@@ -1,0 +1,28 @@
+op_name: asr_attention_mmad_blocks
+status: isolated_probe
+target: {soc: Ascend310P3, npu_arch: 2002, dtype: fp16}
+inputs:
+  - {name: a, format: ND, dtype: fp16}
+  - {name: b, format: ND_NK, dtype: fp16}
+outputs:
+  - {name: c, format: ND, dtype: fp16}
+shape_contract:
+  reduction_axes: [K]
+  constraints:
+    - "M == 16"
+    - "QK: N == 16 and K == 128"
+    - "PV: N == 128 and K == 16"
+dtype_contract:
+  inputs: fp16
+  accumulator: fp32
+  output: fp16
+compute_equations:
+  qk: "C[16,16] = Q[16,128] * transpose(K[16,128])"
+  pv: "C[16,128] = P[16,16] * transpose(VT[128,16])"
+intermediate: fp32_l0c
+precision_target: {cosine_min: 0.999, max_abs_max: 0.02}
+runtime_eligible: false
+boundary_conditions:
+  - "M == 16"
+  - "QK: N == 16 and K == 128"
+  - "PV: N == 128 and K == 16"

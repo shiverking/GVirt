@@ -1,0 +1,27 @@
+op_name: asr_attention_mmad_blocks
+target: Ascend310P3
+status: isolated_probe
+blocks:
+  - phase: load
+    block: gm_nd_to_l1_nz
+    resources: {l1_bytes: 36864}
+  - phase: cube_load
+    block: l1_to_l0a_l0b
+    resources: {l0a_bytes: 4096, l0b_bytes: 32768}
+  - phase: cube
+    block: low_level_mmad
+    resources: {l0c_bytes: 8192}
+    arithmetic: fp32_accumulate
+  - phase: drain
+    block: l0c_matrix_to_ub_cast
+    resources: {ub_bytes: 12288}
+  - phase: store
+    block: nz_to_nd_scatter
+interactions:
+  - {between: [load, cube_load], sync: [MTE2_MTE1, MTE1_MTE2]}
+  - {between: [cube_load, cube], sync: [MTE1_M, M_MTE1]}
+  - {between: [cube, drain], sync: M_V}
+  - {between: [drain, store], sync: [V_MTE3, MTE3_V]}
+event_allocation: dynamic_FetchEventID
+forbidden: [fixed_EVENT_ID, high_level_Matmul, FixPipe, DataCopyPad, LoadDataWithTranspose]
+next_gate: device_probe_qk_and_pv
