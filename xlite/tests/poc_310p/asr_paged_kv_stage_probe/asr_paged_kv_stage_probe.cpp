@@ -91,10 +91,13 @@ public:
             }
             SetFlag<HardEvent::MTE2_V>(loadReady);
             WaitFlag<HardEvent::MTE2_V>(loadReady);
+            // vTransposeUb_ is a cyclic V -> MTE3 buffer. MTE3 from the
+            // previous dimension block must release it before V writes the
+            // next transpose. Waiting after vtranspose is already too late.
+            WaitFlag<HardEvent::MTE3_V>(storeFree);
             vtranspose(reinterpret_cast<__ubuf__ uint16_t *>(H(vTransposeUb_)),
                        reinterpret_cast<__ubuf__ uint16_t *>(H(vCompactUb_)));
             pipe_barrier(PIPE_V);
-            WaitFlag<HardEvent::MTE3_V>(storeFree);
             SetFlag<HardEvent::V_MTE3>(storeReady);
             WaitFlag<HardEvent::V_MTE3>(storeReady);
             copy_ubuf_to_gm(vTransposeTile_ + dimBlock * 256,

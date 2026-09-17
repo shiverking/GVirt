@@ -11,5 +11,6 @@ resources: {ub_bytes: 5120, l1_bytes: 0, l0a_bytes: 0, l0b_bytes: 0, l0c_bytes: 
 events:
   dynamic_only: true
   pairs: [MTE2_V, V_MTE2, V_MTE3, MTE3_V]
+  cyclic_buffer_rule: "Wait MTE3_V before the next V write to vTransposeUb"
 forbidden: [fixed_EVENT_ID, DataCopyPad, LoadDataWithTranspose, high_level_Matmul]
 next_gate: combine_with_qk_pv_mmad_candidate

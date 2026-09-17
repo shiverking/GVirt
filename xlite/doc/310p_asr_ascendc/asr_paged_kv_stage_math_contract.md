@@ -14,3 +14,8 @@ copied by token; V uses eight basic `16×16` `vtranspose` operations. The block
 does not use `DataCopyPad`, `LoadDataWithTranspose`, gather matrices or any
 high-level Matmul API. Acceptance is bitwise exact, with output guards intact
 and both cache arrays bitwise unchanged.
+
+`vTransposeUb` is a cyclic V-to-MTE3 buffer. Every dimension-block iteration
+waits for `MTE3_V` **before** `vtranspose` writes that buffer; waiting only
+before the subsequent GM store would permit V to overwrite data still being
+read by the preceding MTE3 operation.
