@@ -1,0 +1,34 @@
+op_name: asr_attention_partition_chain_probe
+target: Ascend310P3
+status: device_partition_state_and_merge_chain_probe
+blocks:
+  - {phase: q, block: direct-gm-nd-to-l1-nz}
+  - {phase: kv, block: paged-bshd-rows-to-l1-nz, tile_tokens: 16}
+  - {phase: qk, block: low-level-mmad, shape: [16, 16, 128]}
+  - {phase: softmax, block: online-softmax-state, arithmetic: fp32, partition_tokens: 512}
+  - {phase: pv, block: low-level-mmad, shape: [16, 128, 16]}
+  - {phase: state, block: aligned-fp32-state-store, floats: 144}
+  - {phase: merge, block: stable-four-partition-merge, arithmetic: fp32}
+resources:
+  state_kernel_ub_bytes: 17536
+  state_kernel_l1_bytes: 12288
+  state_kernel_l0a_bytes: 4096
+  state_kernel_l0b_bytes: 4096
+  state_kernel_l0c_bytes: 8192
+  merge_kernel_ub_bytes: 3968
+  scratch_bytes_batch20: 737280
+events:
+  dynamic_only: true
+  state_pairs: [V_MTE3, MTE3_MTE2, MTE3_MTE1, MTE2_MTE1, MTE1_M, M_MTE1, M_V, V_M, V_S, S_V, MTE3_V]
+  merge_pairs: [MTE2_V, V_MTE2, V_S, S_V, V_MTE3, MTE3_V]
+invariants:
+  - state_and_merge_same_runtime_stream
+  - no_host_sync_between_kernels
+  - no_read_before_write_ub_l1_or_scratch
+  - empty_partition_state_is_deterministic
+  - scratch_and_output_guards_unchanged
+  - cache_bitwise_unchanged
+findings:
+  - "This correctness chain intentionally retains 737280-byte FP32 scratch; production must resolve the 256 KiB budget conflict before runtime eligibility"
+forbidden: [fixed_EVENT_ID, high_level_Matmul, FixPipe, DataCopyPad, LoadDataWithTranspose, aclnn, atb]
+next_gate: choose_production_state_storage_then_integrate_paged_decode_runtime

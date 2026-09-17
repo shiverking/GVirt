@@ -76,6 +76,19 @@
       "arithmetic": "fp32_stable_partition_merge",
       "runtime_eligible": false
     },
+    "asr_attention_partition_chain_probe": {
+      "status": "device_partition_state_and_merge_chain_probe",
+      "state_kernel_ub_bytes": 17536,
+      "state_kernel_l1_bytes": 12288,
+      "state_kernel_l0a_bytes": 4096,
+      "state_kernel_l0b_bytes": 4096,
+      "state_kernel_l0c_bytes": 8192,
+      "merge_kernel_ub_bytes": 3968,
+      "event_pairs": {"state": 11, "merge": 6},
+      "shape": {"max_batch": 20, "q_heads": 16, "partitions": 4, "head_dim": 128, "max_kv": 2048},
+      "scratch_bytes_batch20": 737280,
+      "runtime_eligible": false
+    },
     "asr_add_rmsnorm_fp16": {
       "status": "production_decode_vector",
       "ub_bytes": 65536,

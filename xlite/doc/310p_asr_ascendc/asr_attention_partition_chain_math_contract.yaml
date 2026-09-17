@@ -1,0 +1,40 @@
+op_name: asr_attention_partition_chain_probe
+operator_class: paged_decode_attention_partition_chain
+target: {soc: Ascend310P3, npu_arch: 2002}
+inputs:
+  - {name: qkv, required: true, dtypes_chip_supported: [fp16], format: ND, shape: [B, QKV]}
+  - {name: k_cache, required: true, dtypes_chip_supported: [fp16], format: BSHD, shape: [NB, BS, KVH, D]}
+  - {name: v_cache, required: true, dtypes_chip_supported: [fp16], format: BSHD, shape: [NB, BS, KVH, D]}
+  - {name: block_table, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B, BT]}
+  - {name: kv_lengths, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B]}
+outputs:
+  - {name: output, dtypes_chip_supported: [fp16], format: ND, shape: [B, QD]}
+shape_contract:
+  reduction_axes: [D, KV, P]
+  broadcast_axes: [B, QH]
+  constraints: ["1 <= B <= 20", "513 <= kv_length <= 2048", "P == 4", "D == 128", "BS == 128"]
+dtype_contract:
+  intermediate: fp32
+  cast_rules:
+    - "Q/K/V fp16 -> partition MMAD fp32 accumulator"
+    - "partition probabilities fp32 -> fp16 -> PV MMAD fp32"
+    - "four FP32 states -> stable FP32 merge -> output fp16"
+precision_target:
+  cosine_threshold: 0.999
+  max_absolute_error: 0.01
+  nan_policy: error
+  inf_policy: clamp_via_max_subtraction
+  denormal_policy: flush_to_zero
+compute_equations:
+  forward:
+    - "partition_state_p = online_softmax_state(Q, K_p, V_p)"
+    - "output = stable_partition_merge(partition_state_0..3)"
+  backward: null
+boundary_conditions:
+  - "empty partitions write max=-65504, sum=0, output=0 and zero padding"
+  - "block-table padding and cache slots outside kv_length are not read"
+  - "state generation and merge execute on one stream without host synchronization"
+source_citations:
+  - {file: doc/310p_asr_ascendc/asr_attention_single_partition_math_contract.yaml, lines: [1, 44], role: partition_state_contract}
+  - {file: doc/310p_asr_ascendc/asr_attention_partition_merge_math_contract.yaml, lines: [1, 37], role: stable_merge_contract}
+  - {file: doc/310p_asr_ascendc/asr_attention_partition_chain_block_decomposition.yaml, lines: [1, 39], role: block_decomposition}
