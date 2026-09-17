@@ -61,12 +61,20 @@ float HalfValue(uint16_t bits)
 struct Metrics {
     double cosine = 0.0;
     double maxAbs = 0.0;
+    size_t maxAbsIndex = 0;
     size_t sentinels = 0;
     size_t nonFinite = 0;
+    size_t zeros = 0;
+    size_t mismatches = 0;
+    double actualMin = INFINITY;
+    double actualMax = -INFINITY;
+    double expectedMin = INFINITY;
+    double expectedMax = -INFINITY;
 };
 
 Metrics Compare(const std::vector<uint16_t> &actual,
-                const std::vector<uint16_t> &expected)
+                const std::vector<uint16_t> &expected,
+                double tolerance)
 {
     if (actual.size() != expected.size()) {
         throw std::invalid_argument("comparison sizes differ");
@@ -80,13 +88,78 @@ Metrics Compare(const std::vector<uint16_t> &actual,
         const double a = HalfValue(actual[i]);
         const double e = HalfValue(expected[i]);
         result.nonFinite += !std::isfinite(a);
-        result.maxAbs = std::max(result.maxAbs, std::abs(a - e));
+        result.zeros += a == 0.0;
+        const double absoluteError = std::abs(a - e);
+        result.mismatches += absoluteError > tolerance;
+        if (absoluteError > result.maxAbs) {
+            result.maxAbs = absoluteError;
+            result.maxAbsIndex = i;
+        }
+        if (std::isfinite(a)) {
+            result.actualMin = std::min(result.actualMin, a);
+            result.actualMax = std::max(result.actualMax, a);
+        }
+        result.expectedMin = std::min(result.expectedMin, e);
+        result.expectedMax = std::max(result.expectedMax, e);
         dot += a * e;
         actualNorm += a * a;
         expectedNorm += e * e;
     }
     result.cosine = dot / std::sqrt(actualNorm * expectedNorm);
     return result;
+}
+
+void PrintDiagnostics(const char *name, const std::vector<uint16_t> &actual,
+                      const std::vector<uint16_t> &expected, uint32_t rowWidth,
+                      double tolerance, const Metrics &metrics)
+{
+    std::cerr << std::fixed << std::setprecision(6)
+              << name << " diagnostics: elements=" << actual.size()
+              << ", mismatches(abs>" << tolerance << ")=" << metrics.mismatches
+              << ", max_abs=" << metrics.maxAbs
+              << " at [" << metrics.maxAbsIndex / rowWidth << ","
+              << metrics.maxAbsIndex % rowWidth << "]"
+              << ", cosine=" << metrics.cosine
+              << ", actual_range=[" << metrics.actualMin << "," << metrics.actualMax << "]"
+              << ", expected_range=[" << metrics.expectedMin << "," << metrics.expectedMax << "]"
+              << ", zeros=" << metrics.zeros
+              << ", non_finite=" << metrics.nonFinite
+              << ", sentinels=" << metrics.sentinels << std::endl;
+    size_t printed = 0;
+    for (size_t i = 0; i < actual.size() && printed < 16; ++i) {
+        const double a = HalfValue(actual[i]);
+        const double e = HalfValue(expected[i]);
+        if (!std::isfinite(a) || std::abs(a - e) > tolerance) {
+            std::cerr << "  mismatch[" << i / rowWidth << "," << i % rowWidth
+                      << "] actual=" << a << " bits=0x" << std::hex << actual[i]
+                      << " expected=" << std::dec << e << " bits=0x" << std::hex
+                      << expected[i] << std::dec << " abs=" << std::abs(a - e)
+                      << std::endl;
+            ++printed;
+        }
+    }
+    const uint32_t rows = static_cast<uint32_t>(actual.size() / rowWidth);
+    for (uint32_t row = 0; row < rows; ++row) {
+        double dot = 0.0;
+        double actualNorm = 0.0;
+        double expectedNorm = 0.0;
+        double rowMaxAbs = 0.0;
+        size_t rowMismatches = 0;
+        for (uint32_t col = 0; col < rowWidth; ++col) {
+            const size_t index = static_cast<size_t>(row) * rowWidth + col;
+            const double a = HalfValue(actual[index]);
+            const double e = HalfValue(expected[index]);
+            dot += a * e;
+            actualNorm += a * a;
+            expectedNorm += e * e;
+            rowMaxAbs = std::max(rowMaxAbs, std::abs(a - e));
+            rowMismatches += std::abs(a - e) > tolerance;
+        }
+        const double rowCosine = dot / std::sqrt(actualNorm * expectedNorm);
+        std::cerr << "  row=" << row << " cosine=" << rowCosine
+                  << " max_abs=" << rowMaxAbs
+                  << " mismatches=" << rowMismatches << std::endl;
+    }
 }
 
 template <typename Launch>
@@ -157,9 +230,10 @@ void RunRmsNorm(uint32_t tokens, uint32_t warmup, uint32_t iterations)
     Check(aclrtDestroyStream(stream), "aclrtDestroyStream");
     Check(aclrtMemcpy(output.data(), output.size() * sizeof(uint16_t), outputDevice.ptr,
                      output.size() * sizeof(uint16_t), ACL_MEMCPY_DEVICE_TO_HOST), "read output");
-    const Metrics metrics = Compare(output, expected);
+    const Metrics metrics = Compare(output, expected, 0.03);
     if (metrics.sentinels != 0 || metrics.nonFinite != 0 ||
         metrics.cosine < 0.999 || metrics.maxAbs > 0.03) {
+        PrintDiagnostics("RMSNorm", output, expected, kHidden, 0.03, metrics);
         throw std::runtime_error("RMSNorm mismatch: cosine=" +
                                  std::to_string(metrics.cosine) + ", max_abs=" +
                                  std::to_string(metrics.maxAbs) + ", sentinel=" +
@@ -212,9 +286,10 @@ void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations)
     Check(aclrtDestroyStream(stream), "aclrtDestroyStream");
     Check(aclrtMemcpy(output.data(), output.size() * sizeof(uint16_t), outputDevice.ptr,
                      output.size() * sizeof(uint16_t), ACL_MEMCPY_DEVICE_TO_HOST), "read output");
-    const Metrics metrics = Compare(output, expected);
+    const Metrics metrics = Compare(output, expected, 0.04);
     if (metrics.sentinels != 0 || metrics.nonFinite != 0 ||
         metrics.cosine < 0.999 || metrics.maxAbs > 0.04) {
+        PrintDiagnostics("SiLU-Mul", output, expected, kIntermediate, 0.04, metrics);
         throw std::runtime_error("SiLU-Mul mismatch: cosine=" +
                                  std::to_string(metrics.cosine) + ", max_abs=" +
                                  std::to_string(metrics.maxAbs) + ", sentinel=" +

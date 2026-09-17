@@ -81,6 +81,14 @@ public:
             GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
         const event_t outputFreeEvent = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        // CANN 9.1 beta1 on M200 does not make a Vector result reliably
+        // visible to a scalar load (or a scalar store visible to Vector)
+        // without an explicit cross-pipe event.  Keep these event IDs local
+        // to the kernel; fixed EVENT_IDs are forbidden for the ASR backend.
+        const event_t vectorToScalarEvent = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        const event_t scalarToVectorEvent = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::S_V));
         constexpr uint32_t halfBlocks = kHidden * sizeof(half) / 32;
         constexpr uint32_t fp16ToFp32Repeats = kHidden / kFp32Lanes;
         // M200 places file-scope floating constants in GM. Vector scalar
@@ -125,12 +133,12 @@ public:
             vadds(square, square, eps_, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
             vsqrt(square, square, 1, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
-            // On M200 scalar reads are synchronous with V. A scalar FP32
-            // reciprocal is more accurate than the approximate vrec path and
-            // does not require the redundant C220-style V_S/S_V event pair.
+            SetFlag<HardEvent::V_S>(vectorToScalarEvent);
+            WaitFlag<HardEvent::V_S>(vectorToScalarEvent);
             float inverseRms = *square;
             inverseRms = 1.0F / inverseRms;
+            SetFlag<HardEvent::S_V>(scalarToVectorEvent);
+            WaitFlag<HardEvent::S_V>(scalarToVectorEvent);
             set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
             vector_dup(square, inverseRms, kHidden / kFp32Lanes, 1, 1, 8, 1);
             pipe_barrier(PIPE_V);
