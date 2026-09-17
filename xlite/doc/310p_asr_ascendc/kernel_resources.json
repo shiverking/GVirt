@@ -28,7 +28,7 @@
     "asr_qk_norm_mrope_cache_fp16": {"status": "planned", "ub_bytes": null, "event_pairs": null},
     "asr_paged_decode_attention_fp16": {"status": "planned", "ub_bytes": null, "event_pairs": null},
     "asr_add_rmsnorm_fp16": {
-      "status": "probe",
+      "status": "production_decode_vector",
       "ub_bytes": 65536,
       "l1_bytes": 0,
       "l0a_bytes": 0,

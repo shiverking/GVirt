@@ -720,6 +720,30 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     if (IsDummyRuntime(rt)) {
         return;
     }
+#ifdef XLITE_ARCH_310P
+    const bool pureDecode = in.shape.size() == 2 && in.shape[0] >= 1 && in.shape[0] <= 20 &&
+        rt._hostLens.size() == in.shape[0] &&
+        std::all_of(rt._hostLens.begin(), rt._hostLens.end(),
+                    [](uint32_t length) { return length == 1; });
+    if (rt.UseAscendCAsrMatmul310P() && pureDecode) {
+        const bool supported =
+            EachXDtype(FP16, in, addInOut, norm, out) && normBias.ptr == nullptr &&
+            in.shape.size() == 2 && addInOut.shape.size() == 2 && out.shape.size() == 2 &&
+            in.shape[1] == 2048 && addInOut.shape == in.shape && out.shape == in.shape &&
+            norm.shape.size() == 1 && norm.shape[0] == 2048;
+        if (!supported) {
+            throw std::runtime_error(
+                "ascendc_asr AddRMSNorm requires FP16 [tokens,2048] I/O/residual, "
+                "FP16 [2048] weight and no bias");
+        }
+        const uint32_t tokens = static_cast<uint32_t>(in.shape[0]);
+        ACLRT_LAUNCH_KERNEL(asr_add_rmsnorm_fp16)
+        (std::min<uint32_t>(8, tokens), rt.stream, in.ptr, addInOut.ptr, norm.ptr,
+         out.ptr, tokens, normEps);
+        ++rt.ascendcAsrAddRmsNormRequests;
+        return;
+    }
+#endif
     KERNEL_PTR_TYPE(norm) * launchKernel;
     if (EachXDtype(FP16, in, addInOut, out)) {
         launchKernel = aclrtlaunch_norm_float16_t;

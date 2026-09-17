@@ -235,6 +235,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     # library. Mixing object types changes CANN 9.1's legacy merge route.
     set(KERNEL_FILES_310P_ASR_VECTOR
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_rmsnorm_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_add_rmsnorm_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_silu_mul_fp16.cpp
     )
     list(REMOVE_ITEM KERNEL_FILES_F16

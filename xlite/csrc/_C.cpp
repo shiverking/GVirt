@@ -3258,18 +3258,20 @@ PYBIND11_MODULE(_C, m)
         info["matmul_backends"] =
             py::make_tuple("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
-        // Fixed decode projections and the first two AIV-only vector kernels
-        // are selectable. Prefill, fused QK/RoPE/cache, fused residual norm,
-        // paged attention and LM Head remain explicit boundaries.
+        // Fixed decode projections plus RMSNorm, fused residual AddRMSNorm and
+        // SiLU-Mul are selectable. Prefill, fused QK/RoPE/cache, paged
+        // attention and LM Head remain explicit boundaries.
         info["ascendc_asr_backend"] = true;
-        info["ascendc_asr_backend_status"] = "decode_projections_rmsnorm_silu";
-        info["ascendc_asr_contract_version"] = 2;
+        info["ascendc_asr_backend_status"] =
+            "decode_projections_rmsnorm_add_rmsnorm_silu";
+        info["ascendc_asr_contract_version"] = 3;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
         info["ascendc_asr_projection_shapes"] =
             py::make_tuple("qkv", "o", "gate_up", "down");
         info["ascendc_asr_rmsnorm"] = true;
+        info["ascendc_asr_add_rmsnorm"] = true;
         info["ascendc_asr_silu_mul"] = true;
         info["ascendc_asr_prefill"] = false;
         info["ascendc_asr_lm_head"] = false;
@@ -3302,6 +3304,8 @@ PYBIND11_MODULE(_C, m)
         stats["ascendc_asr_kernel_launches"] = rt.ascendcAsrMatmulKernelLaunches;
         stats["ascendc_asr_bypass_requests"] = rt.ascendcAsrMatmulBypassRequests;
         stats["ascendc_asr_rmsnorm_requests"] = rt.ascendcAsrRmsNormRequests;
+        stats["ascendc_asr_add_rmsnorm_requests"] =
+            rt.ascendcAsrAddRmsNormRequests;
         stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
         stats["matmul_backend"] = rt.MatmulBackend310PName();
         py::dict m200ByM;
@@ -3451,6 +3455,8 @@ PYBIND11_MODULE(_C, m)
             stats["ascendc_asr_bypass_requests"] =
                 rt.ascendcAsrMatmulBypassRequests;
             stats["ascendc_asr_rmsnorm_requests"] = rt.ascendcAsrRmsNormRequests;
+            stats["ascendc_asr_add_rmsnorm_requests"] =
+                rt.ascendcAsrAddRmsNormRequests;
             stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
             stats["matmul_backend"] = rt.MatmulBackend310PName();
             py::dict m200ByM;
