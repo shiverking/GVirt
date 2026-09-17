@@ -1,0 +1,35 @@
+op_name: asr_qk_norm_mrope_cache_fp16
+operator_class: fused_normalization_rotary_cache_write
+inputs:
+  - {name: qkv, required: true, dtype: fp16, shape: [tokens, 4096]}
+  - {name: q_weight, required: true, dtype: fp16, shape: [128]}
+  - {name: k_weight, required: true, dtype: fp16, shape: [128]}
+  - {name: positions, required: true, dtype: int64, shape: [3, tokens]}
+  - {name: cossin, required: true, dtype: fp16, shape: [max_seq_len, 128]}
+  - {name: slot_mapping, required: true, dtype: int32, shape: [tokens]}
+outputs:
+  - {name: qkv_inout, dtype: fp16, shape: [tokens, 4096]}
+  - {name: k_cache, dtype: fp16, shape: [num_blocks, 128, 8, 128]}
+  - {name: v_cache, dtype: fp16, shape: [num_blocks, 128, 8, 128]}
+shape_contract:
+  reduction_axes: [head_dim]
+  broadcast_axes: [tokens, heads]
+  constraints: ["1 <= tokens <= 20", "head_dim == 128", "Q_heads == 16", "KV_heads == 8", "block_size == 128"]
+dtype_contract:
+  rms_intermediate: fp32
+  rope_intermediate: fp16
+  cast_rules: ["normalized fp32 -> fp16 before MRoPE", "Q scaled in fp16"]
+precision_target:
+  cosine_threshold: 0.999
+  max_absolute_error: 0.05
+  nan_policy: reject
+compute_equations:
+  forward:
+    - "norm(x,w)=fp16(fp32(x)*rsqrt(mean(fp32(x)^2)+eps)*fp32(w))"
+    - "axis(d)=H if d<60 and d mod 3=1; W if d<60 and d mod 3=2; T otherwise"
+    - "rope_lo=fp16(fp16(x_lo*cos)-fp16(x_hi*sin)); rope_hi=fp16(fp16(x_hi*cos)+fp16(x_lo*sin))"
+    - "Q=fp16(rope(norm(Q))*fp16(1/sqrt(128))); K=rope(norm(K)); cacheK[slot]=K; cacheV[slot]=V"
+boundary_conditions:
+  - "only slots named by slot_mapping may be modified"
+  - "V in qkv is not modified"
+  - "positions must be in [0,max_seq_len)"

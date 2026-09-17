@@ -1,0 +1,29 @@
+op_name: asr_qk_norm_mrope_cache_fp16
+target: Ascend310P3
+mode: redesign
+blocks:
+  - phase: X
+    block: elementwise-row-load
+    instance_params: {unit: token_head, inputs: [qkv_head, norm_weight, three_cossin_rows]}
+  - phase: V
+    block: rms-norm
+    instance_params: {cols: 128, arithmetic_precision: fp32, fp16_boundary_before_rope: true}
+  - phase: V
+    block: mrope-3axis-interleaved
+    instance_params: {sections: [24, 20, 20], pair_axis_pattern: THW, tail_axis: T, arithmetic_precision: fp16}
+  - phase: O
+    block: slot-cache-write
+    instance_params: {layout: BSHD, block_size: 128, kv_heads: 8, head_dim: 128}
+interactions:
+  - {between: [elementwise-row-load, rms-norm], sync: MTE2_V fetched-event, overlap: false}
+  - {between: [rms-norm, mrope-3axis-interleaved], sync: V pipeline barrier, overlap: false}
+  - {between: [mrope-3axis-interleaved, slot-cache-write], sync: V_MTE3 fetched-event, overlap: false}
+  - {between: [rms-norm-vector, rms-norm-scalar], sync: V_S fetched-event, overlap: false}
+  - {between: [rms-norm-scalar, rms-norm-vector], sync: S_V fetched-event, overlap: false}
+resources: {ub_bytes: 4352, l1_bytes: 0, l0a_bytes: 0, l0b_bytes: 0, l0c_bytes: 0, event_pairs: 6}
+invariants:
+  output_write_closure: true
+  no_output_read_before_write: true
+  ub_init_closure: true
+  fixed_event_ids: false
+  unused_cache_slots_untouched: true

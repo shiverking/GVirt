@@ -22,6 +22,14 @@ export LD_LIBRARY_PATH="${build_dir}/lib:${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
 executed=0
 cases=(
+    "qk-mrope-cache-m1:qk-mrope-cache:1"
+    "qk-mrope-cache-m2:qk-mrope-cache:2"
+    "qk-mrope-cache-m4:qk-mrope-cache:4"
+    "qk-mrope-cache-m6:qk-mrope-cache:6"
+    "qk-mrope-cache-m8:qk-mrope-cache:8"
+    "qk-mrope-cache-m12:qk-mrope-cache:12"
+    "qk-mrope-cache-m16:qk-mrope-cache:16"
+    "qk-mrope-cache-m20:qk-mrope-cache:20"
     "add-rmsnorm-m1:add-rmsnorm:1"
     "add-rmsnorm-m2:add-rmsnorm:2"
     "add-rmsnorm-m4:add-rmsnorm:4"

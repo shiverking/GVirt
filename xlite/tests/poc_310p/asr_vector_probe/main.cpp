@@ -11,6 +11,7 @@
 
 #include "acl/acl.h"
 #include "aclrtlaunch_asr_add_rmsnorm_fp16.h"
+#include "aclrtlaunch_asr_qk_norm_mrope_cache_fp16.h"
 #include "aclrtlaunch_asr_rmsnorm_fp16.h"
 #include "aclrtlaunch_asr_silu_mul_fp16.h"
 
@@ -18,6 +19,10 @@ namespace {
 
 constexpr uint32_t kHidden = 2048;
 constexpr uint32_t kIntermediate = 6144;
+constexpr uint32_t kHeadDim = 128;
+constexpr uint32_t kQHeads = 16;
+constexpr uint32_t kKvHeads = 8;
+constexpr uint32_t kQkvDim = (kQHeads + 2 * kKvHeads) * kHeadDim;
 constexpr uint16_t kHalfNan = 0x7e00;
 
 void Check(aclError status, const char *operation)
@@ -427,6 +432,123 @@ void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations)
               << ", max_abs=" << metrics.maxAbs << std::endl;
 }
 
+float RoundHalf(float value) { return HalfValue(HalfBits(value)); }
+
+void RunQkMropeCache(uint32_t tokens, uint32_t warmup, uint32_t iterations)
+{
+    constexpr float eps = 1.0e-6F;
+    constexpr float qScale = 0.08838834764831845F;
+    constexpr uint32_t maxPosition = 64;
+    constexpr uint32_t cacheSlots = 512;
+    std::vector<uint16_t> qkv(static_cast<size_t>(tokens) * kQkvDim);
+    std::vector<uint16_t> qWeight(kHeadDim), kWeight(kHeadDim);
+    std::vector<int64_t> positions(static_cast<size_t>(3) * tokens);
+    std::vector<int32_t> slots(tokens);
+    std::vector<uint16_t> cossin(static_cast<size_t>(maxPosition) * kHeadDim);
+    const size_t cacheElements = static_cast<size_t>(cacheSlots) * kKvHeads * kHeadDim;
+    std::vector<uint16_t> kCache(cacheElements, kHalfNan), vCache(cacheElements, kHalfNan);
+    for (uint32_t d = 0; d < kHeadDim; ++d) {
+        qWeight[d] = HalfBits(0.8F + static_cast<float>(d % 11) / 64.0F);
+        kWeight[d] = HalfBits(0.9F + static_cast<float>(d % 7) / 64.0F);
+    }
+    for (uint32_t p = 0; p < maxPosition; ++p) {
+        for (uint32_t d = 0; d < 64; ++d) {
+            const float angle = static_cast<float>(p) /
+                std::pow(10000.0F, static_cast<float>(2 * d) / kHeadDim);
+            cossin[static_cast<size_t>(p) * kHeadDim + d] = HalfBits(std::cos(angle));
+            cossin[static_cast<size_t>(p) * kHeadDim + 64 + d] = HalfBits(std::sin(angle));
+        }
+    }
+    for (uint32_t t = 0; t < tokens; ++t) {
+        positions[t] = 3 + t;
+        positions[tokens + t] = 11 + (t * 3) % 19;
+        positions[2 * tokens + t] = 23 + (t * 5) % 29;
+        slots[t] = static_cast<int32_t>((t * 131 + 17) % cacheSlots);
+        for (uint32_t d = 0; d < kQkvDim; ++d) {
+            qkv[static_cast<size_t>(t) * kQkvDim + d] = HalfBits(
+                static_cast<float>(static_cast<int32_t>((t * 17 + d * 7) % 47) - 23) / 16.0F);
+        }
+    }
+    const std::vector<uint16_t> original = qkv;
+    std::vector<uint16_t> expected = qkv, expectedK = kCache, expectedV = vCache;
+    auto axisForPair = [](uint32_t pair) {
+        if (pair < 60 && pair % 3 == 1) return 1U;
+        if (pair < 60 && pair % 3 == 2) return 2U;
+        return 0U;
+    };
+    for (uint32_t t = 0; t < tokens; ++t) {
+        for (uint32_t packed = 0; packed < kQHeads + kKvHeads; ++packed) {
+            const bool isQ = packed < kQHeads;
+            const uint32_t head = isQ ? packed : packed - kQHeads;
+            const size_t base = static_cast<size_t>(t) * kQkvDim +
+                (isQ ? head * kHeadDim : kQHeads * kHeadDim + head * kHeadDim);
+            const auto &weight = isQ ? qWeight : kWeight;
+            double sum = 0.0;
+            for (uint32_t d = 0; d < kHeadDim; ++d) {
+                const float x = HalfValue(original[base + d]); sum += x * x;
+            }
+            const float inv = 1.0F / std::sqrt(static_cast<float>(sum / kHeadDim) + eps);
+            std::vector<float> norm(kHeadDim);
+            for (uint32_t d = 0; d < kHeadDim; ++d)
+                norm[d] = RoundHalf(HalfValue(original[base + d]) * inv * HalfValue(weight[d]));
+            for (uint32_t d = 0; d < 64; ++d) {
+                const uint32_t axis = axisForPair(d);
+                const uint32_t pos = static_cast<uint32_t>(positions[axis * tokens + t]);
+                const float c = HalfValue(cossin[static_cast<size_t>(pos) * kHeadDim + d]);
+                const float s = HalfValue(cossin[static_cast<size_t>(pos) * kHeadDim + 64 + d]);
+                const float first = RoundHalf(RoundHalf(norm[d] * c) - RoundHalf(norm[d + 64] * s));
+                const float second = RoundHalf(RoundHalf(norm[d + 64] * c) + RoundHalf(norm[d] * s));
+                expected[base + d] = HalfBits(isQ ? RoundHalf(first * RoundHalf(qScale)) : first);
+                expected[base + 64 + d] = HalfBits(isQ ? RoundHalf(second * RoundHalf(qScale)) : second);
+            }
+            if (!isQ) {
+                const size_t cacheBase = (static_cast<size_t>(slots[t]) * kKvHeads + head) * kHeadDim;
+                std::copy(expected.begin() + base, expected.begin() + base + kHeadDim,
+                          expectedK.begin() + cacheBase);
+                const size_t valueBase = static_cast<size_t>(t) * kQkvDim +
+                    (kQHeads + kKvHeads) * kHeadDim + head * kHeadDim;
+                std::copy(original.begin() + valueBase, original.begin() + valueBase + kHeadDim,
+                          expectedV.begin() + cacheBase);
+            }
+        }
+    }
+    DeviceBuffer qkvD(qkv.size()*2), qwD(qWeight.size()*2), kwD(kWeight.size()*2),
+        posD(positions.size()*8), csD(cossin.size()*2), slotD(slots.size()*4),
+        kcD(kCache.size()*2), vcD(vCache.size()*2);
+    auto h2d = [&](void *d, const void *h, size_t n, const char *name) {
+        Check(aclrtMemcpy(d, n, h, n, ACL_MEMCPY_HOST_TO_DEVICE), name);
+    };
+    h2d(qkvD.ptr,qkv.data(),qkv.size()*2,"copy qkv"); h2d(qwD.ptr,qWeight.data(),qWeight.size()*2,"copy qw");
+    h2d(kwD.ptr,kWeight.data(),kWeight.size()*2,"copy kw"); h2d(posD.ptr,positions.data(),positions.size()*8,"copy positions");
+    h2d(csD.ptr,cossin.data(),cossin.size()*2,"copy cossin"); h2d(slotD.ptr,slots.data(),slots.size()*4,"copy slots");
+    h2d(kcD.ptr,kCache.data(),kCache.size()*2,"copy kcache"); h2d(vcD.ptr,vCache.data(),vCache.size()*2,"copy vcache");
+    aclrtStream stream = nullptr; Check(aclrtCreateStream(&stream), "aclrtCreateStream");
+    auto launch = [&]() { ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_fp16)
+        (8, stream, qkvD.ptr, qwD.ptr, kwD.ptr, posD.ptr, csD.ptr, slotD.ptr,
+         kcD.ptr, vcD.ptr, tokens, eps, qScale); };
+    launch(); Check(aclrtSynchronizeStream(stream), "correctness sync");
+    auto d2h = [&](void *h, void *d, size_t n, const char *name) {
+        Check(aclrtMemcpy(h, n, d, n, ACL_MEMCPY_DEVICE_TO_HOST), name);
+    };
+    d2h(qkv.data(),qkvD.ptr,qkv.size()*2,"read qkv"); d2h(kCache.data(),kcD.ptr,kCache.size()*2,"read kcache");
+    d2h(vCache.data(),vcD.ptr,vCache.size()*2,"read vcache");
+    const Metrics qm=Compare(qkv,expected,0.05), km=Compare(kCache,expectedK,0.05), vm=Compare(vCache,expectedV,0.002);
+    const size_t untouched = cacheElements - static_cast<size_t>(tokens)*kKvHeads*kHeadDim;
+    if(qm.sentinels||qm.nonFinite||qm.cosine<0.999||qm.maxAbs>0.05||
+       km.sentinels!=untouched||km.maxAbs>0.05||vm.sentinels!=untouched||vm.maxAbs>0.002) {
+        PrintDiagnostics("QKV",qkv,expected,kQkvDim,0.05,qm);
+        throw std::runtime_error("QK-MRoPE-Cache mismatch q_cos="+std::to_string(qm.cosine)+
+            ", q_max="+std::to_string(qm.maxAbs)+", k_max="+std::to_string(km.maxAbs)+
+            ", v_max="+std::to_string(vm.maxAbs));
+    }
+    h2d(qkvD.ptr,original.data(),original.size()*2,"reset qkv");
+    const double ms=Benchmark(stream,warmup,iterations,launch);
+    Check(aclrtDestroyStream(stream),"destroy stream");
+    std::cout<<std::fixed<<std::setprecision(6)<<"ASR QK-Norm-MRoPE-Cache PASS: tokens="<<tokens
+             <<", average_ms="<<ms<<", qkv_cosine="<<qm.cosine<<", qkv_max_abs="<<qm.maxAbs
+             <<", cache_max_abs="<<std::max(km.maxAbs,vm.maxAbs)<<std::endl;
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -434,7 +556,7 @@ int main(int argc, char **argv)
     try {
         if (argc != 5) {
             throw std::invalid_argument(
-                "usage: runner rmsnorm|add-rmsnorm|silu TOKENS WARMUP ITERATIONS");
+                "usage: runner rmsnorm|add-rmsnorm|qk-mrope-cache|silu TOKENS WARMUP ITERATIONS");
         }
         Check(aclInit(nullptr), "aclInit");
         Check(aclrtSetDevice(0), "aclrtSetDevice");
@@ -449,6 +571,8 @@ int main(int argc, char **argv)
             RunRmsNorm(tokens, warmup, iterations);
         } else if (op == "add-rmsnorm") {
             RunAddRmsNorm(tokens, warmup, iterations);
+        } else if (op == "qk-mrope-cache") {
+            RunQkMropeCache(tokens, warmup, iterations);
         } else if (op == "silu") {
             RunSiluMul(tokens, warmup, iterations);
         } else {
