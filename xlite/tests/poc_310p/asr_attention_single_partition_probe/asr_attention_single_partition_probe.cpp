@@ -383,10 +383,10 @@ private:
         pipe_barrier(PIPE_V);
         SetFlag<HardEvent::V_MTE3>(vToMte3_);
         WaitFlag<HardEvent::V_MTE3>(vToMte3_);
-        copy_ubuf_to_gm(reinterpret_cast<__gm__ half *>(output_.GetPhyAddr()) +
-                        static_cast<uint64_t>(request) * kQDim +
-                        queryHead * kHeadDim,
-                        H(outputH_), 0, 1, 8, 0, 0);
+        DataCopyParams outputCopy{1, 8, 0, 0};
+        const uint64_t outputOffset = static_cast<uint64_t>(request) * kQDim +
+                                      queryHead * kHeadDim;
+        DataCopy(output_[outputOffset], outputH_, outputCopy);
         SetFlag<HardEvent::MTE3_V>(mte3ToV_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
     }
