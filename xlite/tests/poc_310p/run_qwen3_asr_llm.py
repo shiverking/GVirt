@@ -276,6 +276,19 @@ def main() -> int:
     torch.npu.synchronize()
     final_memory = int(torch.npu.memory_allocated())
 
+    runtime_stats = dict(model.xlite_rt.get_stats())
+    backend_acceptance = {}
+    if args.matmul_backend == "ascendc_asr":
+        backend_acceptance = {
+            "ascendc_asr_projection_hit": runtime_stats["ascendc_asr_requests"] > 0,
+            "ascendc_asr_projection_launches_match": (
+                runtime_stats["ascendc_asr_kernel_launches"] ==
+                runtime_stats["ascendc_asr_requests"]
+            ),
+            "ascendc_asr_rmsnorm_hit": runtime_stats["ascendc_asr_rmsnorm_requests"] > 0,
+            "ascendc_asr_silu_mul_hit": runtime_stats["ascendc_asr_silu_mul_requests"] > 0,
+        }
+
     report = {
         "device": device_name,
         "dtype": "float16",
@@ -305,7 +318,7 @@ def main() -> int:
         "peak_memory_bytes": int(torch.npu.max_memory_allocated()),
         "stability_iterations": args.stability_iters,
         "memory_growth_bytes": final_memory - initial_memory,
-        "xlite_runtime_stats": dict(model.xlite_rt.get_stats()),
+        "xlite_runtime_stats": runtime_stats,
         "acceptance": {
             "hidden_cosine_gte_0_999": hidden_cosine >= 0.999,
             "logits_cosine_gte_0_999": logits_cosine >= 0.999,
@@ -314,6 +327,7 @@ def main() -> int:
             ),
             "greedy_16_token_match": reference_generated == generated,
             "no_memory_growth": final_memory <= initial_memory,
+            **backend_acceptance,
         },
     }
     report["passed"] = all(report["acceptance"].values())
