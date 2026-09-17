@@ -27,6 +27,7 @@ include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 # One vector-only library avoids mixing these AIV objects with AIC projection
 # objects while the kernels are still isolated micro-probes.
 ascendc_library(xlite_asr_vector_probe_kernel SHARED
+    ../../../csrc/kernels/310p/asr_add_rmsnorm_fp16.cpp
     ../../../csrc/kernels/310p/asr_rmsnorm_fp16.cpp
     ../../../csrc/kernels/310p/asr_silu_mul_fp16.cpp)
 ascendc_compile_definitions(xlite_asr_vector_probe_kernel PRIVATE CUSTOM_ASCEND310P)

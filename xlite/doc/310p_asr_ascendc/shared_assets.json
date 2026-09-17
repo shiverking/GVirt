@@ -41,6 +41,7 @@
     {"path": "blocks/rope-rotate-half/README.md", "sha256": "a182f0ee513c0ccac6dc9b6774b09e019441d7612cad67ef21dda87f6589172f"},
     {"path": "blocks/elementwise-row-load/README.md", "sha256": "895ea0af47bfe5d255bb7b3cc9801b2a0758a79d87b47302527f8b57e4b113bb"},
     {"path": "decision-rules/matmul-low-level-only-on-310p.md", "sha256": "9839f74d9a4ab9afd4382f9b0c4bc0d7b990f84d426c1cf1a4d46d670667a1ba"},
+    {"path": "decision-rules/same-pipe-not-happens-before.md", "sha256": "b0a4fc65b6a6520938144334eb8fc71d6042f2fa2ef654273ce14c57f95f68a9"},
     {"path": "skill-rules/k-split-arithmetic.md", "sha256": "93db409f329851604b0c0107783a93200025d5515078088ba41d5027cec89065"},
     {"path": "recipes/event-pool-vs-fixed-id.md", "sha256": "69079e6ae25e1ae086dff67b681aaa68c5b48145a4a77227c72ffb417d4c4fd6"},
     {"path": "transferable-patterns/tque-vs-tbuf.md", "sha256": "d98dfbb89670fd952032a1237b47a80047ecd8dcf27bf2081c7501a665bb931f"},

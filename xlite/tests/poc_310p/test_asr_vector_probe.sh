@@ -22,6 +22,14 @@ export LD_LIBRARY_PATH="${build_dir}/lib:${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
 executed=0
 cases=(
+    "add-rmsnorm-m1:add-rmsnorm:1"
+    "add-rmsnorm-m2:add-rmsnorm:2"
+    "add-rmsnorm-m4:add-rmsnorm:4"
+    "add-rmsnorm-m6:add-rmsnorm:6"
+    "add-rmsnorm-m8:add-rmsnorm:8"
+    "add-rmsnorm-m12:add-rmsnorm:12"
+    "add-rmsnorm-m16:add-rmsnorm:16"
+    "add-rmsnorm-m20:add-rmsnorm:20"
     "rmsnorm-m1:rmsnorm:1"
     "rmsnorm-m2:rmsnorm:2"
     "rmsnorm-m4:rmsnorm:4"
