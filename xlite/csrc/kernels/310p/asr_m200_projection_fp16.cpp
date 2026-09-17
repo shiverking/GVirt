@@ -43,14 +43,17 @@ __aicore__ inline void AsrL1ToL0A(const LocalTensor<half> &dst,
     }
 }
 
-__aicore__ inline void AsrL1ToL0BTranspose(const LocalTensor<half> &dst,
-                                            const LocalTensor<half> &src,
-                                            uint32_t nBlocks, uint32_t kBlocks)
+__aicore__ inline void AsrL1ToL0B(const LocalTensor<half> &dst,
+                                   const LocalTensor<half> &src,
+                                   uint32_t nBlocks, uint32_t kBlocks)
 {
-    LoadData2dParams params(0, nBlocks, kBlocks, 0, 0, 1, inc);
-    for (uint32_t kb = 0; kb < kBlocks; ++kb) {
-        LoadData(dst[kb * nBlocks * kCubeElements], src[kb * kCubeElements], params);
-    }
+    // GM weights use the model's native [N,K] layout.  ND2NZ above has
+    // already arranged the tile for the cube's ZN B operand, so this is a
+    // contiguous L1-to-L0B load.  Applying the transposed-B loader here
+    // interleaves N rows into K and collapses every output column to their
+    // average.
+    LoadData2dParams params(0, kBlocks * nBlocks, 1, 0, 0, 0, inc);
+    LoadData(dst, src, params);
 }
 
 class AsrProjectionKernel {
@@ -123,7 +126,7 @@ private:
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
 
             AsrL1ToL0A(l0A_, l1A_, mBlocks, kBlocks);
-            AsrL1ToL0BTranspose(l0B_, l1B_, nBlocks, kBlocks);
+            AsrL1ToL0B(l0B_, l1B_, nBlocks, kBlocks);
             SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
             SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
