@@ -5,7 +5,8 @@
  * qkv=[tokens,4096], positions=[3,tokens], tokens in [1,20].
  *
  * UB layout: 4 FP16 head buffers + 3 FP16 frequency rows + 2 selected
- * frequency buffers + 4 FP32 head buffers = 4352 bytes.  No L1/L0.
+ * frequency buffers + one dedicated FP16 V staging buffer + 4 FP32 head
+ * buffers = 4608 bytes.  No L1/L0.
  */
 #include "kernel_operator.h"
 
@@ -62,6 +63,7 @@ public:
         Bind(cosH_, 1792); Bind(sinH_, 2048);
         Bind(inputF_, 2304); Bind(squareAF_, 2816); Bind(squareBF_, 3328);
         Bind(weightF_, 3840);
+        Bind(valueH_, 4352);
     }
 
     __aicore__ inline void Process()
@@ -72,6 +74,8 @@ public:
         const event_t store = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
         const event_t loadFree = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
         const event_t storeFree = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        const event_t valueReady = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::MTE2_MTE3));
         const event_t vToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
         const event_t sToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
         float invHead = 0.0078125F;
@@ -151,10 +155,13 @@ public:
             vsub(H(outputH_), H(inputH_), H(freqHH_), 1, 1, 1, 1, 8, 8, 8);
             vadd(H(outputH_) + 64, H(weightH_), H(freqTH_), 1, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
+            // One FP16 vector repeat covers the complete 128-element head.
+            // Restore the full mask after the 64-element rotary-half math.
+            set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
             if (isQ) {
-                vmuls(H(normH_), H(outputH_), qScaleHalf, 2, 1, 1, 8, 8);
+                vmuls(H(normH_), H(outputH_), qScaleHalf, 1, 1, 1, 8, 8);
             } else {
-                vadds(H(normH_), H(outputH_), zero, 2, 1, 1, 8, 8);
+                vadds(H(normH_), H(outputH_), zero, 1, 1, 1, 8, 8);
             }
             pipe_barrier(PIPE_V);
             SetFlag<HardEvent::V_MTE2>(loadFree);
@@ -170,17 +177,15 @@ public:
             SetFlag<HardEvent::MTE3_V>(storeFree);
 
             if (!isQ) {
-                WaitFlag<HardEvent::V_MTE2>(loadFree);
-                copy_gm_to_ubuf(H(inputH_), qkv_ + token * kQkvDim + kQDim + kKDim +
+                copy_gm_to_ubuf(H(valueH_), qkv_ + token * kQkvDim + kQDim + kKDim +
                                 head * kHeadDim, 0, 1, 8, 0, 0);
-                SetFlag<HardEvent::MTE2_V>(load); WaitFlag<HardEvent::MTE2_V>(load);
-                SetFlag<HardEvent::V_MTE2>(loadFree);
+                SetFlag<HardEvent::MTE2_MTE3>(valueReady);
+                WaitFlag<HardEvent::MTE2_MTE3>(valueReady);
                 WaitFlag<HardEvent::MTE3_V>(storeFree);
-                SetFlag<HardEvent::V_MTE3>(store); WaitFlag<HardEvent::V_MTE3>(store);
                 const uint32_t slot = static_cast<uint32_t>(slots_[token]);
                 const uint64_t cacheOffset =
                     (static_cast<uint64_t>(slot) * kKvHeads + head) * kHeadDim;
-                copy_ubuf_to_gm(vCache_ + cacheOffset, H(inputH_), 0, 1, 8, 0, 0);
+                copy_ubuf_to_gm(vCache_ + cacheOffset, H(valueH_), 0, 1, 8, 0, 0);
                 SetFlag<HardEvent::MTE3_V>(storeFree);
             }
         }
@@ -198,7 +203,7 @@ private:
     __gm__ half *qkv_ = nullptr; __gm__ half *qWeight_ = nullptr; __gm__ half *kWeight_ = nullptr;
     __gm__ int64_t *positions_ = nullptr; __gm__ half *cossin_ = nullptr; __gm__ int32_t *slots_ = nullptr;
     __gm__ half *kCache_ = nullptr; __gm__ half *vCache_ = nullptr;
-    LocalTensor<half> inputH_, weightH_, normH_, outputH_, freqTH_, freqHH_, freqWH_, cosH_, sinH_;
+    LocalTensor<half> inputH_, weightH_, normH_, outputH_, freqTH_, freqHH_, freqWH_, cosH_, sinH_, valueH_;
     LocalTensor<float> inputF_, squareAF_, squareBF_, weightF_;
     uint32_t tokens_ = 0; float eps_ = 0.0F; float qScale_ = 0.0F;
 };

@@ -18,9 +18,10 @@ interactions:
   - {between: [elementwise-row-load, rms-norm], sync: MTE2_V fetched-event, overlap: false}
   - {between: [rms-norm, mrope-3axis-interleaved], sync: V pipeline barrier, overlap: false}
   - {between: [mrope-3axis-interleaved, slot-cache-write], sync: V_MTE3 fetched-event, overlap: false}
+  - {between: [value-gm-load, slot-cache-write], sync: MTE2_MTE3 fetched-event, overlap: false}
   - {between: [rms-norm-vector, rms-norm-scalar], sync: V_S fetched-event, overlap: false}
   - {between: [rms-norm-scalar, rms-norm-vector], sync: S_V fetched-event, overlap: false}
-resources: {ub_bytes: 4352, l1_bytes: 0, l0a_bytes: 0, l0b_bytes: 0, l0c_bytes: 0, event_pairs: 6}
+resources: {ub_bytes: 4608, l1_bytes: 0, l0a_bytes: 0, l0b_bytes: 0, l0c_bytes: 0, event_pairs: 7}
 invariants:
   output_write_closure: true
   no_output_read_before_write: true
