@@ -66,11 +66,16 @@ def _check_resources(require_resources: bool, errors: list[str]) -> None:
         if name not in present:
             continue
         ub_bytes = item.get("ub_bytes")
+        effective_ub_bytes = item.get(
+            "ub_bytes_including_nd2nz_reserve", ub_bytes)
         event_pairs = item.get("event_pairs")
         if require_resources and (not isinstance(ub_bytes, int) or not isinstance(event_pairs, int)):
             errors.append(f"{name}: exact ub_bytes and event_pairs are required")
-        if isinstance(ub_bytes, int) and ub_bytes > budget:
-            errors.append(f"{name}: UB use {ub_bytes} exceeds design budget {budget}")
+        if (isinstance(effective_ub_bytes, int) and
+                effective_ub_bytes > budget):
+            errors.append(
+                f"{name}: UB use {effective_ub_bytes} exceeds design "
+                f"budget {budget}")
 
 
 def _check_shared(root: Path, errors: list[str]) -> None:

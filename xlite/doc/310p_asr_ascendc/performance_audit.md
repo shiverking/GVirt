@@ -13,9 +13,10 @@ Source evidence (`csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp`):
 
 - Work is assigned per `(request, query_head)` (line 151), so both query heads in one GQA
   group independently stage the same K/V head.
-- `StageCacheRows` performs one GM-to-L1 transaction per token (line 245).
-- The tile is fixed at 16 KV tokens and each tile zeroes/rebuilds L1 buffers
-  (lines 18 and 562-581).
+- `StageCacheRows` now coalesces the 16 fixed-head BSHD rows into one ND-to-NZ
+  GM-to-L1 burst, splitting only at a physical 128-token block boundary.
+- Full 16-token tiles overwrite the complete L1 region and skip zero-fill;
+  only a short tail is explicitly initialized to preserve I20.
 - QK, scalar online softmax, probability conversion, PV and accumulator update
   are serialized with no double buffering.
 - Only the eight available AICs execute up to `batch * 16` head tasks by
@@ -24,8 +25,8 @@ Source evidence (`csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp`):
 Consequences:
 
 - Cache traffic is duplicated for the two Q heads sharing each KV head.
-- Per-token transfer setup and the large number of explicit barriers dominate
-  short Decode matmuls.
+- The former per-token transfer setup and unconditional zero-fill have been
+  removed. Device timing must still confirm the resulting MTE2 reduction.
 - Long and high-batch KV shapes scale almost linearly with total head-token
   work.  The current implementation is a correctness baseline, not yet a
   high-performance attention kernel.
@@ -34,8 +35,8 @@ Required follow-up after strict token correctness:
 
 1. Process the two Q heads of one GQA group together and stage each K/V tile
    once.
-2. Replace per-token cache staging with block-aware contiguous bursts that
-   split only at a physical 128-token block boundary.
+2. Calibrate the block-aware burst against the saved scalar-staging timing for
+   KV 16/128/512/2048 and Batch 1/8/20.
 3. Calibrate 16/32-token tiles on CANN 9.1 beta1 and introduce TBuf ping-pong
    only after the event graph is measured.
 4. Profile MTE2, M, V and MTE3 separately; do not select tiling from kernel

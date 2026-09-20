@@ -33,6 +33,20 @@ __aicore__ inline void GmRowToL1Nz(const LocalTensor<half> &dst,
     DataCopy(dst[dstRow * 16], src, params);
 }
 
+__aicore__ inline void GmCacheRowsToL1Nz(const LocalTensor<half> &dst,
+                                          const GlobalTensor<half> &src,
+                                          uint32_t rows,
+                                          uint32_t dstRow)
+{
+    // A fixed KV head is strided by all eight heads in BSHD cache.  Nd2Nz
+    // accepts that ND row stride, so one MTE2 transaction stages every row
+    // up to the next physical 128-token block boundary.  The destination
+    // remains a 16-row NZ tile consumed directly by L0B.
+    Nd2NzParams params(1, rows, kHeadDim, 0,
+                       kKvHeads * kHeadDim, kTileTokens, 1, 0);
+    DataCopy(dst[dstRow * 16], src, params);
+}
+
 __aicore__ inline void L1ToL0A(const LocalTensor<half> &dst,
                                 const LocalTensor<half> &src,
                                 uint32_t kBlocks)
@@ -241,11 +255,26 @@ private:
                                            uint32_t validTokens,
                                            uint32_t kvHead)
     {
-        ZeroL1(l1B_, true);
-        for (uint32_t token = 0; token < validTokens; ++token) {
-            GmRowToL1Nz(l1B_, cache[CacheOffset(request,
-                                                logicalStart + token,
-                                                kvHead)], token);
+        // I20: a short tail must initialize the rows that MMAD still reads.
+        // A full tile overwrites all 16x128 elements and therefore needs no
+        // UB->L1 zero-fill.  Avoiding that fill removes two barriers and one
+        // 4 KiB transfer from the common path.
+        if (validTokens < kTileTokens) {
+            ZeroL1(l1B_, true);
+        }
+
+        uint32_t staged = 0;
+        while (staged < validTokens) {
+            const uint32_t logicalToken = logicalStart + staged;
+            const uint32_t tokenInBlock = logicalToken % kBlockSize;
+            const uint32_t beforeBoundary = kBlockSize - tokenInBlock;
+            const uint32_t remaining = validTokens - staged;
+            const uint32_t rows = remaining < beforeBoundary ?
+                remaining : beforeBoundary;
+            GmCacheRowsToL1Nz(
+                l1B_, cache[CacheOffset(request, logicalToken, kvHead)],
+                rows, staged);
+            staged += rows;
         }
         SetFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
         WaitFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);

@@ -39,6 +39,8 @@
     "asr_paged_decode_attention_fp16": {
       "status": "production_runtime_candidate",
       "ub_bytes": 18240,
+      "nd2nz_reserved_ub_bytes": 8192,
+      "ub_bytes_including_nd2nz_reserve": 26432,
       "l1_bytes": 12288,
       "l0a_bytes": 4096,
       "l0b_bytes": 4096,
@@ -48,6 +50,14 @@
       "arithmetic": "low_level_mmad_fp32_partition_softmax_and_merge",
       "runtime_eligible": true,
       "gm_intermediate_scratch_bytes": 0,
+      "kv_stage": {
+        "layout": "BSHD",
+        "tile_tokens": 16,
+        "dma": "block_boundary_aware_nd2nz_burst",
+        "dma_calls_per_full_tile": 1,
+        "full_tile_zero_fill": false,
+        "tail_zero_fill": true
+      },
       "event_protocol": ["V_MTE3", "MTE3_MTE2", "MTE3_MTE1", "MTE2_MTE1", "MTE1_M", "M_MTE1", "M_V", "V_M", "V_S", "S_V", "MTE3_V"]
     },
     "asr_attention_single_partition_probe": {
