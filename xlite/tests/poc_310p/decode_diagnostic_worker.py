@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ os.environ.setdefault("XLITE_TP_SIZE", "1")
 os.environ.setdefault("XLITE_WEIGHT_NZ", "0")
 
 import torch
+import torch_npu
 
 from tests.models.llama import Llama
 from tests.models.qwen3 import Qwen3ModelArgs
@@ -42,6 +44,23 @@ def _copy_snapshot(
     return logits.detach().cpu().clone(), hidden.detach().cpu().clone()
 
 
+def _cpu_sha256(value: torch.Tensor) -> str:
+    contiguous = value.detach().cpu().contiguous()
+    return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
+
+
+def _to_npu_nd(value: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Upload after Runtime initialization and force ACL_FORMAT_ND (2)."""
+    uploaded = value.to(device="npu", dtype=dtype).contiguous()
+    uploaded = torch_npu.npu_format_cast(uploaded, 2)
+    return uploaded.contiguous()
+
+
+def _npu_format(value: torch.Tensor) -> int | None:
+    getter = getattr(torch_npu, "get_npu_format", None)
+    return int(getter(value)) if getter is not None else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -61,8 +80,10 @@ def main() -> int:
     bundle = torch.load(args.bundle, map_location="cpu", weights_only=True)
     if bundle.get("format_version") != 1:
         raise RuntimeError("unsupported Decode diagnostic bundle")
-    inputs_embeds = bundle["inputs_embeds"].to(device="npu", dtype=torch.float16)
-    all_positions = bundle["all_positions"].to(device="npu", dtype=torch.int64)
+    inputs_embeds_cpu = bundle["inputs_embeds"].to(
+        device="cpu", dtype=torch.float16).contiguous()
+    all_positions_cpu = bundle["all_positions"].to(
+        device="cpu", dtype=torch.int64).contiguous()
     reference_tokens = [int(token) for token in bundle["reference_token_ids"]]
 
     model_config = load_qwen3_asr_llm_args(
@@ -75,6 +96,13 @@ def main() -> int:
     model.load_weights(args.checkpoint)
     model.xlite_rt.set_matmul_backend_310p(args.matmul_backend)
     model.xlite_rt.set_decode_attention_backend(args.backend)
+
+    # Match the generator's allocation order: construct the model and native
+    # Runtime first, then materialize replay inputs.  CPU->NPU copies may
+    # otherwise select an internal storage format even when logical strides
+    # are contiguous; Xlite consumes these buffers as raw ACL_FORMAT_ND.
+    inputs_embeds = _to_npu_nd(inputs_embeds_cpu, torch.float16)
+    all_positions = _to_npu_nd(all_positions_cpu, torch.int64)
 
     _clear_caches(model)
     # Cache zeroing and bundle tensor uploads run on the torch_npu stream,
@@ -105,6 +133,14 @@ def main() -> int:
         decode_hidden.append(hidden_cpu)
         position += 1
 
+    replay_input = {
+        "inputs_shape": list(inputs_embeds_cpu.shape),
+        "inputs_sha256": _cpu_sha256(inputs_embeds_cpu),
+        "inputs_npu_format": _npu_format(inputs_embeds),
+        "positions_shape": list(all_positions_cpu.shape),
+        "positions_sha256": _cpu_sha256(all_positions_cpu),
+        "positions_npu_format": _npu_format(all_positions),
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "format_version": 1,
@@ -114,7 +150,9 @@ def main() -> int:
         "decode_logits": torch.stack(decode_logits),
         "decode_hidden": torch.stack(decode_hidden),
         "runtime_stats": dict(model.xlite_rt.get_stats()),
+        "replay_input": replay_input,
     }, args.output)
+    print(f"replay input contract: {replay_input}")
     print(f"isolated Decode diagnostic worker PASS: backend={args.backend}")
     return 0
 
