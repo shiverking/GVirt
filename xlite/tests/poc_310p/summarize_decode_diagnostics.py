@@ -15,7 +15,13 @@ def main() -> int:
     payload = json.loads(args.report.read_text(encoding="utf-8"))
     diagnostics = payload.get("decode_diagnostics")
     if not diagnostics:
-        raise SystemExit(f"decode_diagnostics missing from {args.report}")
+        diagnostics = payload
+
+    print("legacy oracle valid:", diagnostics["legacy_oracle_valid"])
+    if not diagnostics["legacy_oracle_valid"]:
+        print("legacy oracle mismatches:",
+              diagnostics["legacy_oracle_mismatches"])
+        return 1
 
     print("\nTeacher-forced Decode diagnostic summary")
     print("first divergence (zero-based generated index):",

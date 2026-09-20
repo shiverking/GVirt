@@ -25,6 +25,7 @@ python3 tests/kernels/attention.py --ascendc-decode-only \
 echo "[       OK ] runtime-ascendc-decode-attention"
 
 echo "[ RUN      ] full28-synthetic129"
+diagnostic_bundle="${report_dir}/full28-synthetic129-diagnostic-inputs.pt"
 set +e
 python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --checkpoint "${checkpoint}" \
@@ -35,14 +36,46 @@ python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --stability-iters 1 \
     --matmul-backend ascendc_asr \
     --decode-attention-backend ascendc_asr \
-    --decode-diagnostics \
+    --save-decode-diagnostic-bundle "${diagnostic_bundle}" \
     --report "${report_dir}/full28-synthetic129.json" \
     2>&1 | tee "${report_dir}/full28-synthetic129.log"
 full_model_status=${PIPESTATUS[0]}
 set -e
-python3 tests/poc_310p/summarize_decode_diagnostics.py \
-    "${report_dir}/full28-synthetic129.json" \
-    | tee "${report_dir}/decode-diagnostics-summary.log"
+
+echo "[ RUN      ] isolated-decode-diagnostics"
+set +e
+python3 tests/poc_310p/run_isolated_decode_diagnostics.py \
+    --checkpoint "${checkpoint}" \
+    --bundle "${diagnostic_bundle}" \
+    --max-seq-len 512 \
+    --matmul-backend ascendc_asr \
+    --candidate-backend ascendc_asr \
+    --work-dir "${report_dir}/decode-diagnostic-workers" \
+    --report "${report_dir}/decode-diagnostics.json" \
+    2>&1 | tee "${report_dir}/decode-diagnostics.log"
+diagnostic_status=${PIPESTATUS[0]}
+set -e
+if [[ -f "${report_dir}/decode-diagnostics.json" ]]; then
+    set +e
+    python3 tests/poc_310p/summarize_decode_diagnostics.py \
+        "${report_dir}/decode-diagnostics.json" \
+        | tee "${report_dir}/decode-diagnostics-summary.log"
+    summary_status=${PIPESTATUS[0]}
+    set -e
+else
+    summary_status=1
+    echo "decode diagnostics report was not produced" \
+        | tee "${report_dir}/decode-diagnostics-summary.log"
+fi
+if [[ ${diagnostic_status} -ne 0 ]]; then
+    echo "[  FAILED  ] isolated-decode-diagnostics (artifacts preserved)"
+    exit "${diagnostic_status}"
+fi
+if [[ ${summary_status} -ne 0 ]]; then
+    echo "[  FAILED  ] isolated-decode-diagnostics summary"
+    exit "${summary_status}"
+fi
+echo "[       OK ] isolated-decode-diagnostics"
 if [[ ${full_model_status} -ne 0 ]]; then
     echo "[  FAILED  ] full28-synthetic129 (diagnostics preserved)"
     exit "${full_model_status}"
