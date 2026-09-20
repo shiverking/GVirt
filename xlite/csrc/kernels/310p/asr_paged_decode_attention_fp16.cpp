@@ -1,7 +1,8 @@
 /*
  * Ascend310P3 Qwen3-ASR scratch-free paged Decode Attention.
- * One M200 AI Core owns one (request, query-head), processes at most four
- * 512-token partitions, and merges their FP32 online-softmax states on chip.
+ * One M200 AI Core owns one (request, KV-head), processes both GQA query
+ * heads and at most four 512-token partitions, then merges their independent
+ * FP32 online-softmax states on chip.
  * K/V are read directly from the 4D BSHD paged cache.  The production entry
  * writes one FP16 output row and has no GM intermediate workspace.
  */
@@ -97,6 +98,11 @@ public:
         Bind(globalAccF_, TPosition::VECCALC, 16960);
         Bind(scaledPartitionF_, TPosition::VECCALC, 17472);
         Bind(outputH_, TPosition::VECCALC, 17984);
+        Bind(weightPairF_, TPosition::VECCALC, 18240);
+        Bind(pvPairF_, TPosition::VECCALC, 18304);
+        Bind(accPairAF_, TPosition::VECCALC, 18816);
+        Bind(accPairBF_, TPosition::VECCALC, 19328);
+        Bind(globalPairF_, TPosition::VECCALC, 19840);
     }
 
     __aicore__ inline void InitCommon(GM_ADDR qkv, GM_ADDR kCache,
@@ -114,6 +120,7 @@ public:
         Bind(l1Q_, TPosition::A1, 0);
         Bind(l1B_, TPosition::B1, 4096);
         Bind(l1P_, TPosition::A1, 8192);
+        Bind(l1QPair_, TPosition::A1, 12288);
         Bind(l0A_, TPosition::A2, 0);
         Bind(l0B_, TPosition::B2, 0);
         Bind(l0C_, TPosition::CO1, 0);
@@ -161,18 +168,18 @@ public:
         set_mask_norm();
         FetchEvents();
         SetFlag<HardEvent::MTE3_V>(mte3ToV_);
-        const uint32_t work = batch_ * kQHeads;
+        const uint32_t work = batch_ * kKvHeads;
         for (uint32_t item = GetBlockIdx(); item < work;
              item += GetBlockNum()) {
-            const uint32_t request = item / kQHeads;
-            const uint32_t queryHead = item % kQHeads;
+            const uint32_t request = item / kKvHeads;
+            const uint32_t kvHead = item % kKvHeads;
             const int32_t lengthSigned = lengths_[request] + 1;
             if (lengthSigned <= 0 ||
                 lengthSigned > static_cast<int32_t>(kMaxKv)) {
                 continue;
             }
-            RunFusedHead(request, queryHead,
-                         static_cast<uint32_t>(lengthSigned));
+            RunFusedGroup(request, kvHead,
+                          static_cast<uint32_t>(lengthSigned));
         }
         WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
         pipe_barrier(PIPE_ALL);
@@ -240,11 +247,14 @@ private:
                  tokenInBlock) * kKvHeads + kvHead) * kHeadDim;
     }
 
-    __aicore__ inline void StageQuery(uint32_t request, uint32_t queryHead)
+    __aicore__ inline void StageQuery(LocalTensor<half> &destination,
+                                      uint32_t request,
+                                      uint32_t queryHead)
     {
-        ZeroL1(l1Q_, true);
-        GmRowToL1Nz(l1Q_, qkv_[static_cast<uint64_t>(request) * kQkvDim +
-                               queryHead * kHeadDim], 0);
+        ZeroL1(destination, true);
+        GmRowToL1Nz(destination,
+                     qkv_[static_cast<uint64_t>(request) * kQkvDim +
+                          queryHead * kHeadDim], 0);
         SetFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
         WaitFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
     }
@@ -317,7 +327,8 @@ private:
     __aicore__ inline void BuildProbabilities(float &runningMax,
                                                float &runningSum,
                                                uint32_t validTokens,
-                                               float &correction)
+                                               float &correction,
+                                               __ubuf__ float *weights)
     {
         SetFlag<HardEvent::V_S>(vToS_);
         WaitFlag<HardEvent::V_S>(vToS_);
@@ -342,7 +353,7 @@ private:
         float tileSum = 0.0F;
         for (uint32_t token = 0; token < kTileTokens; ++token) {
             const float weight = F(expOutputF_)[token + 1];
-            F(weightF_)[token] = weight;
+            weights[token] = weight;
             tileSum += weight;
         }
         runningSum = runningSum * correction + tileSum;
@@ -351,7 +362,7 @@ private:
         WaitFlag<HardEvent::S_V>(sToV_);
     }
 
-    __aicore__ inline void StageProbabilities()
+    __aicore__ inline void StageProbabilities(__ubuf__ float *weights)
     {
         half zero = static_cast<half>(0.0F);
         set_vector_mask(static_cast<uint64_t>(-1),
@@ -360,7 +371,7 @@ private:
         vector_dup(H(probabilityH_) + 128, zero, 1, 1, 1, 8, 1);
         pipe_barrier(PIPE_V);
         set_vector_mask(0, (static_cast<uint64_t>(1) << 16) - 1);
-        vconv_f322f16(H(probabilityH_), F(weightF_), 1, 1, 1, 4, 8);
+        vconv_f322f16(H(probabilityH_), weights, 1, 1, 1, 4, 8);
         pipe_barrier(PIPE_V);
         SetFlag<HardEvent::V_MTE3>(vToMte3_);
         WaitFlag<HardEvent::V_MTE3>(vToMte3_);
@@ -371,12 +382,12 @@ private:
         L1ToL0A(l0A_, l1P_, 1);
     }
 
-    __aicore__ inline void CompactPvRow()
+    __aicore__ inline void CompactPvRow(__ubuf__ float *destination)
     {
         float zero = 0.0F;
         set_vector_mask(0, (static_cast<uint64_t>(1) << 16) - 1);
         for (uint32_t block = 0; block < 8; ++block) {
-            vadds(F(pvCompactF_) + block * 16,
+            vadds(destination + block * 16,
                   F(pvF_) + block * kCubeElements, zero,
                   1, 1, 1, 8, 8);
         }
@@ -385,7 +396,8 @@ private:
 
     __aicore__ inline void UpdateAccumulator(__ubuf__ float *&accumulator,
                                               __ubuf__ float *&nextAccumulator,
-                                              float correction)
+                                              float correction,
+                                              __ubuf__ float *pvCompact)
     {
         SetFlag<HardEvent::V_S>(vToS_);
         WaitFlag<HardEvent::V_S>(vToS_);
@@ -398,7 +410,7 @@ private:
         vmul(F(correctedF_), accumulator, F(scalarF_),
              2, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
-        vadd(nextAccumulator, F(correctedF_), F(pvCompactF_),
+        vadd(nextAccumulator, F(correctedF_), pvCompact,
              2, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         __ubuf__ float *old = accumulator;
@@ -460,7 +472,7 @@ private:
             kvLength < partitionStart + kPartitionTokens ?
             kvLength : partitionStart + kPartitionTokens;
         const uint32_t kvHead = queryHead / 2;
-        StageQuery(request, queryHead);
+        StageQuery(l1Q_, request, queryHead);
         float runningMax = -65504.0F;
         float runningSum = 0.0F;
         for (uint32_t logicalStart = partitionStart;
@@ -476,15 +488,16 @@ private:
             DrainL0C(qkF_, 16 * 16);
             float correction = 0.0F;
             BuildProbabilities(runningMax, runningSum,
-                               validTokens, correction);
-            StageProbabilities();
+                               validTokens, correction, F(weightF_));
+            StageProbabilities(F(weightF_));
             StageCacheRows(vCache_, request, logicalStart,
                            validTokens, kvHead);
             L1ToL0BTranspose(l0B_, l1B_, 8);
             RunMmad(16, 128, 16);
             DrainL0C(pvF_, 16 * 128);
-            CompactPvRow();
-            UpdateAccumulator(accumulator, nextAccumulator, correction);
+            CompactPvRow(F(pvCompactF_));
+            UpdateAccumulator(accumulator, nextAccumulator, correction,
+                              F(pvCompactF_));
         }
         WriteState(item, runningMax, runningSum, accumulator);
     }
@@ -493,7 +506,8 @@ private:
                                            float &globalSum,
                                            float partitionMax,
                                            float partitionSum,
-                                           __ubuf__ float *partitionOutput)
+                                           __ubuf__ float *partitionOutput,
+                                           __ubuf__ float *globalAccumulator)
     {
         SetFlag<HardEvent::V_S>(vToS_);
         WaitFlag<HardEvent::V_S>(vToS_);
@@ -519,7 +533,7 @@ private:
                         static_cast<uint64_t>(-1));
         vector_dup(F(scalarF_), correction, 2, 1, 1, 8, 1);
         pipe_barrier(PIPE_V);
-        vmul(F(correctedF_), F(globalAccF_), F(scalarF_),
+        vmul(F(correctedF_), globalAccumulator, F(scalarF_),
              2, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         vector_dup(F(scalarF_), partitionScale, 2, 1, 1, 8, 1);
@@ -527,14 +541,15 @@ private:
         vmul(F(scaledPartitionF_), partitionOutput, F(scalarF_),
              2, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
-        vadd(F(globalAccF_), F(correctedF_), F(scaledPartitionF_),
+        vadd(globalAccumulator, F(correctedF_), F(scaledPartitionF_),
              2, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
     }
 
     __aicore__ inline void StoreFusedOutput(uint32_t request,
                                             uint32_t queryHead,
-                                            float globalSum)
+                                            float globalSum,
+                                            __ubuf__ float *globalAccumulator)
     {
         float inverseSum = 1.0F / globalSum;
         SetFlag<HardEvent::S_V>(sToV_);
@@ -543,7 +558,7 @@ private:
                         static_cast<uint64_t>(-1));
         vector_dup(F(scalarF_), inverseSum, 2, 1, 1, 8, 1);
         pipe_barrier(PIPE_V);
-        vmul(F(correctedF_), F(globalAccF_), F(scalarF_),
+        vmul(F(correctedF_), globalAccumulator, F(scalarF_),
              2, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
@@ -559,19 +574,24 @@ private:
         SetFlag<HardEvent::MTE3_V>(mte3ToV_);
     }
 
-    __aicore__ inline void RunFusedHead(uint32_t request,
-                                        uint32_t queryHead,
-                                        uint32_t kvLength)
+    __aicore__ inline void RunFusedGroup(uint32_t request,
+                                         uint32_t kvHead,
+                                         uint32_t kvLength)
     {
         float zero = 0.0F;
         set_vector_mask(static_cast<uint64_t>(-1),
                         static_cast<uint64_t>(-1));
         vector_dup(F(globalAccF_), zero, 2, 1, 1, 8, 1);
+        vector_dup(F(globalPairF_), zero, 2, 1, 1, 8, 1);
         pipe_barrier(PIPE_V);
-        float globalMax = -65504.0F;
-        float globalSum = 0.0F;
-        const uint32_t kvHead = queryHead / 2;
-        StageQuery(request, queryHead);
+        float globalMax0 = -65504.0F;
+        float globalSum0 = 0.0F;
+        float globalMax1 = -65504.0F;
+        float globalSum1 = 0.0F;
+        const uint32_t queryHead0 = kvHead * 2;
+        const uint32_t queryHead1 = queryHead0 + 1;
+        StageQuery(l1Q_, request, queryHead0);
+        StageQuery(l1QPair_, request, queryHead1);
 
         for (uint32_t partitionStart = 0; partitionStart < kvLength;
              partitionStart += kPartitionTokens) {
@@ -579,11 +599,17 @@ private:
                             static_cast<uint64_t>(-1));
             vector_dup(F(accAF_), zero, 2, 1, 1, 8, 1);
             vector_dup(F(accBF_), zero, 2, 1, 1, 8, 1);
+            vector_dup(F(accPairAF_), zero, 2, 1, 1, 8, 1);
+            vector_dup(F(accPairBF_), zero, 2, 1, 1, 8, 1);
             pipe_barrier(PIPE_V);
-            __ubuf__ float *accumulator = F(accAF_);
-            __ubuf__ float *nextAccumulator = F(accBF_);
-            float partitionMax = -65504.0F;
-            float partitionSum = 0.0F;
+            __ubuf__ float *accumulator0 = F(accAF_);
+            __ubuf__ float *nextAccumulator0 = F(accBF_);
+            __ubuf__ float *accumulator1 = F(accPairAF_);
+            __ubuf__ float *nextAccumulator1 = F(accPairBF_);
+            float partitionMax0 = -65504.0F;
+            float partitionSum0 = 0.0F;
+            float partitionMax1 = -65504.0F;
+            float partitionSum1 = 0.0F;
             const uint32_t partitionEnd =
                 kvLength < partitionStart + kPartitionTokens ?
                 kvLength : partitionStart + kPartitionTokens;
@@ -594,28 +620,52 @@ private:
                 const uint32_t remaining = partitionEnd - logicalStart;
                 const uint32_t validTokens = remaining < kTileTokens ?
                     remaining : kTileTokens;
+                // Stage the GQA group's K tile once, then issue the two QK
+                // MMADs against the resident L0B operand.
                 StageCacheRows(kCache_, request, logicalStart,
                                validTokens, kvHead);
                 L1ToL0A(l0A_, l1Q_, 8);
                 L1ToL0B(l0B_, l1B_, 1, 8);
                 RunMmad(16, 16, 128);
                 DrainL0C(qkF_, 16 * 16);
-                float correction = 0.0F;
-                BuildProbabilities(partitionMax, partitionSum,
-                                   validTokens, correction);
-                StageProbabilities();
+                float correction0 = 0.0F;
+                BuildProbabilities(partitionMax0, partitionSum0,
+                                   validTokens, correction0, F(weightF_));
+
+                L1ToL0A(l0A_, l1QPair_, 8);
+                RunMmad(16, 16, 128);
+                DrainL0C(qkF_, 16 * 16);
+                float correction1 = 0.0F;
+                BuildProbabilities(partitionMax1, partitionSum1,
+                                   validTokens, correction1,
+                                   F(weightPairF_));
+
+                // Stage V and load L0B once.  Each query head supplies its
+                // own probability A operand and online-softmax state.
                 StageCacheRows(vCache_, request, logicalStart,
                                validTokens, kvHead);
                 L1ToL0BTranspose(l0B_, l1B_, 8);
+                StageProbabilities(F(weightF_));
                 RunMmad(16, 128, 16);
                 DrainL0C(pvF_, 16 * 128);
-                CompactPvRow();
-                UpdateAccumulator(accumulator, nextAccumulator, correction);
+                CompactPvRow(F(pvCompactF_));
+                UpdateAccumulator(accumulator0, nextAccumulator0,
+                                  correction0, F(pvCompactF_));
+
+                StageProbabilities(F(weightPairF_));
+                RunMmad(16, 128, 16);
+                DrainL0C(pvF_, 16 * 128);
+                CompactPvRow(F(pvPairF_));
+                UpdateAccumulator(accumulator1, nextAccumulator1,
+                                  correction1, F(pvPairF_));
             }
-            MergePartition(globalMax, globalSum, partitionMax,
-                           partitionSum, accumulator);
+            MergePartition(globalMax0, globalSum0, partitionMax0,
+                           partitionSum0, accumulator0, F(globalAccF_));
+            MergePartition(globalMax1, globalSum1, partitionMax1,
+                           partitionSum1, accumulator1, F(globalPairF_));
         }
-        StoreFusedOutput(request, queryHead, globalSum);
+        StoreFusedOutput(request, queryHead0, globalSum0, F(globalAccF_));
+        StoreFusedOutput(request, queryHead1, globalSum1, F(globalPairF_));
     }
 
     template <typename T>
@@ -635,13 +685,15 @@ private:
     GlobalTensor<float> states_;
     __gm__ int32_t *blockTable_ = nullptr;
     __gm__ int32_t *lengths_ = nullptr;
-    LocalTensor<half> l1Q_, l1B_, l1P_, l0A_, l0B_;
+    LocalTensor<half> l1Q_, l1B_, l1P_, l1QPair_, l0A_, l0B_;
     LocalTensor<float> l0C_;
     LocalTensor<half> zeroH_, probabilityH_;
     LocalTensor<float> qkF_, pvF_, expInputF_, expOutputF_;
     LocalTensor<float> weightF_, pvCompactF_, accAF_, accBF_;
     LocalTensor<float> correctedF_, scalarF_, stateOutF_;
     LocalTensor<float> globalAccF_, scaledPartitionF_;
+    LocalTensor<float> weightPairF_, pvPairF_, accPairAF_, accPairBF_;
+    LocalTensor<float> globalPairF_;
     LocalTensor<half> outputH_;
     uint32_t batch_ = 0;
     uint32_t tableStride_ = 0;

@@ -11,8 +11,8 @@ CANN 9.1 beta1 target runtime.
 
 Source evidence (`csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp`):
 
-- Work is assigned per `(request, query_head)` (line 151), so both query heads in one GQA
-  group independently stage the same K/V head.
+- Work is assigned per `(request, kv_head)`. Both query heads in one GQA group
+  reuse the same staged K tile and the same staged V tile.
 - `StageCacheRows` now coalesces the 16 fixed-head BSHD rows into one ND-to-NZ
   GM-to-L1 burst, splitting only at a physical 128-token block boundary.
 - Full 16-token tiles overwrite the complete L1 region and skip zero-fill;
@@ -24,7 +24,8 @@ Source evidence (`csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp`):
 
 Consequences:
 
-- Cache traffic is duplicated for the two Q heads sharing each KV head.
+- The former duplicate K/V cache traffic for the two Q heads has been removed;
+  CANN 9.1 device timing remains the promotion gate.
 - The former per-token transfer setup and unconditional zero-fill have been
   removed. Device timing must still confirm the resulting MTE2 reduction.
 - Long and high-batch KV shapes scale almost linearly with total head-token
@@ -33,13 +34,11 @@ Consequences:
 
 Required follow-up after strict token correctness:
 
-1. Process the two Q heads of one GQA group together and stage each K/V tile
-   once.
-2. Calibrate the block-aware burst against the saved scalar-staging timing for
+1. Calibrate the GQA-paired block-aware burst against the saved scalar-staging timing for
    KV 16/128/512/2048 and Batch 1/8/20.
-3. Calibrate 16/32-token tiles on CANN 9.1 beta1 and introduce TBuf ping-pong
+2. Calibrate 16/32-token tiles on CANN 9.1 beta1 and introduce TBuf ping-pong
    only after the event graph is measured.
-4. Profile MTE2, M, V and MTE3 separately; do not select tiling from kernel
+3. Profile MTE2, M, V and MTE3 separately; do not select tiling from kernel
    wall time alone.
 
 ### Critical: projection kernel

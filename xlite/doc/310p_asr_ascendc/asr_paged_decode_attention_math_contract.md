@@ -15,6 +15,10 @@ cache_offset   = ((physical_block * 128 + token_in_block) * 8 + kv_head) * 128
 score_tile     = Mmad(q[r,h,:], k_cache[logical_tile,:,:]^T)
 ```
 
+The production scheduler owns one `(request, kv_head)` per logical work item.
+It keeps the two GQA query states independent, but stages each K tile and each
+V tile only once before issuing the two corresponding QK/PV MMAD operations.
+
 Q has already been scaled by `1/sqrt(128)` by the fused QK/MRoPE/cache kernel.
 The attention kernel must not scale it again. Only tokens in `[0, kv_len)` are
 read. Block-table padding and unused cache slots are never read.
@@ -53,7 +57,7 @@ an exact mutable stack-local `float`; CANN 9.1 rejects the `const float` form.
 - No high-level Matmul, ACLNN, ATB, dynamic device allocation, host metadata
   readback, or fixed event ID exists in the kernel.
 
-The kernel uses 18,240 bytes UB, 12,288 bytes L1, 4,096 bytes each of L0A/L0B,
+The GQA-paired kernel uses 20,352 bytes UB, 16,384 bytes L1, 4,096 bytes each of L0A/L0B,
 and 8,192 bytes L0C. It writes no GM partition state and launches once per
-attention layer. The next gate is Runtime routing followed by 129-token Prefill
-plus 16-step greedy-token equivalence.
+attention layer. Including the ND2NZ compiler reserve, effective UB use is
+28,544 bytes, below the 192 KiB design budget.

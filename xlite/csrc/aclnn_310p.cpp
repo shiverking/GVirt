@@ -283,7 +283,8 @@ static bool RunAscendCAsrDecodeAttention(
             }
         }
     }
-    const uint32_t blocks = std::min(rt.aicNum, batch * nHeads);
+    // The fused AscendC kernel owns one GQA pair per KV head.
+    const uint32_t blocks = std::min(rt.aicNum, batch * nKvHeads);
     ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_fp16)(
         blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, blockTables.ptr,
         cachedLens.ptr, output.ptr, batch, maxNumBlock);

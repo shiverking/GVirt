@@ -217,7 +217,7 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup, uint32_t iteratio
     Check(aclrtCreateStream(&stream), "aclrtCreateStream");
     void *output = static_cast<void *>(static_cast<uint8_t *>(outputDevice.ptr) +
                                       kGuardElements * sizeof(uint16_t));
-    const uint32_t blockDim = std::min(7U, batch * kQHeads);
+    const uint32_t blockDim = std::min(7U, batch * kKvHeads);
     const auto launch = [&]() {
         ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_fp16)
         (blockDim, stream, qkvDevice.ptr, kDevice.ptr, vDevice.ptr, tableDevice.ptr,

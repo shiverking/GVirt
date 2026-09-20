@@ -3266,7 +3266,7 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_backend"] = true;
         info["ascendc_asr_backend_status"] =
             "decode_projections_rmsnorm_add_rmsnorm_qk_mrope_cache_silu_paged_attention";
-        info["ascendc_asr_contract_version"] = 5;
+        info["ascendc_asr_contract_version"] = 6;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
@@ -3278,6 +3278,8 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_silu_mul"] = true;
         info["ascendc_asr_paged_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
+        info["ascendc_asr_paged_decode_attention_work"] =
+            "request_kv_head_gqa_pair";
         info["ascendc_asr_prefill"] = false;
         info["ascendc_asr_lm_head"] = false;
         info["m200_asr_prefill"] = true;
