@@ -39,9 +39,9 @@ def main():
                     raise RuntimeError(f"missing passing measurement: {path}")
                 iterations = int(match.group(1))
                 average_ms = float(match.group(2))
-                if average_ms * iterations < 20.0:
+                if average_ms * iterations < 200.0:
                     raise RuntimeError(
-                        f"timed window below 20 ms ({average_ms * iterations:.3f} ms): {path}"
+                        f"timed window below 200 ms ({average_ms * iterations:.3f} ms): {path}"
                     )
                 samples.append(average_ms)
             mean = statistics.mean(samples)
@@ -89,7 +89,7 @@ def main():
         "microprobe_performance_gate": measured_gate,
         "runtime_promotion": False,
         "note": "Synthetic microprobe only; whole-model gates remain.",
-        "minimum_timed_window_ms": 20.0,
+        "minimum_timed_window_ms": 200.0,
     }
     path = args.build_dir / "silu_mul_ab_summary.json"
     path.write_text(json.dumps(report, indent=2) + "\n")
@@ -104,4 +104,8 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except RuntimeError as error:
+        print(f"Measurement rejected: {error}", file=sys.stderr)
+        raise SystemExit(2) from None

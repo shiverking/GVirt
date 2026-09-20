@@ -22,5 +22,10 @@ promotion.
 The first 48-run correctness set passed, but its 20-launch timing window was
 only about 0.4--0.9 ms.  Observed CV ranged from 6.9% to 107%, so the apparent
 -109.91% to +53.75% changes are invalid as performance evidence.  The gate now
-uses 50 warmups, 2000 timed launches and rejects any sample whose synchronized
-window is below 20 ms.  No kernel decision was made from the noisy run.
+first retried with 50 warmups, 2000 timed launches and a 20 ms minimum window.
+No kernel decision was made from the noisy run.
+
+The 2000-launch retry again passed 48/48 correctness, but M=2 row measured only
+15.412 ms total and M=1 CV remained 12--15%.  The final calibration therefore
+uses 1000 warmups, 30000 timed launches and a hard 200 ms minimum synchronized
+window.  Shorter samples are invalid input, not a failed optimization.

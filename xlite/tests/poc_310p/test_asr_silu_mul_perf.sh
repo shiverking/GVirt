@@ -9,11 +9,11 @@ case_filter=${2:-all}
 variant_filter=${3:-compare}
 repeats=${4:-3}
 jobs=${XLITE_BUILD_JOBS:-8}
-# Sub-50 us kernels need a long synchronized window.  The old 20-launch
-# window lasted less than 1 ms and produced 7%-107% CV, so it cannot support a
-# performance decision on CANN 9.1 beta1.
-warmup=${XLITE_ASR_SILU_WARMUP:-50}
-iterations=${XLITE_ASR_SILU_ITERATIONS:-2000}
+# Sub-50 us kernels need a long synchronized window.  A 2000-launch retry
+# still left M=2 below 20 ms and M=1 above 12% CV.  Use a >=200 ms target
+# window so process-to-process scheduling noise cannot dominate the result.
+warmup=${XLITE_ASR_SILU_WARMUP:-1000}
+iterations=${XLITE_ASR_SILU_ITERATIONS:-30000}
 
 if [[ ! ${repeats} =~ ^[1-9][0-9]*$ ]]; then
     echo "repeats must be a positive integer" >&2
