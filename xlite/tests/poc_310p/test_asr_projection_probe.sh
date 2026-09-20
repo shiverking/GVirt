@@ -93,10 +93,25 @@ for spec in "${cases[@]}"; do
             executed=$((executed + 1))
             log="${build_dir}/${name}-${variant}-r${run}.log"
             echo "[ RUN      ] ${name} variant=${variant} run=${run} M=${m} N=${n} K=${k}"
-            "${build_dir}/xlite_asr_projection_probe_runner" \
-                "${m}" "${n}" "${k}" "${warmup}" "${iterations}" \
-                "${variant}" >"${log}" 2>&1
-            status=$?
+            status=1
+            for attempt in 1 2 3 4; do
+                "${build_dir}/xlite_asr_projection_probe_runner" \
+                    "${m}" "${n}" "${k}" "${warmup}" "${iterations}" \
+                    "${variant}" >"${log}" 2>&1
+                status=$?
+                if [[ ${status} -eq 0 ]]; then
+                    break
+                fi
+                if grep -Fq "aclrtSetDevice failed, aclError=507033" "${log}" &&
+                   [[ ${attempt} -lt 4 ]]; then
+                    echo "[  RETRY  ] ${name} variant=${variant} run=${run}: "\
+                         "pre-launch logical-device initialization returned 507033 "\
+                         "(attempt ${attempt}/4)"
+                    sleep 1
+                    continue
+                fi
+                break
+            done
             if [[ ${status} -eq 0 ]]; then
                 echo "[       OK ] ${name}"
                 cat "${log}"

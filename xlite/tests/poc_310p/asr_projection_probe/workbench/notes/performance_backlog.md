@@ -23,3 +23,17 @@ larger of 2% baseline latency or three measured standard deviations.
 
 The structured microprobe is not runtime promotion.  Model-weight projection
 checks, 16-token greedy equivalence and real-ASR performance remain required.
+
+## 2026-09-20 — full gate missing three pre-launch samples
+
+The full A/B run completed 189 of 192 processes.  Gate-Up M16 baseline run 1,
+Down M2 baseline run 3 and Down M12 cached run 1 failed before kernel launch
+because process-local `aclrtSetDevice(0)` returned 507033.  This is not
+projection correctness or timing evidence, but the three missing samples mean
+the full performance gate has not completed.
+
+The harness now retries only this exact pre-launch error, in a fresh process,
+up to four attempts.  It does not change visibility, physical/logical mapping
+or the selected logical device.  Every other error remains an immediate test
+failure.  The three affected case/variant groups can be rerun in place before
+the existing full summary is regenerated.

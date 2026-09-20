@@ -18,7 +18,7 @@
       "tile": {"m": 32, "n": 128, "k": 128}
     },
     "asr_m200_projection_cached_fp16": {
-      "status": "experimental_microprobe_performance_gate_passed",
+      "status": "experimental_performance_gate_pending_three_prelaunch_retries",
       "ub_bytes": 24576,
       "l1_bytes_max": 425984,
       "l1_activation_bytes_max": 393216,
@@ -30,7 +30,7 @@
       "tile": {"m": 32, "n": 128, "k": 128},
       "shapes": ["qkv", "o", "gate_up", "down"],
       "runtime_eligible": false,
-      "remaining_gate": "model_weight_and_whole_model_validation"
+      "remaining_gate": "replace_three_missing_timing_samples_then_model_weight_validation"
     },
     "asr_rmsnorm_fp16": {
       "status": "production_decode_vector",
@@ -150,7 +150,7 @@
       "arithmetic": "fp16_vector"
     },
     "asr_silu_mul_row_fp16": {
-      "status": "experimental_retest_required_after_short_window_noise",
+      "status": "experimental_microprobe_performance_gate_passed",
       "ub_bytes": 36864,
       "l1_bytes": 0,
       "l0a_bytes": 0,
@@ -161,7 +161,8 @@
       "arithmetic": "fp16_vector",
       "schedule": "one_full_row_per_pipeline_iteration",
       "runtime_eligible": false,
-      "measurement_requirement": "at_least_200ms_per_synchronized_sample"
+      "measurement_requirement": "at_least_200ms_per_synchronized_sample",
+      "remaining_gate": "whole_model_validation"
     },
     "asr_m200_lm_head_fp16": {
       "status": "experimental_microprobe",

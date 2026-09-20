@@ -29,3 +29,8 @@ The 2000-launch retry again passed 48/48 correctness, but M=2 row measured only
 15.412 ms total and M=1 CV remained 12--15%.  The final calibration therefore
 uses 1000 warmups, 30000 timed launches and a hard 200 ms minimum synchronized
 window.  Shorter samples are invalid input, not a failed optimization.
+
+The calibrated full experiment subsequently passed its correctness, minimum
+window, variance, improvement and no-regression gates.  The row candidate is
+microprobe-performance accepted but remains runtime-ineligible until the
+whole-model token and performance gates pass.
