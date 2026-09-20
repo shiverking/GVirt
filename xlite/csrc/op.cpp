@@ -795,14 +795,22 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     }
 #ifdef XLITE_ARCH_310P
     if (rt.UseAscendCAsrMatmul310P()) {
-        if (XliteAscendCAsrProjection310PSupported(
+        if (rt.UseAscendCAsrPerf310P() &&
+            XliteAscendCAsrLmHead310PSupported(
                 in, weight, out, weightNZ, bias, deqScale, transpose)) {
-            XliteAscendCAsrProjection310P(rt, in, weight, out);
+            XliteAscendCAsrLmHead310P(rt, in, weight, out);
             return;
         }
-        // Prefill projections and LM Head are intentionally outside this
-        // first production slice. They use the established correctness path
-        // and are counted so this staged boundary is never a silent fallback.
+        if (XliteAscendCAsrProjection310PSupported(
+                in, weight, out, weightNZ, bias, deqScale, transpose)) {
+            XliteAscendCAsrProjection310P(
+                rt, in, weight, out, rt.UseAscendCAsrPerf310P());
+            return;
+        }
+        // Prefill projections and Prefill LM Head remain on the established
+        // correctness path. Decode LM Head is handled above only by the
+        // explicit performance backend. Count every boundary crossing so it
+        // can never look like a silent fallback.
         if (XliteAscendCAsrKnownMatmul310P(
                 in, weight, out, weightNZ, bias, deqScale, transpose)) {
             rt.RecordAscendCAsrMatmulBypass310P();
@@ -964,8 +972,14 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
     if (rt.UseAscendCAsrMatmul310P() && pureDecode && in.shape[1] == 12288 &&
         num.ptr == nullptr && swigluLimit == 0.0F) {
         const uint32_t tokens = static_cast<uint32_t>(in.shape[0]);
-        ACLRT_LAUNCH_KERNEL(asr_silu_mul_fp16)
-        (std::min<uint32_t>(8, tokens), rt.stream, in.ptr, out.ptr, tokens);
+        if (rt.UseAscendCAsrPerf310P()) {
+            ACLRT_LAUNCH_KERNEL(asr_silu_mul_row_fp16)
+            (std::min<uint32_t>(8, tokens), rt.stream, in.ptr, out.ptr, tokens);
+            ++rt.ascendcAsrPerfSiluMulRequests;
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_silu_mul_fp16)
+            (std::min<uint32_t>(8, tokens), rt.stream, in.ptr, out.ptr, tokens);
+        }
         ++rt.ascendcAsrSiluMulRequests;
         return;
     }

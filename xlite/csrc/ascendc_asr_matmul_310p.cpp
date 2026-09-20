@@ -68,7 +68,7 @@ bool XliteAscendCAsrKnownMatmul310P(const XTensor &in, const XTensor &weight,
 }
 
 void XliteAscendCAsrProjection310P(XRuntime &rt, XTensor &in,
-                                   XTensor &weight, XTensor &out)
+                                   XTensor &weight, XTensor &out, bool cached)
 {
     const uint32_t m = static_cast<uint32_t>(in.shape[0]);
     const uint32_t k = static_cast<uint32_t>(in.shape[1]);
@@ -78,7 +78,38 @@ void XliteAscendCAsrProjection310P(XRuntime &rt, XTensor &in,
         throw std::runtime_error("AscendC ASR projection computed zero blockDim");
     }
     rt.RecordAscendCAsrMatmul310P(m);
-    ACLRT_LAUNCH_KERNEL(asr_m200_projection_fp16)
-    (blockDim, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k);
+    if (cached) {
+        ACLRT_LAUNCH_KERNEL(asr_m200_projection_cached_fp16)
+        (blockDim, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k);
+        ++rt.ascendcAsrPerfProjectionRequests;
+    } else {
+        ACLRT_LAUNCH_KERNEL(asr_m200_projection_fp16)
+        (blockDim, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k);
+    }
     ++rt.ascendcAsrMatmulKernelLaunches;
+}
+
+bool XliteAscendCAsrLmHead310PSupported(const XTensor &in,
+                                        const XTensor &weight,
+                                        const XTensor &out, bool weightNZ,
+                                        const XTensor &bias,
+                                        const XTensor &deqScale,
+                                        bool transpose)
+{
+    if (!IsCommonContract(in, weight, out, weightNZ, bias, deqScale, transpose)) {
+        return false;
+    }
+    return in.shape[0] <= kMaxDecodeBatch && in.shape[1] == 2048 &&
+           weight.shape[0] == kLmHeadN;
+}
+
+void XliteAscendCAsrLmHead310P(XRuntime &rt, XTensor &in,
+                               XTensor &weight, XTensor &out)
+{
+    const uint32_t m = static_cast<uint32_t>(in.shape[0]);
+    rt.RecordAscendCAsrMatmul310P(m);
+    ACLRT_LAUNCH_KERNEL(asr_m200_lm_head_cached_fp16)
+    (8, rt.stream, in.ptr, weight.ptr, out.ptr, m);
+    ++rt.ascendcAsrMatmulKernelLaunches;
+    ++rt.ascendcAsrPerfLmHeadRequests;
 }

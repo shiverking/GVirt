@@ -38,4 +38,7 @@ Summary records raw runs, median latency, standard deviation and CV. Require
 3 sigma) on any shape, >=8 shapes and three runs with CV<=5%. The `full`
 command enforces this as a nonzero exit status. All three quick shapes passing
 is only a development gate.
-No production default or build capability is changed.
+The complete follow-up gate passed. The cached full-logit kernel is therefore
+exposed through the explicit `ascendc_asr_perf` backend for model-weight and
+whole-model validation. The ACLNN LM Head and the uncached microprobe remain
+available; no production default is changed.

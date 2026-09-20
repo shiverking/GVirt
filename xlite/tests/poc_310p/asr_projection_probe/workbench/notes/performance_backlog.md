@@ -37,3 +37,8 @@ up to four attempts.  It does not change visibility, physical/logical mapping
 or the selected logical device.  Every other error remains an immediate test
 failure.  The three affected case/variant groups can be rerun in place before
 the existing full summary is regenerated.
+
+The replacement run passed the complete correctness and performance gate.
+The cached candidate is exposed only through `ascendc_asr_perf`; the original
+kernel remains selected by `ascendc_asr`. Model-weight and whole-model gates
+are still required before either path can become a default.

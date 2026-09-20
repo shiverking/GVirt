@@ -138,3 +138,18 @@ whole-row candidate subject to the same eight-shape device A/B gate.
    baseline until operator, full-model and real-ASR gates pass.
 4. Every new tiling records UB/L1/L0 use, dynamic event pairs and measured
    CANN 9.1 beta1 timings for M or Batch 1/8/20.
+
+## Explicit performance-runtime slice
+
+The complete projection, whole-row SiLU-Mul and cached LM Head microprobe
+gates have passed. They are compiled into the isolated AIC/AIV libraries but
+are selected only by `matmul_backend=ascendc_asr_perf`. The existing
+`ascendc_asr` backend remains the baseline and the global default remains
+`m200_asr`.
+
+`ascendc_asr_perf` applies only to fixed pure-Decode shapes with M in [1,20].
+Dynamic Prefill retains the established ACLNN path and every such boundary is
+counted. Unknown Decode MatMul shapes still fail instead of silently falling
+back. Runtime promotion now requires random/model-weight correctness, exact
+16-token whole-model equivalence and a later repeated real-ASR performance
+gate.

@@ -97,11 +97,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--matmul-backend",
-        choices=("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn"),
+        choices=("ascendc_asr_perf", "ascendc_asr", "m200_asr_prefill",
+                 "m200_asr", "aclnn"),
         default="m200_asr",
-        help=("310P MatMul backend; ascendc_asr currently accelerates fixed "
-              "decode projections while prefill and LM Head remain explicit "
-              "ACLNN boundaries"),
+        help=("310P MatMul backend; ascendc_asr_perf selects performance-gated "
+              "Decode projection/SiLU/LM Head candidates while ascendc_asr "
+              "keeps the production baselines"),
     )
     parser.add_argument(
         "--decode-attention-backend",
@@ -148,7 +149,7 @@ def main() -> int:
     if not hasattr(model.xlite_rt, "set_decode_attention_backend"):
         raise RuntimeError("installed Xlite does not expose selectable Decode Attention")
     model.xlite_rt.set_decode_attention_backend(args.decode_attention_backend)
-    if args.matmul_backend == "ascendc_asr":
+    if args.matmul_backend in ("ascendc_asr", "ascendc_asr_perf"):
         required_stats = {
             "ascendc_asr_requests",
             "ascendc_asr_kernel_launches",
@@ -167,6 +168,20 @@ def main() -> int:
                 f"missing runtime stats={missing_stats}; rebuild with "
                 "'pip install -v -e . --no-build-isolation'"
             )
+        if args.matmul_backend == "ascendc_asr_perf":
+            required_perf_stats = {
+                "ascendc_asr_perf_projection_requests",
+                "ascendc_asr_perf_lm_head_requests",
+                "ascendc_asr_perf_silu_mul_requests",
+            }
+            missing_perf_stats = sorted(required_perf_stats - available_stats)
+            if missing_perf_stats:
+                raise RuntimeError(
+                    "loaded Xlite extension is stale for ascendc_asr_perf: "
+                    f"extension={Path(xlite_c.__file__).resolve()}, "
+                    f"missing runtime stats={missing_perf_stats}; rebuild with "
+                    "'pip install -v -e . --no-build-isolation'"
+                )
     if args.decode_attention_backend == "ascendc_asr":
         required_attention_stats = {
             "ascendc_asr_decode_attention_requests",
@@ -323,7 +338,7 @@ def main() -> int:
     runtime_stats = dict(model.xlite_rt.get_stats())
     peak_memory_bytes = int(torch.npu.max_memory_allocated())
     backend_acceptance = {}
-    if args.matmul_backend == "ascendc_asr":
+    if args.matmul_backend in ("ascendc_asr", "ascendc_asr_perf"):
         backend_acceptance = {
             "ascendc_asr_projection_hit": runtime_stats["ascendc_asr_requests"] > 0,
             "ascendc_asr_projection_launches_match": (
@@ -339,6 +354,18 @@ def main() -> int:
             ),
             "ascendc_asr_silu_mul_hit": runtime_stats["ascendc_asr_silu_mul_requests"] > 0,
         }
+    if args.matmul_backend == "ascendc_asr_perf":
+        backend_acceptance.update({
+            "ascendc_asr_perf_projection_hit": (
+                runtime_stats["ascendc_asr_perf_projection_requests"] > 0
+            ),
+            "ascendc_asr_perf_lm_head_hit": (
+                runtime_stats["ascendc_asr_perf_lm_head_requests"] > 0
+            ),
+            "ascendc_asr_perf_silu_mul_hit": (
+                runtime_stats["ascendc_asr_perf_silu_mul_requests"] > 0
+            ),
+        })
     if args.decode_attention_backend == "ascendc_asr":
         backend_acceptance.update({
             "ascendc_asr_decode_attention_hit": (

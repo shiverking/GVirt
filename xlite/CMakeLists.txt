@@ -230,6 +230,8 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     # kernel merge route used by the historical 310P kernels.
     set(KERNEL_FILES_310P_ASR_ASCENDC
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_projection_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_projection_cached_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_lm_head_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp
     )
     # Keep AIV-only ASR vector kernels separate from the AIC-only projection
@@ -239,6 +241,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_add_rmsnorm_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_qk_norm_mrope_cache_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_silu_mul_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_silu_mul_row_fp16.cpp
     )
     list(REMOVE_ITEM KERNEL_FILES_F16
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp

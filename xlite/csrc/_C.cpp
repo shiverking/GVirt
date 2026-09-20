@@ -3257,7 +3257,8 @@ PYBIND11_MODULE(_C, m)
         info["cross_stream_handoff"] = "split_acl_event_sync";
         info["matmul_backend"] = "runtime_selectable";
         info["matmul_backends"] =
-            py::make_tuple("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn");
+            py::make_tuple("ascendc_asr_perf", "ascendc_asr", "m200_asr_prefill",
+                           "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
         // Fixed decode projections, RMSNorm, fused residual AddRMSNorm,
         // QK-Norm/MRoPE/cache, SiLU-Mul and scratch-free paged Decode
@@ -3265,8 +3266,8 @@ PYBIND11_MODULE(_C, m)
         // boundaries.
         info["ascendc_asr_backend"] = true;
         info["ascendc_asr_backend_status"] =
-            "decode_projections_rmsnorm_add_rmsnorm_qk_mrope_cache_silu_paged_attention";
-        info["ascendc_asr_contract_version"] = 6;
+            "decode_baseline_plus_explicit_perf_projection_silu_lm_head";
+        info["ascendc_asr_contract_version"] = 7;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
@@ -3276,12 +3277,16 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_add_rmsnorm"] = true;
         info["ascendc_asr_qk_norm_mrope_cache"] = true;
         info["ascendc_asr_silu_mul"] = true;
+        info["ascendc_asr_perf_backend"] = true;
+        info["ascendc_asr_perf_projection"] = "l1_cached_activation";
+        info["ascendc_asr_perf_silu_mul"] = "whole_row";
+        info["ascendc_asr_perf_lm_head"] = "l1_cached_activation_full_logits";
         info["ascendc_asr_paged_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
         info["ascendc_asr_paged_decode_attention_work"] =
             "request_kv_head_gqa_pair";
         info["ascendc_asr_prefill"] = false;
-        info["ascendc_asr_lm_head"] = false;
+        info["ascendc_asr_lm_head"] = true;
         info["m200_asr_prefill"] = true;
         info["m200_asr_prefill_max_m"] = 4096;
         info["decode_graph_310p"] = true;
@@ -3316,6 +3321,11 @@ PYBIND11_MODULE(_C, m)
         stats["ascendc_asr_qk_norm_mrope_cache_requests"] =
             rt.ascendcAsrQkNormMropeCacheRequests;
         stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
+        stats["ascendc_asr_perf_projection_requests"] =
+            rt.ascendcAsrPerfProjectionRequests;
+        stats["ascendc_asr_perf_lm_head_requests"] = rt.ascendcAsrPerfLmHeadRequests;
+        stats["ascendc_asr_perf_silu_mul_requests"] =
+            rt.ascendcAsrPerfSiluMulRequests;
         stats["matmul_backend"] = rt.MatmulBackend310PName();
         py::dict m200ByM;
         py::dict aclnnByM;
@@ -3473,6 +3483,12 @@ PYBIND11_MODULE(_C, m)
             stats["ascendc_asr_qk_norm_mrope_cache_requests"] =
                 rt.ascendcAsrQkNormMropeCacheRequests;
             stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
+            stats["ascendc_asr_perf_projection_requests"] =
+                rt.ascendcAsrPerfProjectionRequests;
+            stats["ascendc_asr_perf_lm_head_requests"] =
+                rt.ascendcAsrPerfLmHeadRequests;
+            stats["ascendc_asr_perf_silu_mul_requests"] =
+                rt.ascendcAsrPerfSiluMulRequests;
             stats["matmul_backend"] = rt.MatmulBackend310PName();
             py::dict m200ByM;
             py::dict aclnnByM;

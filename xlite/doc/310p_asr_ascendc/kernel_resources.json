@@ -18,7 +18,7 @@
       "tile": {"m": 32, "n": 128, "k": 128}
     },
     "asr_m200_projection_cached_fp16": {
-      "status": "experimental_performance_gate_pending_three_prelaunch_retries",
+      "status": "experimental_perf_runtime_candidate",
       "ub_bytes": 24576,
       "l1_bytes_max": 425984,
       "l1_activation_bytes_max": 393216,
@@ -29,8 +29,9 @@
       "event_pairs": 8,
       "tile": {"m": 32, "n": 128, "k": 128},
       "shapes": ["qkv", "o", "gate_up", "down"],
-      "runtime_eligible": false,
-      "remaining_gate": "replace_three_missing_timing_samples_then_model_weight_validation"
+      "runtime_eligible": true,
+      "runtime_backend": "ascendc_asr_perf",
+      "remaining_gate": "model_weight_and_whole_model_validation"
     },
     "asr_rmsnorm_fp16": {
       "status": "production_decode_vector",
@@ -150,7 +151,7 @@
       "arithmetic": "fp16_vector"
     },
     "asr_silu_mul_row_fp16": {
-      "status": "experimental_microprobe_performance_gate_passed",
+      "status": "experimental_perf_runtime_candidate",
       "ub_bytes": 36864,
       "l1_bytes": 0,
       "l0a_bytes": 0,
@@ -160,12 +161,13 @@
       "shape": {"max_tokens": 20, "intermediate": 6144, "tile": 6144},
       "arithmetic": "fp16_vector",
       "schedule": "one_full_row_per_pipeline_iteration",
-      "runtime_eligible": false,
+      "runtime_eligible": true,
+      "runtime_backend": "ascendc_asr_perf",
       "measurement_requirement": "at_least_200ms_per_synchronized_sample",
       "remaining_gate": "whole_model_validation"
     },
     "asr_m200_lm_head_fp16": {
-      "status": "experimental_microprobe",
+      "status": "experimental_perf_runtime_candidate",
       "ub_bytes": 24576,
       "l1_bytes": 40960,
       "l0a_bytes": 8192,
@@ -176,7 +178,7 @@
       "tile": {"m": 32, "n": 128, "k": 128},
       "arithmetic": "fp32_accumulate_fp16_full_logits",
       "cached_input_variant": {
-        "status": "experimental_pending_device_measurement",
+        "status": "experimental_microprobe_performance_gate_passed",
         "entry": "asr_m200_lm_head_cached_fp16",
         "l1_bytes": 163840,
         "l1_activation_bytes": 131072,
@@ -188,7 +190,9 @@
         "event_pairs": 8,
         "event_protocol": ["MTE1_MTE2", "MTE2_MTE1", "MTE1_M", "M_MTE1", "M_V", "V_M", "V_MTE3", "MTE3_V"]
       },
-      "runtime_eligible": false
+      "runtime_eligible": true,
+      "runtime_backend": "ascendc_asr_perf",
+      "remaining_gate": "model_weight_and_whole_model_validation"
     }
   }
 }
