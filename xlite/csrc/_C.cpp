@@ -3218,7 +3218,8 @@ PYBIND11_MODULE(_C, m)
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "runtime_selectable";
         info["decode_attention_backends"] =
-            py::make_tuple("direct_atb", "native_atb", "batched_aclnn", "legacy");
+            py::make_tuple("ascendc_asr", "direct_atb", "native_atb",
+                           "batched_aclnn", "legacy");
         // PromptFlashAttentionV2 needs a dense, max-length-padded KV gather for
         // decode on 310P.  Keep it available as a diagnostic backend, but do
         // not select it by default: real ASR batch-20 measurements showed a
@@ -3259,12 +3260,13 @@ PYBIND11_MODULE(_C, m)
             py::make_tuple("ascendc_asr", "m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
         // Fixed decode projections, RMSNorm, fused residual AddRMSNorm,
-        // QK-Norm/MRoPE/cache and SiLU-Mul are selectable. Prefill, paged
-        // attention and LM Head remain explicit boundaries.
+        // QK-Norm/MRoPE/cache, SiLU-Mul and scratch-free paged Decode
+        // Attention are selectable. Prefill and LM Head remain explicit
+        // boundaries.
         info["ascendc_asr_backend"] = true;
         info["ascendc_asr_backend_status"] =
-            "decode_projections_rmsnorm_add_rmsnorm_qk_mrope_cache_silu";
-        info["ascendc_asr_contract_version"] = 4;
+            "decode_projections_rmsnorm_add_rmsnorm_qk_mrope_cache_silu_paged_attention";
+        info["ascendc_asr_contract_version"] = 5;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
@@ -3274,6 +3276,8 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_add_rmsnorm"] = true;
         info["ascendc_asr_qk_norm_mrope_cache"] = true;
         info["ascendc_asr_silu_mul"] = true;
+        info["ascendc_asr_paged_decode_attention"] = true;
+        info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
         info["ascendc_asr_prefill"] = false;
         info["ascendc_asr_lm_head"] = false;
         info["m200_asr_prefill"] = true;
@@ -3340,6 +3344,10 @@ PYBIND11_MODULE(_C, m)
             rt.BatchedDecodeAttentionRequests();
         stats["batched_decode_attention_launches"] =
             rt.BatchedDecodeAttentionLaunches();
+        stats["ascendc_asr_decode_attention_requests"] =
+            rt.AscendCAsrDecodeAttentionRequests();
+        stats["ascendc_asr_decode_attention_launches"] =
+            rt.AscendCAsrDecodeAttentionLaunches();
         stats["batched_prefill_attention_requests"] =
             rt.BatchedPrefillAttentionRequests();
         stats["batched_prefill_attention_launches"] =
@@ -3499,6 +3507,10 @@ PYBIND11_MODULE(_C, m)
                 rt.BatchedDecodeAttentionRequests();
             stats["batched_decode_attention_launches"] =
                 rt.BatchedDecodeAttentionLaunches();
+            stats["ascendc_asr_decode_attention_requests"] =
+                rt.AscendCAsrDecodeAttentionRequests();
+            stats["ascendc_asr_decode_attention_launches"] =
+                rt.AscendCAsrDecodeAttentionLaunches();
             stats["batched_prefill_attention_requests"] =
                 rt.BatchedPrefillAttentionRequests();
             stats["batched_prefill_attention_launches"] =

@@ -101,6 +101,8 @@ parser.add_argument("--rerun-failed", action="store_true",
                     help="310P FP16: rerun failures from attention_310p_report/summary.json")
 parser.add_argument("--batched-decode-only", action="store_true",
                     help="310P FP16: run only the new multi-request decode path")
+parser.add_argument("--ascendc-decode-only", action="store_true",
+                    help="310P FP16: run only scratch-free AscendC decode attention")
 parser.add_argument("--batched-prefill-only", action="store_true",
                     help="310P FP16: run only equal-length batched prefill cases")
 parser.add_argument("--shape-cases", type=Path,
@@ -108,6 +110,8 @@ parser.add_argument("--shape-cases", type=Path,
                              if "XLITE_ATTENTION_SHAPE_CASES" in os.environ else None),
                     help="310P FP16: run scheduler batch shapes generated from runtime telemetry")
 test_args = parser.parse_args()
+if test_args.batched_decode_only and test_args.ascendc_decode_only:
+    parser.error("choose only one Decode Attention backend")
 if test_args.shape_cases is not None:
     try:
         shape_payload = json.loads(test_args.shape_cases.read_text(encoding="utf-8"))
@@ -129,6 +133,11 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
         selected_indices = [
             index for index, (_batch, _cached, query) in enumerate(work)
             if _batch > 1 and all(length == 1 for length in query)
+        ]
+    if test_args.ascendc_decode_only:
+        selected_indices = [
+            index for index, (_batch, _cached, query) in enumerate(work)
+            if all(length == 1 for length in query)
         ]
     if test_args.batched_prefill_only:
         selected_indices = [
@@ -174,6 +183,8 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
                 # makes a batched test silently exercise per-request attention.
                 if test_args.batched_decode_only:
                     child_command.append("--batched-decode-only")
+                if test_args.ascendc_decode_only:
+                    child_command.append("--ascendc-decode-only")
                 if test_args.batched_prefill_only:
                     child_command.append("--batched-prefill-only")
                 result = subprocess.run(
@@ -212,6 +223,8 @@ if test_args.batched_decode_only:
     # Backend selection is explicit by design: the production default remains
     # legacy until a candidate backend passes correctness and performance gates.
     rt.set_decode_attention_backend("batched_aclnn")
+elif test_args.ascendc_decode_only:
+    rt.set_decode_attention_backend("ascendc_asr")
 elif os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
     rt.set_decode_attention_backend("direct_atb")
     rt.set_batched_prefill_attention_310p(True)
@@ -396,18 +409,26 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 raise AssertionError(
                     f"attention metadata D2H is not zero: {runtime_stats}"
                 )
-            if runtime_stats.get("attention_aclnn_launches", 0) == 0:
+            if (not test_args.ascendc_decode_only and
+                    runtime_stats.get("attention_aclnn_launches", 0) == 0):
                 raise AssertionError(
                     f"attention ACLNN launch counter was not updated: {runtime_stats}"
                 )
-            if batch > 1 and all(length == 1 for length in query_len_list):
-                if runtime_stats.get("batched_decode_attention_requests") != batch:
+            if ((test_args.batched_decode_only or test_args.ascendc_decode_only)
+                    and all(length == 1 for length in query_len_list)):
+                request_key = ("ascendc_asr_decode_attention_requests"
+                               if test_args.ascendc_decode_only else
+                               "batched_decode_attention_requests")
+                launch_key = ("ascendc_asr_decode_attention_launches"
+                              if test_args.ascendc_decode_only else
+                              "batched_decode_attention_launches")
+                if runtime_stats.get(request_key) != batch:
                     raise AssertionError(
-                        f"batched decode did not consume all requests: {runtime_stats}"
+                        f"decode backend did not consume all requests: {runtime_stats}"
                     )
-                if runtime_stats.get("batched_decode_attention_launches") != 1:
+                if runtime_stats.get(launch_key) != 1:
                     raise AssertionError(
-                        f"batched decode did not use exactly one ACLNN launch: {runtime_stats}"
+                        f"decode backend did not use exactly one kernel launch: {runtime_stats}"
                     )
                 if runtime_stats.get("legacy_attention_requests") != 0:
                     raise AssertionError(

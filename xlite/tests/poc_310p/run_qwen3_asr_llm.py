@@ -103,6 +103,12 @@ def main() -> int:
               "decode projections while prefill and LM Head remain explicit "
               "ACLNN boundaries"),
     )
+    parser.add_argument(
+        "--decode-attention-backend",
+        choices=("ascendc_asr", "direct_atb", "native_atb", "batched_aclnn", "legacy"),
+        default="legacy",
+        help="310P Decode Attention backend; Prefill remains on its validated path",
+    )
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))
     args = parser.parse_args()
@@ -134,6 +140,9 @@ def main() -> int:
     if not hasattr(model.xlite_rt, "set_matmul_backend_310p"):
         raise RuntimeError("installed Xlite does not expose selectable 310P MatMul backends")
     model.xlite_rt.set_matmul_backend_310p(args.matmul_backend)
+    if not hasattr(model.xlite_rt, "set_decode_attention_backend"):
+        raise RuntimeError("installed Xlite does not expose selectable Decode Attention")
+    model.xlite_rt.set_decode_attention_backend(args.decode_attention_backend)
     if args.matmul_backend == "ascendc_asr":
         required_stats = {
             "ascendc_asr_requests",
@@ -149,6 +158,22 @@ def main() -> int:
         if missing_stats:
             raise RuntimeError(
                 "loaded Xlite extension is stale for ascendc_asr: "
+                f"extension={Path(xlite_c.__file__).resolve()}, "
+                f"missing runtime stats={missing_stats}; rebuild with "
+                "'pip install -v -e . --no-build-isolation'"
+            )
+    if args.decode_attention_backend == "ascendc_asr":
+        required_attention_stats = {
+            "ascendc_asr_decode_attention_requests",
+            "ascendc_asr_decode_attention_launches",
+            "legacy_decode_attention_requests",
+            "decode_kv_gather_bytes",
+        }
+        available_stats = set(dict(model.xlite_rt.get_stats()))
+        missing_stats = sorted(required_attention_stats - available_stats)
+        if missing_stats:
+            raise RuntimeError(
+                "loaded Xlite extension is stale for ascendc_asr attention: "
                 f"extension={Path(xlite_c.__file__).resolve()}, "
                 f"missing runtime stats={missing_stats}; rebuild with "
                 "'pip install -v -e . --no-build-isolation'"
@@ -296,6 +321,22 @@ def main() -> int:
             ),
             "ascendc_asr_silu_mul_hit": runtime_stats["ascendc_asr_silu_mul_requests"] > 0,
         }
+    if args.decode_attention_backend == "ascendc_asr":
+        backend_acceptance.update({
+            "ascendc_asr_decode_attention_hit": (
+                runtime_stats["ascendc_asr_decode_attention_requests"] > 0
+            ),
+            "ascendc_asr_decode_attention_launches_match": (
+                runtime_stats["ascendc_asr_decode_attention_launches"] ==
+                runtime_stats["ascendc_asr_decode_attention_requests"]
+            ),
+            "ascendc_asr_zero_legacy_decode": (
+                runtime_stats["legacy_decode_attention_requests"] == 0
+            ),
+            "ascendc_asr_zero_decode_kv_gather": (
+                runtime_stats["decode_kv_gather_bytes"] == 0
+            ),
+        })
 
     report = {
         "device": device_name,

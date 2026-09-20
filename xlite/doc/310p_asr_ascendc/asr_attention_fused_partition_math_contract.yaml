@@ -1,4 +1,4 @@
-op_name: asr_attention_fused_partition_probe
+op_name: asr_paged_decode_attention_fp16
 operator_class: paged_decode_attention_fused_partition
 target: {soc: Ascend310P3, npu_arch: 2002}
 inputs:
@@ -6,7 +6,7 @@ inputs:
   - {name: k_cache, required: true, dtypes_chip_supported: [fp16], format: BSHD, shape: [NB, BS, KVH, D]}
   - {name: v_cache, required: true, dtypes_chip_supported: [fp16], format: BSHD, shape: [NB, BS, KVH, D]}
   - {name: block_table, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B, BT]}
-  - {name: kv_lengths, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B]}
+  - {name: cached_lengths, required: true, dtypes_chip_supported: [int32], format: ND, shape: [B]}
 outputs:
   - {name: output, dtypes_chip_supported: [fp16], format: ND, shape: [B, QD]}
 shape_contract:
@@ -33,9 +33,10 @@ compute_equations:
   backward: null
 boundary_conditions:
   - "only non-empty partitions are visited"
-  - "block-table padding and cache slots outside kv_length are not read"
+  - "valid kv length is cached_length + 1 for the current Decode token"
+  - "block-table padding and cache slots outside valid kv length are not read"
   - "one AIC work item owns one request/query-head and writes one disjoint output row"
   - "no GM intermediate state or host synchronization exists between partitions"
 source_citations:
   - {file: doc/310p_asr_ascendc/asr_attention_partition_chain_math_contract.yaml, lines: [1, 38], role: validated_partition_oracle}
-  - {file: doc/310p_asr_ascendc/asr_attention_fused_partition_block_decomposition.yaml, lines: [1, 38], role: fused_block_decomposition}
+  - {file: doc/310p_asr_ascendc/asr_paged_decode_attention_block_decomposition.yaml, lines: [1, 38], role: production_block_decomposition}

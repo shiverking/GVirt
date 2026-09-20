@@ -1,6 +1,6 @@
-op_name: asr_attention_fused_partition_probe
+op_name: asr_paged_decode_attention_fp16
 target: Ascend310P3
-status: scratch_free_fused_partition_probe
+status: promoted_scratch_free_device_probe
 work_item: [request, query_head]
 blocks:
   - {phase: q, block: direct-gm-nd-to-l1-nz, executions_per_work_item: 1}
@@ -32,5 +32,5 @@ invariants:
   - cache_bitwise_unchanged
   - no_gm_partition_state
 forbidden: [fixed_EVENT_ID, high_level_Matmul, FixPipe, DataCopyPad, LoadDataWithTranspose, aclnn, atb]
-runtime_eligible: false
-next_gate: independent_device_probe_then_promote_exact_kernel_to_runtime
+runtime_eligible: true
+next_gate: runtime_route_and_full_model_token_acceptance

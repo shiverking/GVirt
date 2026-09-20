@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "acl/acl.h"
-#include "aclrtlaunch_asr_attention_fused_partition_probe.h"
+#include "aclrtlaunch_asr_paged_decode_attention_fp16.h"
 #include "aclrtlaunch_asr_attention_partition_merge_probe.h"
 #include "aclrtlaunch_asr_attention_partition_state_probe.h"
 
@@ -263,7 +263,12 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
     CopyToDevice(vDevice, vCache.data(), vCache.size() * sizeof(uint16_t), "copy V");
     CopyToDevice(tableDevice, blockTable.data(), blockTable.size() * sizeof(int32_t),
                  "copy block table");
-    CopyToDevice(lengthsDevice, lengths.data(), lengths.size() * sizeof(int32_t),
+    std::vector<int32_t> deviceLengths = lengths;
+    if (fused) {
+        for (int32_t &length : deviceLengths) --length;
+    }
+    CopyToDevice(lengthsDevice, deviceLengths.data(),
+                 deviceLengths.size() * sizeof(int32_t),
                  "copy lengths");
     CopyToDevice(statesDevice, guardedStates.data(),
                  guardedStates.size() * sizeof(float), "copy guarded states");
@@ -280,7 +285,7 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup,
     const uint32_t mergeBlocks = std::min(8U, batch * kQHeads);
     const auto chain = [&]() {
         if (fused) {
-            ACLRT_LAUNCH_KERNEL(asr_attention_fused_partition_probe)
+            ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_fp16)
             (mergeBlocks, stream, qkvDevice.ptr, kDevice.ptr, vDevice.ptr,
              tableDevice.ptr, lengthsDevice.ptr, output, batch,
              kTableStride);

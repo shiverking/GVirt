@@ -1,24 +1,9 @@
 /*
- * Qwen3-ASR-only paged decode attention correctness kernel for Ascend310P3.
- *
- * This is the production-path micro-probe for paged addressing and FP32 online
- * softmax.  It deliberately uses vector dot/PV updates; the subsequent stage
- * replaces those two blocks with audited low-level LoadData/Mmad blocks before
- * Runtime integration.  Q is already scaled by 1/sqrt(128).
- *
- * Contract:
- *   qkv:         [batch, 4096] FP16 (Q occupies the first 2048 values)
- *   k/v cache:   [num_blocks, 128, 8, 128] FP16 BSHD
- *   block table: [batch, table_stride] INT32
- *   kv lengths:  [batch] INT32, inclusive of the current token
- *   output:      [batch, 2048] FP16
- *
- * UB layout (all offsets are bytes):
- *   four FP16 heads                         1024
- *   Q/K/V/product/reduce/acc0/acc1/weighted 4096
- *   exp input/output (8 FP32 lanes each)      64
- *   total                                    5184 bytes
- * L1/L0A/L0B/L0C: 0 bytes.
+ * Ascend310P3 Qwen3-ASR scratch-free paged Decode Attention.
+ * One M200 AI Core owns one (request, query-head), processes at most four
+ * 512-token partitions, and merges their FP32 online-softmax states on chip.
+ * K/V are read directly from the 4D BSHD paged cache.  The production entry
+ * writes one FP16 output row and has no GM intermediate workspace.
  */
 #include "kernel_operator.h"
 
@@ -31,199 +16,584 @@ constexpr uint32_t kKvHeads = 8;
 constexpr uint32_t kQkvDim = 4096;
 constexpr uint32_t kQDim = kQHeads * kHeadDim;
 constexpr uint32_t kBlockSize = 128;
+constexpr uint32_t kTileTokens = 16;
+constexpr uint32_t kPartitions = 4;
+constexpr uint32_t kPartitionTokens = 512;
+constexpr uint32_t kStateStride = 144;
+constexpr uint32_t kStateBlocks = kStateStride * sizeof(float) / 32;
 constexpr uint32_t kMaxBatch = 20;
 constexpr uint32_t kMaxKv = 2048;
+constexpr uint32_t kCubeElements = 256;
 
-__aicore__ inline __ubuf__ float *ReduceSum128(__ubuf__ float *source,
-                                                __ubuf__ float *scratch)
+__aicore__ inline void GmRowToL1Nz(const LocalTensor<half> &dst,
+                                    const GlobalTensor<half> &src,
+                                    uint32_t dstRow)
 {
-    uint32_t remain = kHeadDim;
-    while (remain > 1) {
-        const uint32_t half = remain / 2;
-        const uint64_t mask = half >= 64 ? static_cast<uint64_t>(-1)
-                                         : (static_cast<uint64_t>(1) << half) - 1;
-        set_vector_mask(0, mask);
-        vadd(scratch, source, source + half, 1, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
-        __ubuf__ float *old = source;
-        source = scratch;
-        scratch = old;
-        remain = half;
-    }
-    return source;
+    Nd2NzParams params(1, 1, kHeadDim, 0, kHeadDim, kTileTokens, 1, 0);
+    DataCopy(dst[dstRow * 16], src, params);
 }
 
-class AsrPagedDecodeAttentionProbeKernel {
+__aicore__ inline void L1ToL0A(const LocalTensor<half> &dst,
+                                const LocalTensor<half> &src,
+                                uint32_t kBlocks)
+{
+    LoadData2dParams params(0, 1, 1, 0, kBlocks - 1, 0, inc);
+    for (uint32_t kb = 0; kb < kBlocks; ++kb) {
+        LoadData(dst[kb * kCubeElements], src[kb * kCubeElements], params);
+    }
+}
+
+__aicore__ inline void L1ToL0B(const LocalTensor<half> &dst,
+                                const LocalTensor<half> &src,
+                                uint32_t nBlocks, uint32_t kBlocks)
+{
+    LoadData2dParams params(0, nBlocks * kBlocks, 1, 0, 0, 0, inc);
+    LoadData(dst, src, params);
+}
+
+__aicore__ inline void L1ToL0BTranspose(const LocalTensor<half> &dst,
+                                         const LocalTensor<half> &src,
+                                         uint32_t nBlocks)
+{
+    LoadData2dParams params(0, nBlocks, 1, 0, 0, 1, inc);
+    LoadData(dst, src, params);
+}
+
+class AsrPagedDecodeAttentionKernel {
 public:
     __aicore__ inline void Init(GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache,
-                                GM_ADDR blockTable, GM_ADDR kvLengths,
-                                GM_ADDR output, uint32_t batch,
+                                GM_ADDR blockTable, GM_ADDR lengths,
+                                GM_ADDR states, uint32_t batch,
                                 uint32_t tableStride)
     {
-        qkv_ = reinterpret_cast<__gm__ half *>(qkv);
-        kCache_ = reinterpret_cast<__gm__ half *>(kCache);
-        vCache_ = reinterpret_cast<__gm__ half *>(vCache);
+        InitCommon(qkv, kCache, vCache, blockTable, lengths,
+                   batch, tableStride);
+        states_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(states));
+        Bind(stateOutF_, TPosition::VECCALC, 16960);
+    }
+
+    __aicore__ inline void InitFused(GM_ADDR qkv, GM_ADDR kCache,
+                                     GM_ADDR vCache, GM_ADDR blockTable,
+                                     GM_ADDR cachedLengths, GM_ADDR output,
+                                     uint32_t batch, uint32_t tableStride)
+    {
+        InitCommon(qkv, kCache, vCache, blockTable, cachedLengths,
+                   batch, tableStride);
+        output_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(output));
+        Bind(globalAccF_, TPosition::VECCALC, 16960);
+        Bind(scaledPartitionF_, TPosition::VECCALC, 17472);
+        Bind(outputH_, TPosition::VECCALC, 17984);
+    }
+
+    __aicore__ inline void InitCommon(GM_ADDR qkv, GM_ADDR kCache,
+                                      GM_ADDR vCache, GM_ADDR blockTable,
+                                      GM_ADDR lengths, uint32_t batch,
+                                      uint32_t tableStride)
+    {
+        qkv_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(qkv));
+        kCache_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(kCache));
+        vCache_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(vCache));
         blockTable_ = reinterpret_cast<__gm__ int32_t *>(blockTable);
-        kvLengths_ = reinterpret_cast<__gm__ int32_t *>(kvLengths);
-        output_ = reinterpret_cast<__gm__ half *>(output);
+        lengths_ = reinterpret_cast<__gm__ int32_t *>(lengths);
         batch_ = batch;
         tableStride_ = tableStride;
-
-        Bind(qH_, 0); Bind(kH_, 256); Bind(vH_, 512); Bind(outH_, 768);
-        Bind(qF_, 1024); Bind(kF_, 1536); Bind(vF_, 2048);
-        Bind(productF_, 2560); Bind(reduceF_, 3072);
-        Bind(accAF_, 3584); Bind(accBF_, 4096); Bind(weightedF_, 4608);
-        Bind(expInputF_, 5120); Bind(expOutputF_, 5152);
+        Bind(l1Q_, TPosition::A1, 0);
+        Bind(l1B_, TPosition::B1, 4096);
+        Bind(l1P_, TPosition::A1, 8192);
+        Bind(l0A_, TPosition::A2, 0);
+        Bind(l0B_, TPosition::B2, 0);
+        Bind(l0C_, TPosition::CO1, 0);
+        Bind(zeroH_, TPosition::VECCALC, 0);
+        Bind(probabilityH_, TPosition::VECCALC, 4096);
+        Bind(qkF_, TPosition::VECCALC, 4864);
+        Bind(pvF_, TPosition::VECCALC, 5888);
+        Bind(expInputF_, TPosition::VECCALC, 14080);
+        Bind(expOutputF_, TPosition::VECCALC, 14208);
+        Bind(weightF_, TPosition::VECCALC, 14336);
+        Bind(pvCompactF_, TPosition::VECCALC, 14400);
+        Bind(accAF_, TPosition::VECCALC, 14912);
+        Bind(accBF_, TPosition::VECCALC, 15424);
+        Bind(correctedF_, TPosition::VECCALC, 15936);
+        Bind(scalarF_, TPosition::VECCALC, 16448);
     }
 
     __aicore__ inline void Process()
     {
         set_atomic_none();
         set_mask_norm();
-        const event_t loadReady = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        const event_t loadFree = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-        const event_t vectorToScalar = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        const event_t scalarToVector = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        const event_t storeReady = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        const event_t storeFree = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-        float one = 1.0F;
-        SetFlag<HardEvent::V_MTE2>(loadFree);
-        SetFlag<HardEvent::MTE3_V>(storeFree);
-
-        const uint32_t work = batch_ * kQHeads;
-        for (uint32_t item = GetBlockIdx(); item < work; item += GetBlockNum()) {
-            const uint32_t request = item / kQHeads;
-            const uint32_t queryHead = item % kQHeads;
-            const uint32_t kvHead = queryHead / 2;
-            const int32_t kvLengthSigned = kvLengths_[request];
-            if (kvLengthSigned <= 0 || kvLengthSigned > static_cast<int32_t>(kMaxKv)) {
+        FetchEvents();
+        SetFlag<HardEvent::MTE3_V>(mte3ToV_);
+        const uint32_t work = batch_ * kQHeads * kPartitions;
+        for (uint32_t item = GetBlockIdx(); item < work;
+             item += GetBlockNum()) {
+            const uint32_t partition = item % kPartitions;
+            const uint32_t headItem = item / kPartitions;
+            const uint32_t request = headItem / kQHeads;
+            const uint32_t queryHead = headItem % kQHeads;
+            const int32_t lengthSigned = lengths_[request];
+            if (lengthSigned <= 0 || lengthSigned > static_cast<int32_t>(kMaxKv)) {
                 continue;
             }
-            const uint32_t kvLength = static_cast<uint32_t>(kvLengthSigned);
-
-            WaitFlag<HardEvent::V_MTE2>(loadFree);
-            copy_gm_to_ubuf(H(qH_), qkv_ + static_cast<uint64_t>(request) * kQkvDim +
-                            queryHead * kHeadDim, 0, 1, 8, 0, 0);
-            SetFlag<HardEvent::MTE2_V>(loadReady);
-            WaitFlag<HardEvent::MTE2_V>(loadReady);
-            set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-            vconv_f162f32(F(qF_), H(qH_), 2, 1, 1, 8, 4);
-            pipe_barrier(PIPE_V);
-            SetFlag<HardEvent::V_MTE2>(loadFree);
-
-            float runningMax = 0.0F;
-            float runningSum = 0.0F;
-            __ubuf__ float *accumulator = F(accAF_);
-            __ubuf__ float *nextAccumulator = F(accBF_);
-
-            for (uint32_t token = 0; token < kvLength; ++token) {
-                const uint32_t logicalBlock = token / kBlockSize;
-                const int32_t physicalBlockSigned =
-                    blockTable_[request * tableStride_ + logicalBlock];
-                if (physicalBlockSigned < 0) {
-                    continue;
-                }
-                const uint32_t physicalBlock = static_cast<uint32_t>(physicalBlockSigned);
-                const uint32_t tokenInBlock = token % kBlockSize;
-                const uint64_t cacheOffset =
-                    ((static_cast<uint64_t>(physicalBlock) * kBlockSize + tokenInBlock) *
-                     kKvHeads + kvHead) * kHeadDim;
-                WaitFlag<HardEvent::V_MTE2>(loadFree);
-                copy_gm_to_ubuf(H(kH_), kCache_ + cacheOffset, 0, 1, 8, 0, 0);
-                copy_gm_to_ubuf(H(vH_), vCache_ + cacheOffset, 0, 1, 8, 0, 0);
-                SetFlag<HardEvent::MTE2_V>(loadReady);
-                WaitFlag<HardEvent::MTE2_V>(loadReady);
-                set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-                vconv_f162f32(F(kF_), H(kH_), 2, 1, 1, 8, 4);
-                vconv_f162f32(F(vF_), H(vH_), 2, 1, 1, 8, 4);
-                pipe_barrier(PIPE_V);
-                SetFlag<HardEvent::V_MTE2>(loadFree);
-                vmul(F(productF_), F(qF_), F(kF_), 2, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
-                __ubuf__ float *scoreAddress = ReduceSum128(F(productF_), F(reduceF_));
-                SetFlag<HardEvent::V_S>(vectorToScalar);
-                WaitFlag<HardEvent::V_S>(vectorToScalar);
-                const float score = *scoreAddress;
-
-                if (token == 0) {
-                    runningMax = score;
-                    runningSum = one;
-                    SetFlag<HardEvent::S_V>(scalarToVector);
-                    WaitFlag<HardEvent::S_V>(scalarToVector);
-                    set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-                    vmuls(accumulator, F(vF_), one, 2, 1, 1, 8, 8);
-                    pipe_barrier(PIPE_V);
-                    continue;
-                }
-
-                const float newMax = score > runningMax ? score : runningMax;
-                F(expInputF_)[0] = runningMax - newMax;
-                F(expInputF_)[1] = score - newMax;
-                SetFlag<HardEvent::S_V>(scalarToVector);
-                WaitFlag<HardEvent::S_V>(scalarToVector);
-                set_vector_mask(0, 3);
-                vexp(F(expOutputF_), F(expInputF_), 1, 1, 1, 8, 8);
-                SetFlag<HardEvent::V_S>(vectorToScalar);
-                WaitFlag<HardEvent::V_S>(vectorToScalar);
-                // The M200 dynamic scalar overload requires an exact mutable
-                // stack-local float.  const float is rejected by CANN 9.1.
-                float correction = F(expOutputF_)[0];
-                float weight = F(expOutputF_)[1];
-                runningSum = runningSum * correction + weight;
-                runningMax = newMax;
-                SetFlag<HardEvent::S_V>(scalarToVector);
-                WaitFlag<HardEvent::S_V>(scalarToVector);
-                set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-                // CANN 9.1 beta1 does not accept a runtime Scalar value as the
-                // third vmuls operand on M200.  Materialize both scalars in UB
-                // after the explicit S_V handoff, then use ordinary vmul.
-                vector_dup(F(kF_), correction, 2, 1, 1, 8, 1);
-                vector_dup(F(productF_), weight, 2, 1, 1, 8, 1);
-                pipe_barrier(PIPE_V);
-                vmul(nextAccumulator, accumulator, F(kF_), 2, 1, 1, 1, 8, 8, 8);
-                vmul(F(weightedF_), F(vF_), F(productF_), 2, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
-                vadd(nextAccumulator, nextAccumulator, F(weightedF_),
-                     2, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
-                __ubuf__ float *old = accumulator;
-                accumulator = nextAccumulator;
-                nextAccumulator = old;
-            }
-
-            float inverseSum = one / runningSum;
-            SetFlag<HardEvent::S_V>(scalarToVector);
-            WaitFlag<HardEvent::S_V>(scalarToVector);
-            set_vector_mask(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
-            vector_dup(F(kF_), inverseSum, 2, 1, 1, 8, 1);
-            pipe_barrier(PIPE_V);
-            vmul(F(weightedF_), accumulator, F(kF_), 2, 1, 1, 1, 8, 8, 8);
-            pipe_barrier(PIPE_V);
-            WaitFlag<HardEvent::MTE3_V>(storeFree);
-            vconv_f322f16(H(outH_), F(weightedF_), 2, 1, 1, 4, 8);
-            pipe_barrier(PIPE_V);
-            SetFlag<HardEvent::V_MTE3>(storeReady);
-            WaitFlag<HardEvent::V_MTE3>(storeReady);
-            copy_ubuf_to_gm(output_ + static_cast<uint64_t>(request) * kQDim +
-                            queryHead * kHeadDim, H(outH_), 0, 1, 8, 0, 0);
-            SetFlag<HardEvent::MTE3_V>(storeFree);
+            RunPartition(item, request, queryHead, partition,
+                         static_cast<uint32_t>(lengthSigned));
         }
-        WaitFlag<HardEvent::V_MTE2>(loadFree);
-        WaitFlag<HardEvent::MTE3_V>(storeFree);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
+        pipe_barrier(PIPE_ALL);
+    }
+
+    __aicore__ inline void ProcessFused()
+    {
+        set_atomic_none();
+        set_mask_norm();
+        FetchEvents();
+        SetFlag<HardEvent::MTE3_V>(mte3ToV_);
+        const uint32_t work = batch_ * kQHeads;
+        for (uint32_t item = GetBlockIdx(); item < work;
+             item += GetBlockNum()) {
+            const uint32_t request = item / kQHeads;
+            const uint32_t queryHead = item % kQHeads;
+            const int32_t lengthSigned = lengths_[request] + 1;
+            if (lengthSigned <= 0 ||
+                lengthSigned > static_cast<int32_t>(kMaxKv)) {
+                continue;
+            }
+            RunFusedHead(request, queryHead,
+                         static_cast<uint32_t>(lengthSigned));
+        }
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
         pipe_barrier(PIPE_ALL);
     }
 
 private:
-    template <typename T>
-    __aicore__ inline void Bind(LocalTensor<T> &tensor, uint32_t offset)
+    __aicore__ inline event_t Fetch(HardEvent event)
     {
-        tensor.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
+        return static_cast<event_t>(GetTPipePtr()->FetchEventID(event));
+    }
+
+    __aicore__ inline void FetchEvents()
+    {
+        vToMte3_ = Fetch(HardEvent::V_MTE3);
+        mte3ToMte2_ = Fetch(HardEvent::MTE3_MTE2);
+        mte3ToMte1_ = Fetch(HardEvent::MTE3_MTE1);
+        mte2ToMte1_ = Fetch(HardEvent::MTE2_MTE1);
+        mte1ToM_ = Fetch(HardEvent::MTE1_M);
+        mToMte1_ = Fetch(HardEvent::M_MTE1);
+        mToV_ = Fetch(HardEvent::M_V);
+        vToM_ = Fetch(HardEvent::V_M);
+        vToS_ = Fetch(HardEvent::V_S);
+        sToV_ = Fetch(HardEvent::S_V);
+        mte3ToV_ = Fetch(HardEvent::MTE3_V);
+    }
+
+    __aicore__ inline void ZeroHalfTile()
+    {
+        half zero = static_cast<half>(0.0F);
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        for (uint32_t row = 0; row < kTileTokens; ++row) {
+            vector_dup(H(zeroH_) + row * kHeadDim, zero,
+                       1, 1, 1, 8, 1);
+        }
+        pipe_barrier(PIPE_V);
+    }
+
+    __aicore__ inline void ZeroL1(LocalTensor<half> &destination,
+                                  bool followedByMte2)
+    {
+        ZeroHalfTile();
+        SetFlag<HardEvent::V_MTE3>(vToMte3_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3_);
+        DataCopyParams copy{1, 128, 0, 0};
+        DataCopy(destination, zeroH_, copy);
+        if (followedByMte2) {
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_);
+        } else {
+            SetFlag<HardEvent::MTE3_MTE1>(mte3ToMte1_);
+            WaitFlag<HardEvent::MTE3_MTE1>(mte3ToMte1_);
+        }
+    }
+
+    __aicore__ inline uint64_t CacheOffset(uint32_t request,
+                                            uint32_t logicalToken,
+                                            uint32_t kvHead) const
+    {
+        const uint32_t logicalBlock = logicalToken / kBlockSize;
+        const uint32_t tokenInBlock = logicalToken % kBlockSize;
+        const uint32_t physicalBlock = static_cast<uint32_t>(
+            blockTable_[request * tableStride_ + logicalBlock]);
+        return ((static_cast<uint64_t>(physicalBlock) * kBlockSize +
+                 tokenInBlock) * kKvHeads + kvHead) * kHeadDim;
+    }
+
+    __aicore__ inline void StageQuery(uint32_t request, uint32_t queryHead)
+    {
+        ZeroL1(l1Q_, true);
+        GmRowToL1Nz(l1Q_, qkv_[static_cast<uint64_t>(request) * kQkvDim +
+                               queryHead * kHeadDim], 0);
+        SetFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
+        WaitFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
+    }
+
+    __aicore__ inline void StageCacheRows(const GlobalTensor<half> &cache,
+                                           uint32_t request,
+                                           uint32_t logicalStart,
+                                           uint32_t validTokens,
+                                           uint32_t kvHead)
+    {
+        ZeroL1(l1B_, true);
+        for (uint32_t token = 0; token < validTokens; ++token) {
+            GmRowToL1Nz(l1B_, cache[CacheOffset(request,
+                                                logicalStart + token,
+                                                kvHead)], token);
+        }
+        SetFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
+        WaitFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
+    }
+
+    __aicore__ inline void RunMmad(uint32_t m, uint32_t n, uint32_t k)
+    {
+        SetFlag<HardEvent::MTE1_M>(mte1ToM_);
+        WaitFlag<HardEvent::MTE1_M>(mte1ToM_);
+        MmadParams params;
+        params.m = m;
+        params.n = n;
+        params.k = k;
+        params.cmatrixSource = false;
+        params.cmatrixInitVal = true;
+        Mmad(l0C_, l0A_, l0B_, params);
+        SetFlag<HardEvent::M_MTE1>(mToMte1_);
+        SetFlag<HardEvent::M_V>(mToV_);
+        WaitFlag<HardEvent::M_V>(mToV_);
+    }
+
+    __aicore__ inline void DrainL0C(LocalTensor<float> &destination,
+                                    uint32_t elements)
+    {
+        DataCopyParams drain;
+        drain.blockCount = 1;
+        drain.blockLen = elements * sizeof(float) / 1024;
+        drain.srcStride = 0;
+        drain.dstStride = 0;
+        DataCopyEnhancedParams enhanced;
+        enhanced.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+        enhanced.deqScale = DeqScale::DEQ_NONE;
+        DataCopy(destination, l0C_, drain, enhanced);
+        pipe_barrier(PIPE_V);
+        SetFlag<HardEvent::V_M>(vToM_);
+        WaitFlag<HardEvent::V_M>(vToM_);
+        WaitFlag<HardEvent::M_MTE1>(mToMte1_);
+    }
+
+    __aicore__ inline void BuildProbabilities(float &runningMax,
+                                               float &runningSum,
+                                               uint32_t validTokens,
+                                               float &correction)
+    {
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        float tileMax = F(qkF_)[0];
+        for (uint32_t token = 1; token < validTokens; ++token) {
+            const float score = F(qkF_)[token];
+            tileMax = score > tileMax ? score : tileMax;
+        }
+        const float newMax = runningMax > tileMax ? runningMax : tileMax;
+        F(expInputF_)[0] = runningMax - newMax;
+        for (uint32_t token = 0; token < kTileTokens; ++token) {
+            F(expInputF_)[token + 1] = token < validTokens ?
+                F(qkF_)[token] - newMax : -65504.0F;
+        }
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(0, (static_cast<uint64_t>(1) << 17) - 1);
+        vexp(F(expOutputF_), F(expInputF_), 1, 1, 1, 8, 8);
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        correction = F(expOutputF_)[0];
+        float tileSum = 0.0F;
+        for (uint32_t token = 0; token < kTileTokens; ++token) {
+            const float weight = F(expOutputF_)[token + 1];
+            F(weightF_)[token] = weight;
+            tileSum += weight;
+        }
+        runningSum = runningSum * correction + tileSum;
+        runningMax = newMax;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+    }
+
+    __aicore__ inline void StageProbabilities()
+    {
+        half zero = static_cast<half>(0.0F);
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(H(probabilityH_), zero, 1, 1, 1, 8, 1);
+        vector_dup(H(probabilityH_) + 128, zero, 1, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        set_vector_mask(0, (static_cast<uint64_t>(1) << 16) - 1);
+        vconv_f322f16(H(probabilityH_), F(weightF_), 1, 1, 1, 4, 8);
+        pipe_barrier(PIPE_V);
+        SetFlag<HardEvent::V_MTE3>(vToMte3_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3_);
+        DataCopyParams copy{1, 16, 0, 0};
+        DataCopy(l1P_, probabilityH_, copy);
+        SetFlag<HardEvent::MTE3_MTE1>(mte3ToMte1_);
+        WaitFlag<HardEvent::MTE3_MTE1>(mte3ToMte1_);
+        L1ToL0A(l0A_, l1P_, 1);
+    }
+
+    __aicore__ inline void CompactPvRow()
+    {
+        float zero = 0.0F;
+        set_vector_mask(0, (static_cast<uint64_t>(1) << 16) - 1);
+        for (uint32_t block = 0; block < 8; ++block) {
+            vadds(F(pvCompactF_) + block * 16,
+                  F(pvF_) + block * kCubeElements, zero,
+                  1, 1, 1, 8, 8);
+        }
+        pipe_barrier(PIPE_V);
+    }
+
+    __aicore__ inline void UpdateAccumulator(__ubuf__ float *&accumulator,
+                                              __ubuf__ float *&nextAccumulator,
+                                              float correction)
+    {
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(scalarF_), correction, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(correctedF_), accumulator, F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vadd(nextAccumulator, F(correctedF_), F(pvCompactF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        __ubuf__ float *old = accumulator;
+        accumulator = nextAccumulator;
+        nextAccumulator = old;
+    }
+
+    __aicore__ inline void WriteState(uint32_t item, float runningMax,
+                                      float runningSum,
+                                      __ubuf__ float *accumulator)
+    {
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
+        float zero = 0.0F;
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(stateOutF_), zero, 2, 1, 1, 8, 1);
+        set_vector_mask(0, (static_cast<uint64_t>(1) << 16) - 1);
+        vector_dup(F(stateOutF_) + 128, zero, 1, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        F(stateOutF_)[0] = runningMax;
+        F(stateOutF_)[1] = runningSum;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vadds(F(stateOutF_) + 2, accumulator, zero,
+              2, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        SetFlag<HardEvent::V_MTE3>(vToMte3_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3_);
+        DataCopyParams store{1, kStateBlocks, 0, 0};
+        DataCopy(states_[static_cast<uint64_t>(item) * kStateStride],
+                 stateOutF_, store);
+        SetFlag<HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void RunPartition(uint32_t item, uint32_t request,
+                                        uint32_t queryHead,
+                                        uint32_t partition,
+                                        uint32_t kvLength)
+    {
+        float zero = 0.0F;
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(accAF_), zero, 2, 1, 1, 8, 1);
+        vector_dup(F(accBF_), zero, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        __ubuf__ float *accumulator = F(accAF_);
+        __ubuf__ float *nextAccumulator = F(accBF_);
+        const uint32_t partitionStart = partition * kPartitionTokens;
+        if (partitionStart >= kvLength) {
+            WriteState(item, -65504.0F, 0.0F, accumulator);
+            return;
+        }
+
+        const uint32_t partitionEnd =
+            kvLength < partitionStart + kPartitionTokens ?
+            kvLength : partitionStart + kPartitionTokens;
+        const uint32_t kvHead = queryHead / 2;
+        StageQuery(request, queryHead);
+        float runningMax = -65504.0F;
+        float runningSum = 0.0F;
+        for (uint32_t logicalStart = partitionStart;
+             logicalStart < partitionEnd; logicalStart += kTileTokens) {
+            const uint32_t remaining = partitionEnd - logicalStart;
+            const uint32_t validTokens = remaining < kTileTokens ?
+                remaining : kTileTokens;
+            StageCacheRows(kCache_, request, logicalStart,
+                           validTokens, kvHead);
+            L1ToL0A(l0A_, l1Q_, 8);
+            L1ToL0B(l0B_, l1B_, 1, 8);
+            RunMmad(16, 16, 128);
+            DrainL0C(qkF_, 16 * 16);
+            float correction = 0.0F;
+            BuildProbabilities(runningMax, runningSum,
+                               validTokens, correction);
+            StageProbabilities();
+            StageCacheRows(vCache_, request, logicalStart,
+                           validTokens, kvHead);
+            L1ToL0BTranspose(l0B_, l1B_, 8);
+            RunMmad(16, 128, 16);
+            DrainL0C(pvF_, 16 * 128);
+            CompactPvRow();
+            UpdateAccumulator(accumulator, nextAccumulator, correction);
+        }
+        WriteState(item, runningMax, runningSum, accumulator);
+    }
+
+    __aicore__ inline void MergePartition(float &globalMax,
+                                           float &globalSum,
+                                           float partitionMax,
+                                           float partitionSum,
+                                           __ubuf__ float *partitionOutput)
+    {
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        const float newMax = globalMax > partitionMax ?
+            globalMax : partitionMax;
+        F(expInputF_)[0] = globalMax - newMax;
+        F(expInputF_)[1] = partitionMax - newMax;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(0, 3);
+        vexp(F(expOutputF_), F(expInputF_), 1, 1, 1, 8, 8);
+        SetFlag<HardEvent::V_S>(vToS_);
+        WaitFlag<HardEvent::V_S>(vToS_);
+        float correction = F(expOutputF_)[0];
+        float partitionScale = F(expOutputF_)[1];
+        globalSum = globalSum * correction +
+                    partitionSum * partitionScale;
+        globalMax = newMax;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(scalarF_), correction, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(correctedF_), F(globalAccF_), F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vector_dup(F(scalarF_), partitionScale, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(scaledPartitionF_), partitionOutput, F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vadd(F(globalAccF_), F(correctedF_), F(scaledPartitionF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+    }
+
+    __aicore__ inline void StoreFusedOutput(uint32_t request,
+                                            uint32_t queryHead,
+                                            float globalSum)
+    {
+        float inverseSum = 1.0F / globalSum;
+        SetFlag<HardEvent::S_V>(sToV_);
+        WaitFlag<HardEvent::S_V>(sToV_);
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(scalarF_), inverseSum, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        vmul(F(correctedF_), F(globalAccF_), F(scalarF_),
+             2, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
+        vconv_f322f16(H(outputH_), F(correctedF_), 2, 1, 1, 4, 8);
+        pipe_barrier(PIPE_V);
+        SetFlag<HardEvent::V_MTE3>(vToMte3_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3_);
+        DataCopyParams store{1, kHeadDim * sizeof(half) / 32, 0, 0};
+        const uint64_t outputOffset =
+            static_cast<uint64_t>(request) * kQDim +
+            queryHead * kHeadDim;
+        DataCopy(output_[outputOffset], outputH_, store);
+        SetFlag<HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void RunFusedHead(uint32_t request,
+                                        uint32_t queryHead,
+                                        uint32_t kvLength)
+    {
+        float zero = 0.0F;
+        set_vector_mask(static_cast<uint64_t>(-1),
+                        static_cast<uint64_t>(-1));
+        vector_dup(F(globalAccF_), zero, 2, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        float globalMax = -65504.0F;
+        float globalSum = 0.0F;
+        const uint32_t kvHead = queryHead / 2;
+        StageQuery(request, queryHead);
+
+        for (uint32_t partitionStart = 0; partitionStart < kvLength;
+             partitionStart += kPartitionTokens) {
+            set_vector_mask(static_cast<uint64_t>(-1),
+                            static_cast<uint64_t>(-1));
+            vector_dup(F(accAF_), zero, 2, 1, 1, 8, 1);
+            vector_dup(F(accBF_), zero, 2, 1, 1, 8, 1);
+            pipe_barrier(PIPE_V);
+            __ubuf__ float *accumulator = F(accAF_);
+            __ubuf__ float *nextAccumulator = F(accBF_);
+            float partitionMax = -65504.0F;
+            float partitionSum = 0.0F;
+            const uint32_t partitionEnd =
+                kvLength < partitionStart + kPartitionTokens ?
+                kvLength : partitionStart + kPartitionTokens;
+
+            for (uint32_t logicalStart = partitionStart;
+                 logicalStart < partitionEnd;
+                 logicalStart += kTileTokens) {
+                const uint32_t remaining = partitionEnd - logicalStart;
+                const uint32_t validTokens = remaining < kTileTokens ?
+                    remaining : kTileTokens;
+                StageCacheRows(kCache_, request, logicalStart,
+                               validTokens, kvHead);
+                L1ToL0A(l0A_, l1Q_, 8);
+                L1ToL0B(l0B_, l1B_, 1, 8);
+                RunMmad(16, 16, 128);
+                DrainL0C(qkF_, 16 * 16);
+                float correction = 0.0F;
+                BuildProbabilities(partitionMax, partitionSum,
+                                   validTokens, correction);
+                StageProbabilities();
+                StageCacheRows(vCache_, request, logicalStart,
+                               validTokens, kvHead);
+                L1ToL0BTranspose(l0B_, l1B_, 8);
+                RunMmad(16, 128, 16);
+                DrainL0C(pvF_, 16 * 128);
+                CompactPvRow();
+                UpdateAccumulator(accumulator, nextAccumulator, correction);
+            }
+            MergePartition(globalMax, globalSum, partitionMax,
+                           partitionSum, accumulator);
+        }
+        StoreFusedOutput(request, queryHead, globalSum);
+    }
+
+    template <typename T>
+    __aicore__ inline void Bind(LocalTensor<T> &tensor,
+                                 TPosition position, uint32_t offset)
+    {
+        tensor.address_.logicPos = static_cast<uint8_t>(position);
         tensor.address_.bufferAddr = offset;
     }
     __aicore__ inline __ubuf__ half *H(LocalTensor<half> &tensor)
@@ -232,33 +602,59 @@ private:
     { return reinterpret_cast<__ubuf__ float *>(tensor.GetPhyAddr()); }
 
     TPipe pipe_;
-    __gm__ half *qkv_ = nullptr;
-    __gm__ half *kCache_ = nullptr;
-    __gm__ half *vCache_ = nullptr;
+    GlobalTensor<half> qkv_, kCache_, vCache_, output_;
+    GlobalTensor<float> states_;
     __gm__ int32_t *blockTable_ = nullptr;
-    __gm__ int32_t *kvLengths_ = nullptr;
-    __gm__ half *output_ = nullptr;
-    LocalTensor<half> qH_, kH_, vH_, outH_;
-    LocalTensor<float> qF_, kF_, vF_, productF_, reduceF_;
-    LocalTensor<float> accAF_, accBF_, weightedF_, expInputF_, expOutputF_;
+    __gm__ int32_t *lengths_ = nullptr;
+    LocalTensor<half> l1Q_, l1B_, l1P_, l0A_, l0B_;
+    LocalTensor<float> l0C_;
+    LocalTensor<half> zeroH_, probabilityH_;
+    LocalTensor<float> qkF_, pvF_, expInputF_, expOutputF_;
+    LocalTensor<float> weightF_, pvCompactF_, accAF_, accBF_;
+    LocalTensor<float> correctedF_, scalarF_, stateOutF_;
+    LocalTensor<float> globalAccF_, scaledPartitionF_;
+    LocalTensor<half> outputH_;
     uint32_t batch_ = 0;
     uint32_t tableStride_ = 0;
+    event_t vToMte3_, mte3ToMte2_, mte3ToMte1_, mte2ToMte1_;
+    event_t mte1ToM_, mToMte1_, mToV_, vToM_, vToS_, sToV_, mte3ToV_;
 };
 }  // namespace
 
+#ifdef XLITE_ASR_ATTENTION_PARTITION_PROBE
+extern "C" __global__ __aicore__ void asr_attention_partition_state_probe(
+    GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
+    GM_ADDR lengths, GM_ADDR states, uint32_t batch, uint32_t tableStride)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_attention_partition_state_probe requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch || tableStride == 0 ||
+        tableStride > 16) {
+        return;
+    }
+    AsrPagedDecodeAttentionKernel probe;
+    probe.Init(qkv, kCache, vCache, blockTable, lengths, states,
+               batch, tableStride);
+    probe.Process();
+}
+#endif
+
 extern "C" __global__ __aicore__ void asr_paged_decode_attention_fp16(
     GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
-    GM_ADDR kvLengths, GM_ADDR output, uint32_t batch, uint32_t tableStride)
+    GM_ADDR cachedLengths, GM_ADDR output, uint32_t batch, uint32_t tableStride)
 {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
 #error "asr_paged_decode_attention_fp16 requires Ascend310P3 M200"
 #endif
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    if (batch == 0 || batch > kMaxBatch || tableStride == 0 || tableStride > 16) {
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch || tableStride == 0 ||
+        tableStride > 16) {
         return;
     }
-    AsrPagedDecodeAttentionProbeKernel kernel;
-    kernel.Init(qkv, kCache, vCache, blockTable, kvLengths, output,
-                batch, tableStride);
-    kernel.Process();
+    AsrPagedDecodeAttentionKernel kernel;
+    kernel.InitFused(qkv, kCache, vCache, blockTable, cachedLengths, output,
+                     batch, tableStride);
+    kernel.ProcessFused();
 }

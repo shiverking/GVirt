@@ -230,6 +230,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
     # kernel merge route used by the historical 310P kernels.
     set(KERNEL_FILES_310P_ASR_ASCENDC
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_projection_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp
     )
     # Keep AIV-only ASR vector kernels separate from the AIC-only projection
     # library. Mixing object types changes CANN 9.1's legacy merge route.

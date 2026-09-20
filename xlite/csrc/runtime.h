@@ -88,6 +88,7 @@ enum class XDecodeAttentionBackend310P {
     BATCHED_ACLNN,
     NATIVE_ATB,
     DIRECT_ATB,
+    ASCENDC_ASR,
 };
 #endif
 
@@ -211,6 +212,10 @@ public:
     {
         return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::DIRECT_ATB;
     }
+    [[nodiscard]] bool UseAscendCAsrDecodeAttention310P(void) const
+    {
+        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::ASCENDC_ASR;
+    }
     [[nodiscard]] bool UseDirectAtbSetupReuse310P(void) const
     {
         return _directAtbSetupReuse310P;
@@ -288,6 +293,11 @@ public:
     {
         _batchedDecodeAttentionRequests += requests;
         ++_batchedDecodeAttentionLaunches;
+    }
+    void RecordAscendCAsrDecodeAttention(uint32_t requests)
+    {
+        _ascendcAsrDecodeAttentionRequests += requests;
+        ++_ascendcAsrDecodeAttentionLaunches;
     }
     void RecordLegacyAttentionRequest(bool decode)
     {
@@ -473,6 +483,14 @@ public:
     [[nodiscard]] uint64_t BatchedDecodeAttentionLaunches(void) const
     {
         return _batchedDecodeAttentionLaunches;
+    }
+    [[nodiscard]] uint64_t AscendCAsrDecodeAttentionRequests(void) const
+    {
+        return _ascendcAsrDecodeAttentionRequests;
+    }
+    [[nodiscard]] uint64_t AscendCAsrDecodeAttentionLaunches(void) const
+    {
+        return _ascendcAsrDecodeAttentionLaunches;
     }
     [[nodiscard]] uint64_t LegacyAttentionRequests(void) const
     {
@@ -810,6 +828,8 @@ protected:
 #ifdef XLITE_ARCH_310P
     uint64_t _batchedDecodeAttentionRequests = 0;
     uint64_t _batchedDecodeAttentionLaunches = 0;
+    uint64_t _ascendcAsrDecodeAttentionRequests = 0;
+    uint64_t _ascendcAsrDecodeAttentionLaunches = 0;
     uint64_t _batchedPrefillAttentionRequests = 0;
     uint64_t _batchedPrefillAttentionLaunches = 0;
     uint64_t _prefillShapeForwardCalls = 0;

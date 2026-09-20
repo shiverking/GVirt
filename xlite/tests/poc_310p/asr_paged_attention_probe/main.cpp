@@ -205,8 +205,11 @@ void Run(const std::vector<int32_t> &lengths, uint32_t warmup, uint32_t iteratio
                      vCache.size() * sizeof(uint16_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy V cache");
     Check(aclrtMemcpy(tableDevice.ptr, blockTable.size() * sizeof(int32_t), blockTable.data(),
                      blockTable.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy table");
-    Check(aclrtMemcpy(lengthsDevice.ptr, lengths.size() * sizeof(int32_t), lengths.data(),
-                     lengths.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy lengths");
+    std::vector<int32_t> cachedLengths = lengths;
+    for (int32_t &length : cachedLengths) --length;
+    Check(aclrtMemcpy(lengthsDevice.ptr, cachedLengths.size() * sizeof(int32_t),
+                     cachedLengths.data(), cachedLengths.size() * sizeof(int32_t),
+                     ACL_MEMCPY_HOST_TO_DEVICE), "copy cached lengths");
     Check(aclrtMemcpy(outputDevice.ptr, guarded.size() * sizeof(uint16_t), guarded.data(),
                      guarded.size() * sizeof(uint16_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy output");
 

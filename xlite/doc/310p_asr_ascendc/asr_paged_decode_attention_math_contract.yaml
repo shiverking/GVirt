@@ -1,5 +1,5 @@
 kernel: asr_paged_decode_attention_fp16
-status: probe_paged_addressing_online_softmax
+status: production_runtime_candidate
 target:
   soc: Ascend310P3
   npu_arch: 2002
@@ -16,8 +16,11 @@ q_pre_scaled: true
 accumulation: fp32
 softmax: fp32_online
 addressing: direct_block_table
-runtime_eligible: false
-next_gate: low_level_mmad_qk_pv_and_partition_merge
+partition_tokens: 512
+max_partitions: 4
+gm_intermediate_scratch_bytes: 0
+runtime_eligible: true
+next_gate: runtime_route_and_full_model_token_acceptance
 acceptance:
   cosine_min: 0.999
   max_abs_max: 0.01

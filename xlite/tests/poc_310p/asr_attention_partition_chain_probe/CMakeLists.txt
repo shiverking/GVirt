@@ -22,9 +22,9 @@ endif()
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 
 ascendc_library(xlite_asr_attention_partition_state_kernel SHARED
-    asr_attention_partition_state_probe.cpp)
+    ../../../csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp)
 ascendc_compile_definitions(xlite_asr_attention_partition_state_kernel
-    PRIVATE CUSTOM_ASCEND310P)
+    PRIVATE CUSTOM_ASCEND310P XLITE_ASR_ATTENTION_PARTITION_PROBE=1)
 
 ascendc_library(xlite_asr_attention_partition_merge_chain_kernel SHARED
     ../asr_attention_partition_merge_probe/asr_attention_partition_merge_probe.cpp)

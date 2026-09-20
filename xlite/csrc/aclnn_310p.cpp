@@ -31,6 +31,7 @@
 #define XLITE_310P_HAS_PROMPT_FA_V2 0
 #endif
 #include "ascend.h"
+#include "aclrtlaunch_all.h"
 
 namespace {
 
@@ -224,6 +225,70 @@ static std::vector<uint32_t> GetRequestBlocks(const XRuntime &rt, uint32_t reque
         result.push_back(physicalBlock);
     }
     return result;
+}
+
+// The AscendC backend is intentionally limited to a pure single-token batch.
+// Dynamic Prefill continues through the validated ACLNN path. A mixed batch is
+// rejected rather than silently executing its Decode rows with another backend.
+static bool RunAscendCAsrDecodeAttention(
+    XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
+    XTensor &output, XTensor &cachedLens, XTensor &blockTables,
+    uint32_t maxNumBlock,
+    uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
+    uint32_t blockSize, uint32_t batch)
+{
+    uint32_t decodeRequests = 0;
+    for (uint32_t request = 0; request < batch; ++request) {
+        decodeRequests += rt._lensHost[request] == 1 ? 1 : 0;
+    }
+    if (decodeRequests == 0) {
+        return false;
+    }
+    if (decodeRequests != batch) {
+        throw std::runtime_error(
+            "ascendc_asr Decode Attention does not permit a mixed Decode/Prefill batch");
+    }
+    if (nHeads != 16 || nKvHeads != 8 || headDim != 128 ||
+        blockSize != 128 || maxNumBlock == 0 || maxNumBlock > 16) {
+        throw std::runtime_error(
+            "ascendc_asr Decode Attention requires Q16/KV8, head_dim=128, "
+            "block_size=128 and at most 16 logical blocks");
+    }
+    constexpr size_t kQkvElements = 4096;
+    constexpr size_t kOutputElements = 2048;
+    if (cachedLens.dtype != INT32 || blockTables.dtype != INT32 ||
+        qkv.numel < static_cast<size_t>(batch) * kQkvElements ||
+        output.numel < static_cast<size_t>(batch) * kOutputElements ||
+        cachedLens.numel < batch ||
+        blockTables.numel < static_cast<size_t>(batch) * maxNumBlock ||
+        cachedLens.ptr == nullptr || blockTables.ptr == nullptr) {
+        throw std::runtime_error(
+            "ascendc_asr Decode Attention tensors do not satisfy the fixed ASR contract");
+    }
+    for (uint32_t request = 0; request < batch; ++request) {
+        const uint32_t totalLength = rt._cachedLensHost[request] + 1;
+        if (totalLength == 0 || totalLength > XLITE_310P_MAX_SEQ_LEN) {
+            throw std::runtime_error(
+                "ascendc_asr Decode Attention KV length is outside [1, 2048]");
+        }
+        const uint32_t requiredBlocks =
+            (totalLength + blockSize - 1) / blockSize;
+        const size_t rowOffset = static_cast<size_t>(request) * maxNumBlock;
+        for (uint32_t logicalBlock = 0; logicalBlock < requiredBlocks;
+             ++logicalBlock) {
+            if (rt._blockTablesHost[rowOffset + logicalBlock] >=
+                kCache.shape[0]) {
+                throw std::runtime_error(
+                    "ascendc_asr Decode Attention block table points outside KV cache");
+            }
+        }
+    }
+    const uint32_t blocks = std::min(rt.aicNum, batch * nHeads);
+    ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_fp16)(
+        blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, blockTables.ptr,
+        cachedLens.ptr, output.ptr, batch, maxNumBlock);
+    rt.RecordAscendCAsrDecodeAttention(batch);
+    return true;
 }
 
 static XTensor &ExtractQuery(XRuntime &rt, XTensor &qkv, size_t rowOffset, uint32_t tokens,
@@ -682,6 +747,12 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
     if (rt.UseBatchedDecodeAttention310P() &&
         RunBatchedDecodeAttention(rt, qkv, kCache, vCache, output, maxNumBlock,
                                   nHeads, nKvHeads, headDim, blockSize, batch)) {
+        return;
+    }
+    if (rt.UseAscendCAsrDecodeAttention310P() &&
+        RunAscendCAsrDecodeAttention(
+            rt, qkv, kCache, vCache, output, cachedLens, blockTables, maxNumBlock,
+            nHeads, nKvHeads, headDim, blockSize, batch)) {
         return;
     }
 

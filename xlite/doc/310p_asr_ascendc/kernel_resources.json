@@ -37,17 +37,18 @@
       "arithmetic": "fp32_rmsnorm_fp16_mrope_and_cache"
     },
     "asr_paged_decode_attention_fp16": {
-      "status": "probe_paged_addressing_online_softmax",
-      "ub_bytes": 5184,
-      "l1_bytes": 0,
-      "l0a_bytes": 0,
-      "l0b_bytes": 0,
-      "l0c_bytes": 0,
-      "event_pairs": 6,
+      "status": "production_runtime_candidate",
+      "ub_bytes": 18240,
+      "l1_bytes": 12288,
+      "l0a_bytes": 4096,
+      "l0b_bytes": 4096,
+      "l0c_bytes": 8192,
+      "event_pairs": 11,
       "shape": {"max_batch": 20, "q_heads": 16, "kv_heads": 8, "head_dim": 128, "max_kv": 2048},
-      "arithmetic": "fp32_vector_dot_online_softmax_probe",
-      "runtime_eligible": false,
-      "event_protocol": ["MTE2_V", "V_MTE2", "V_S", "S_V", "V_MTE3", "MTE3_V"]
+      "arithmetic": "low_level_mmad_fp32_partition_softmax_and_merge",
+      "runtime_eligible": true,
+      "gm_intermediate_scratch_bytes": 0,
+      "event_protocol": ["V_MTE3", "MTE3_MTE2", "MTE3_MTE1", "MTE2_MTE1", "MTE1_M", "M_MTE1", "M_V", "V_M", "V_S", "S_V", "MTE3_V"]
     },
     "asr_attention_single_partition_probe": {
       "status": "unified_core_single_partition_probe",
@@ -87,19 +88,6 @@
       "event_pairs": {"state": 11, "merge": 6},
       "shape": {"max_batch": 20, "q_heads": 16, "partitions": 4, "head_dim": 128, "max_kv": 2048},
       "scratch_bytes_batch20": 737280,
-      "runtime_eligible": false
-    },
-    "asr_attention_fused_partition_probe": {
-      "status": "scratch_free_fused_partition_probe",
-      "ub_bytes": 18240,
-      "l1_bytes": 12288,
-      "l0a_bytes": 4096,
-      "l0b_bytes": 4096,
-      "l0c_bytes": 8192,
-      "event_pairs": 11,
-      "shape": {"max_batch": 20, "q_heads": 16, "max_partitions": 4, "head_dim": 128, "max_kv": 2048},
-      "gm_intermediate_scratch_bytes": 0,
-      "kernel_launches_per_attention_layer": 1,
       "runtime_eligible": false
     },
     "asr_add_rmsnorm_fp16": {
