@@ -9,6 +9,17 @@ case_filter=${2:-all}
 jobs=${XLITE_BUILD_JOBS:-8}
 warmup=${XLITE_ASR_LM_HEAD_WARMUP:-1}
 iterations=${XLITE_ASR_LM_HEAD_ITERATIONS:-3}
+variant_filter=${3:-baseline}
+repeats=${4:-1}
+if [[ ! ${repeats} =~ ^[1-9][0-9]*$ ]]; then
+    echo "repeats must be a positive integer" >&2
+    exit 2
+fi
+case "${variant_filter}" in
+    baseline|cached) variants=("${variant_filter}");;
+    compare) variants=(baseline cached);;
+    *) echo "variant must be baseline, cached or compare" >&2; exit 2;;
+esac
 
 echo "[ ASR LM HEAD ] source=${source_dir}"
 echo "[ ASR LM HEAD ] build=${build_dir}"
@@ -24,16 +35,27 @@ export LD_LIBRARY_PATH="${build_dir}/lib:${build_dir}:${LD_LIBRARY_PATH:-}"
 failures=()
 executed=0
 cases=("m1:1" "m8:8" "m20:20")
+if [[ ${case_filter} == full ]]; then
+    cases=()
+    for ((m=1; m<=20; m++)); do cases+=("m${m}:${m}"); done
+fi
 for spec in "${cases[@]}"; do
     IFS=: read -r name batch <<<"${spec}"
-    if [[ "${case_filter}" != "all" && "${case_filter}" != "${name}" ]]; then
+    if [[ "${case_filter}" != "all" && "${case_filter}" != full && "${case_filter}" != "${name}" ]]; then
         continue
     fi
+    for ((run=1; run<=repeats; run++)); do
+    # Alternate order across independent process pairs to limit order bias.
+    run_variants=("${variants[@]}")
+    if [[ ${variant_filter} == compare && $((run % 2)) == 0 ]]; then
+        run_variants=(cached baseline)
+    fi
+    for variant in "${run_variants[@]}"; do
     executed=$((executed + 1))
-    log="${build_dir}/${name}.log"
-    echo "[ RUN      ] lm-head-${name} M=${batch} N=151936 K=2048"
+    log="${build_dir}/${name}-${variant}-r${run}.log"
+    echo "[ RUN      ] lm-head-${name} variant=${variant} run=${run} M=${batch} N=151936 K=2048"
     "${build_dir}/xlite_asr_lm_head_probe_runner" \
-        "${batch}" "${warmup}" "${iterations}" >"${log}" 2>&1
+        "${batch}" "${warmup}" "${iterations}" "${variant}" >"${log}" 2>&1
     status=$?
     if [[ ${status} -eq 0 ]]; then
         echo "[       OK ] lm-head-${name}"
@@ -42,6 +64,8 @@ for spec in "${cases[@]}"; do
         failures+=("${name}:${status}:${log}")
         echo "[  FAILED  ] lm-head-${name} (recorded; continuing)"
     fi
+    done
+    done
 done
 
 echo
@@ -62,4 +86,8 @@ if [[ ${#failures[@]} -ne 0 ]]; then
         cat "${log}"
     done
     exit 1
+fi
+if [[ ${variant_filter} == compare ]]; then
+    python3 "${script_dir}/summarize_asr_lm_head.py" \
+        "${build_dir}" "${case_filter}" "${repeats}" || exit $?
 fi

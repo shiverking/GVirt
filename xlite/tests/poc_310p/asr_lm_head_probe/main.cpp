@@ -11,6 +11,7 @@
 
 #include "acl/acl.h"
 #include "aclrtlaunch_asr_m200_lm_head_fp16.h"
+#include "aclrtlaunch_asr_m200_lm_head_cached_fp16.h"
 
 namespace {
 
@@ -59,16 +60,20 @@ float HalfValue(uint16_t bits)
     return static_cast<float>(value);
 }
 
-float InputValue(uint32_t row)
+float InputValue(uint32_t row, uint32_t k)
 {
-    static constexpr float values[] = {1.0F, 0.5F, -0.25F, 0.125F};
-    return values[row & 3U];
+    return static_cast<float>(static_cast<int>((k * 13 + row * 7) % 17) - 8) / 8.0F;
 }
 
 float WeightValue(uint32_t row)
 {
-    static constexpr float values[] = {0.25F, 0.5F, 1.0F, -0.5F};
-    return values[row & 3U];
+    return static_cast<float>(static_cast<int>((row * 37) % 251) - 125) / 256.0F;
+}
+
+float WeightKValue(uint32_t k)
+{
+    static constexpr float values[] = {1.0F, -1.0F, 0.5F, -0.5F};
+    return values[(k / 128 + k / 16 + k) % 4];
 }
 
 void UploadWeight(void *device)
@@ -78,9 +83,10 @@ void UploadWeight(void *device)
     for (uint32_t first = 0; first < kVocabulary; first += kWeightChunkRows) {
         const uint32_t rows = std::min(kWeightChunkRows, kVocabulary - first);
         for (uint32_t row = 0; row < rows; ++row) {
-            const uint16_t value = HalfBits(WeightValue(first + row));
-            std::fill_n(chunk.begin() + static_cast<size_t>(row) * kHidden,
-                        kHidden, value);
+            for (uint32_t k = 0; k < kHidden; ++k) {
+                chunk[static_cast<size_t>(row) * kHidden + k] =
+                    HalfBits(WeightValue(first + row) * WeightKValue(k));
+            }
         }
         const size_t bytes = static_cast<size_t>(rows) * kHidden * sizeof(uint16_t);
         auto *destination = static_cast<uint8_t *>(device) +
@@ -90,15 +96,18 @@ void UploadWeight(void *device)
     }
 }
 
-void Run(uint32_t batch, uint32_t warmup, uint32_t iterations)
+void Run(uint32_t batch, uint32_t warmup, uint32_t iterations, bool cached)
 {
     if (batch == 0 || batch > 20 || iterations == 0) {
         throw std::invalid_argument("batch must be 1..20 and iterations nonzero");
     }
     std::vector<uint16_t> input(static_cast<size_t>(batch) * kHidden);
+    std::vector<float> rowDots(batch, 0.0F);
     for (uint32_t row = 0; row < batch; ++row) {
-        std::fill_n(input.begin() + static_cast<size_t>(row) * kHidden,
-                    kHidden, HalfBits(InputValue(row)));
+        for (uint32_t k = 0; k < kHidden; ++k) {
+            input[static_cast<size_t>(row) * kHidden + k] = HalfBits(InputValue(row, k));
+            rowDots[row] += InputValue(row, k) * WeightKValue(k);
+        }
     }
 
     const size_t outputElements = static_cast<size_t>(batch) * kVocabulary;
@@ -122,8 +131,13 @@ void Run(uint32_t batch, uint32_t warmup, uint32_t iterations)
     Check(aclrtCreateStream(&stream), "aclrtCreateStream");
     constexpr uint32_t blockDim = 8;
     const auto launch = [&]() {
-        ACLRT_LAUNCH_KERNEL(asr_m200_lm_head_fp16)
-        (blockDim, stream, inputDevice.ptr, weightDevice.ptr, logits, batch);
+        if (cached) {
+            ACLRT_LAUNCH_KERNEL(asr_m200_lm_head_cached_fp16)
+            (blockDim, stream, inputDevice.ptr, weightDevice.ptr, logits, batch);
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_m200_lm_head_fp16)
+            (blockDim, stream, inputDevice.ptr, weightDevice.ptr, logits, batch);
+        }
     };
     for (uint32_t i = 0; i < warmup; ++i) {
         launch();
@@ -150,15 +164,21 @@ void Run(uint32_t batch, uint32_t warmup, uint32_t iterations)
     size_t sentinels = 0;
     size_t nonfinite = 0;
     size_t reported = 0;
+    double dot = 0.0, actualSquare = 0.0, expectedSquare = 0.0;
+    float maxAbs = 0.0F;
     for (uint32_t row = 0; row < batch; ++row) {
-        const float inputValue = InputValue(row);
         for (uint32_t col = 0; col < kVocabulary; ++col) {
             const uint16_t actual = guardedOutput[
                 kGuardElements + static_cast<size_t>(row) * kVocabulary + col];
-            const uint16_t expected = HalfBits(inputValue * WeightValue(col) * kHidden);
+            const uint16_t expected = HalfBits(rowDots[row] * WeightValue(col));
             sentinels += actual == kHalfNan;
             nonfinite += !std::isfinite(HalfValue(actual));
-            if (actual != expected) {
+            const float av = HalfValue(actual), ev = HalfValue(expected);
+            maxAbs = std::max(maxAbs, std::abs(av - ev));
+            dot += static_cast<double>(av) * ev;
+            actualSquare += static_cast<double>(av) * av;
+            expectedSquare += static_cast<double>(ev) * ev;
+            if (!std::isfinite(av) || std::abs(av - ev) > 0.01F + 0.01F * std::abs(ev)) {
                 ++mismatches;
                 if (reported < 12) {
                     std::cerr << "mismatch[" << row << ',' << col << "] actual="
@@ -171,11 +191,15 @@ void Run(uint32_t batch, uint32_t warmup, uint32_t iterations)
             }
         }
     }
-    if (guardErrors != 0 || mismatches != 0 || sentinels != 0 || nonfinite != 0) {
+    const double cosine = dot / std::sqrt(actualSquare * expectedSquare);
+    if (guardErrors != 0 || mismatches != 0 || sentinels != 0 || nonfinite != 0 ||
+        !std::isfinite(cosine) || cosine < 0.999) {
         throw std::runtime_error(
             "full-logit contract failed: mismatches=" + std::to_string(mismatches) +
             ", sentinels=" + std::to_string(sentinels) +
             ", nonfinite=" + std::to_string(nonfinite) +
+            ", cosine=" + std::to_string(cosine) +
+            ", max_abs=" + std::to_string(maxAbs) +
             ", guard_errors=" + std::to_string(guardErrors));
     }
 
@@ -188,7 +212,9 @@ void Run(uint32_t batch, uint32_t warmup, uint32_t iterations)
               << "ASR LM Head PASS: M=" << batch
               << ", N=" << kVocabulary << ", K=" << kHidden
               << ", cores=" << blockDim << ", launches_per_iteration=1"
+              << ", variant=" << (cached ? "cached" : "baseline")
               << ", average_ms=" << averageMs << ", tflops=" << tflops
+              << ", cosine=" << cosine << ", max_abs=" << maxAbs
               << ", guard_errors=" << guardErrors << std::endl;
 }
 
@@ -197,8 +223,12 @@ void Run(uint32_t batch, uint32_t warmup, uint32_t iterations)
 int main(int argc, char **argv)
 {
     try {
-        if (argc != 4) {
-            throw std::invalid_argument("usage: runner BATCH WARMUP ITERATIONS");
+        if (argc != 4 && argc != 5) {
+            throw std::invalid_argument("usage: runner BATCH WARMUP ITERATIONS [baseline|cached]");
+        }
+        const std::string variant = argc == 5 ? argv[4] : "baseline";
+        if (variant != "baseline" && variant != "cached") {
+            throw std::invalid_argument("unknown LM Head variant: " + variant);
         }
         // Device 0 is the process-local logical device selected by the
         // deployment.  This probe intentionally does not rewrite visibility
@@ -207,7 +237,7 @@ int main(int argc, char **argv)
         Check(aclrtSetDevice(0), "aclrtSetDevice(0)");
         Run(static_cast<uint32_t>(std::stoul(argv[1])),
             static_cast<uint32_t>(std::stoul(argv[2])),
-            static_cast<uint32_t>(std::stoul(argv[3])));
+            static_cast<uint32_t>(std::stoul(argv[3])), variant == "cached");
         Check(aclrtResetDevice(0), "aclrtResetDevice(0)");
         Check(aclFinalize(), "aclFinalize");
         return 0;

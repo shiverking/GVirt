@@ -131,6 +131,19 @@
       "shape": {"max_batch": 20, "hidden": 2048, "vocabulary": 151936},
       "tile": {"m": 32, "n": 128, "k": 128},
       "arithmetic": "fp32_accumulate_fp16_full_logits",
+      "cached_input_variant": {
+        "status": "experimental_pending_device_measurement",
+        "entry": "asr_m200_lm_head_cached_fp16",
+        "l1_bytes": 163840,
+        "l1_activation_bytes": 131072,
+        "l1_weight_bytes": 32768,
+        "ub_bytes": 24576,
+        "l0a_bytes": 8192,
+        "l0b_bytes": 32768,
+        "l0c_bytes": 16384,
+        "event_pairs": 8,
+        "event_protocol": ["MTE1_MTE2", "MTE2_MTE1", "MTE1_M", "M_MTE1", "M_V", "V_M", "V_MTE3", "MTE3_V"]
+      },
       "runtime_eligible": false
     }
   }

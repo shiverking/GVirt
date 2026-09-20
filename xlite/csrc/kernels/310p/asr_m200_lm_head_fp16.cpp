@@ -55,6 +55,7 @@ __aicore__ inline void L1ToL0B(const LocalTensor<half> &dst,
     LoadData(dst, src, params);
 }
 
+template<bool CacheInput>
 class AsrLmHeadKernel {
 public:
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR weight, GM_ADDR logits,
@@ -71,7 +72,8 @@ public:
         l1A_.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         l1A_.address_.bufferAddr = 0;
         l1B_.address_.logicPos = static_cast<uint8_t>(TPosition::B1);
-        l1B_.address_.bufferAddr = kTileM * kTileK * sizeof(half);
+        l1B_.address_.bufferAddr = kTileM *
+            (CacheInput ? kHidden : kTileK) * sizeof(half);
         l0A_.address_.logicPos = static_cast<uint8_t>(TPosition::A2);
         l0A_.address_.bufferAddr = 0;
         l0B_.address_.logicPos = static_cast<uint8_t>(TPosition::B2);
@@ -106,6 +108,16 @@ public:
         constexpr uint32_t nTiles = kVocabulary / kTileN;
         const uint32_t core = GetBlockIdx();
         const uint32_t cores = GetBlockNum();
+        if (CacheInput) {
+            // Preserve the verified per-K-tile NZ layout, each in a disjoint
+            // 8 KiB slot. All slots stay read-only for the whole launch.
+            for (uint32_t kt = 0; kt < kHidden / kTileK; ++kt) {
+                GmToL1Nz(l1A_[kt * kTileM * kTileK], input_[kt * kTileK],
+                         batch_, kTileK, kHidden, kTileM);
+            }
+            SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
+            WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
+        }
         for (uint32_t nTile = core; nTile < nTiles; nTile += cores) {
             ProcessTile(nTile);
         }
@@ -121,14 +133,16 @@ private:
         for (uint32_t kTile = 0; kTile < kTiles; ++kTile) {
             const uint32_t kOffset = kTile * kTileK;
             WaitFlag<HardEvent::MTE1_MTE2>(l1Free_);
-            GmToL1Nz(l1A_, input_[kOffset], batch_, kTileK,
-                     kHidden, kTileM);
+            if (!CacheInput) {
+                GmToL1Nz(l1A_, input_[kOffset], batch_, kTileK,
+                         kHidden, kTileM);
+            }
             GmToL1Nz(l1B_, weight_[nOffset * kHidden + kOffset],
                      kTileN, kTileK, kHidden, kTileN);
             SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
             WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
 
-            L1ToL0A(l0A_, l1A_);
+            L1ToL0A(l0A_, l1A_[CacheInput ? kTile * kTileM * kTileK : 0]);
             L1ToL0B(l0B_, l1B_);
             SetFlag<HardEvent::MTE1_MTE2>(l1Free_);
             SetFlag<HardEvent::MTE1_M>(cubeReady_);
@@ -206,7 +220,24 @@ extern "C" __global__ __aicore__ void asr_m200_lm_head_fp16(
     if (batch == 0 || batch > kMaxBatch) {
         return;
     }
-    AsrLmHeadKernel kernel;
+    AsrLmHeadKernel<false> kernel;
+    kernel.Init(input, weight, logits, batch);
+    kernel.Process();
+}
+
+// Experimental A/B entry: identical math/output schedule, persistent L1 A.
+// L1=163840 bytes; UB/L0 and event channel counts equal the baseline.
+extern "C" __global__ __aicore__ void asr_m200_lm_head_cached_fp16(
+    GM_ADDR input, GM_ADDR weight, GM_ADDR logits, uint32_t batch)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_m200_lm_head_cached_fp16 requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch) {
+        return;
+    }
+    AsrLmHeadKernel<true> kernel;
     kernel.Init(input, weight, logits, batch);
     kernel.Process();
 }
