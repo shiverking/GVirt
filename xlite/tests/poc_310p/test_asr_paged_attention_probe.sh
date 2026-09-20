@@ -6,9 +6,13 @@ source_dir="${script_dir}/asr_paged_attention_probe"
 build_dir=${XLITE_ASR_PAGED_ATTN_BUILD_DIR:-/tmp/xlite_asr_paged_attention_probe_release}
 cann_path=${1:-${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/cann-9.1.0-beta.1}}
 case_filter=${2:-all}
+warmup=${3:-${XLITE_ASR_PAGED_ATTN_WARMUP:-1}}
+iterations=${4:-${XLITE_ASR_PAGED_ATTN_ITERATIONS:-3}}
 jobs=${XLITE_BUILD_JOBS:-8}
-warmup=${XLITE_ASR_PAGED_ATTN_WARMUP:-1}
-iterations=${XLITE_ASR_PAGED_ATTN_ITERATIONS:-3}
+if ! [[ "${warmup}" =~ ^[0-9]+$ && "${iterations}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "usage: $0 [CANN_PATH] [CASE|all] [WARMUP>=0] [ITERATIONS>=1]" >&2
+    exit 2
+fi
 
 echo "[ ASR PAGED ATTENTION PROBE ] source=${source_dir}"
 echo "[ ASR PAGED ATTENTION PROBE ] build=${build_dir}"
