@@ -77,6 +77,13 @@ def main() -> int:
     model.xlite_rt.set_decode_attention_backend(args.backend)
 
     _clear_caches(model)
+    # Cache zeroing and bundle tensor uploads run on the torch_npu stream,
+    # while Xlite owns a separate ACL stream.  This diagnostic process has no
+    # preceding model call to establish the normal stream handoff, so close
+    # the initialization boundary explicitly before the first Xlite Prefill.
+    # This synchronization is diagnostic-only and is outside measured serving
+    # or Decode paths.
+    torch.npu.synchronize()
     prompt_tokens = int(inputs_embeds.size(1))
     prefill_logits, prefill_hidden = model.forward_xlite_with_inputs_embeds(
         inputs_embeds, 0, return_hidden=True,
