@@ -32,12 +32,18 @@ def main():
             for run in range(1, args.repeats + 1):
                 path = args.build_dir / f"m{batch}-{variant}-r{run}.log"
                 match = re.search(
-                    r"ASR SiLU-Mul PASS:.*average_ms=([0-9.]+)",
+                    r"ASR SiLU-Mul PASS:.*iterations=([0-9]+).*average_ms=([0-9.]+)",
                     path.read_text(),
                 )
                 if not match:
                     raise RuntimeError(f"missing passing measurement: {path}")
-                samples.append(float(match.group(1)))
+                iterations = int(match.group(1))
+                average_ms = float(match.group(2))
+                if average_ms * iterations < 20.0:
+                    raise RuntimeError(
+                        f"timed window below 20 ms ({average_ms * iterations:.3f} ms): {path}"
+                    )
+                samples.append(average_ms)
             mean = statistics.mean(samples)
             stdev = statistics.stdev(samples) if len(samples) > 1 else None
             measurements[variant] = {
@@ -83,6 +89,7 @@ def main():
         "microprobe_performance_gate": measured_gate,
         "runtime_promotion": False,
         "note": "Synthetic microprobe only; whole-model gates remain.",
+        "minimum_timed_window_ms": 20.0,
     }
     path = args.build_dir / "silu_mul_ab_summary.json"
     path.write_text(json.dumps(report, indent=2) + "\n")

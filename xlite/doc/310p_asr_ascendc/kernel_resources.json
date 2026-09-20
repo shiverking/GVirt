@@ -150,7 +150,7 @@
       "arithmetic": "fp16_vector"
     },
     "asr_silu_mul_row_fp16": {
-      "status": "experimental_pending_device_measurement",
+      "status": "experimental_retest_required_after_short_window_noise",
       "ub_bytes": 36864,
       "l1_bytes": 0,
       "l0a_bytes": 0,
@@ -160,7 +160,8 @@
       "shape": {"max_tokens": 20, "intermediate": 6144, "tile": 6144},
       "arithmetic": "fp16_vector",
       "schedule": "one_full_row_per_pipeline_iteration",
-      "runtime_eligible": false
+      "runtime_eligible": false,
+      "measurement_requirement": "at_least_20ms_per_synchronized_sample"
     },
     "asr_m200_lm_head_fp16": {
       "status": "experimental_microprobe",

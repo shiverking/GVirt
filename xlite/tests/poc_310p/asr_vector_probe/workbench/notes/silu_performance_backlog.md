@@ -18,3 +18,9 @@ cosine >=0.999, max absolute error <=0.04 and prefix/suffix guards.  Promotion
 requires CV <=5%, at least one >=5% latency reduction and no regression beyond
 max(2%, three sigma).  Passing remains a microprobe result, not runtime
 promotion.
+
+The first 48-run correctness set passed, but its 20-launch timing window was
+only about 0.4--0.9 ms.  Observed CV ranged from 6.9% to 107%, so the apparent
+-109.91% to +53.75% changes are invalid as performance evidence.  The gate now
+uses 50 warmups, 2000 timed launches and rejects any sample whose synchronized
+window is below 20 ms.  No kernel decision was made from the noisy run.

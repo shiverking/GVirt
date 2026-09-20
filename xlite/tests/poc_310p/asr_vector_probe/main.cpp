@@ -451,6 +451,7 @@ void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations,
     std::cout << std::fixed << std::setprecision(6)
               << "ASR SiLU-Mul PASS: tokens=" << tokens << ", cores=" << cores
               << ", variant=" << (wholeRow ? "row" : "baseline")
+              << ", iterations=" << iterations
               << ", average_ms=" << averageMs << ", cosine=" << metrics.cosine
               << ", max_abs=" << metrics.maxAbs
               << ", guards_intact=" << guardsIntact << std::endl;
