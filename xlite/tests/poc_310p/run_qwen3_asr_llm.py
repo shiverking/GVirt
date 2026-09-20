@@ -69,6 +69,139 @@ def _device_name() -> str:
     return str(get_name(0)) if get_name is not None else "unknown"
 
 
+def _error_metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict:
+    reference_fp32 = reference.float().flatten()
+    candidate_fp32 = candidate.float().flatten()
+    difference = (reference_fp32 - candidate_fp32).abs()
+    max_abs, max_index = difference.max(dim=0)
+    return {
+        "cosine": _cosine(reference_fp32, candidate_fp32),
+        "max_abs": float(max_abs.cpu()),
+        "max_abs_index": int(max_index.cpu()),
+        "bitwise_equal": bool(torch.equal(reference, candidate)),
+    }
+
+
+def _top2(logits: torch.Tensor) -> tuple[list[int], list[float]]:
+    values, indices = torch.topk(logits.float().flatten(), k=2)
+    return ([int(value) for value in indices.cpu().tolist()],
+            [float(value) for value in values.cpu().tolist()])
+
+
+def _run_teacher_forced_xlite(
+    model: Llama,
+    backend: str,
+    inputs_embeds: torch.Tensor,
+    prompt_positions: torch.Tensor,
+    all_positions: torch.Tensor,
+    reference_tokens: list[int],
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Run Decode with identical reference tokens for backend comparison."""
+    model.xlite_rt.set_decode_attention_backend(backend)
+    _clear_caches(model)
+    model.forward_xlite_with_inputs_embeds(
+        inputs_embeds, 0, positions=prompt_positions)
+    torch.npu.synchronize()
+    snapshots = []
+    position = inputs_embeds.size(1)
+    for token in reference_tokens:
+        token_tensor = torch.tensor([[token]], dtype=torch.int64, device="npu")
+        token_embed = model.embed_tokens(token_tensor).to(torch.float16)
+        logits, hidden = model.forward_xlite_with_inputs_embeds(
+            token_embed, position, return_hidden=True,
+            positions=all_positions[..., position:position + 1])
+        torch.npu.synchronize()
+        # Xlite TensorPool storage is reused by the next forward.  Clone every
+        # diagnostic output so later comparisons observe the original step.
+        snapshots.append((logits.detach().clone(), hidden.detach().clone()))
+        position += 1
+    return snapshots
+
+
+def _build_decode_diagnostics(
+    model: Llama,
+    selected_backend: str,
+    inputs_embeds: torch.Tensor,
+    prompt_positions: torch.Tensor,
+    all_positions: torch.Tensor,
+    reference_tokens: list[int],
+) -> dict:
+    """Compare legacy and AscendC Attention under teacher forcing.
+
+    Runtime counters used by normal acceptance must be captured before this
+    function because the oracle run intentionally exercises legacy Attention.
+    """
+    legacy = _run_teacher_forced_xlite(
+        model, "legacy", inputs_embeds, prompt_positions,
+        all_positions, reference_tokens)
+    ascendc = _run_teacher_forced_xlite(
+        model, "ascendc_asr", inputs_embeds, prompt_positions,
+        all_positions, reference_tokens)
+    ascendc_repeat = _run_teacher_forced_xlite(
+        model, "ascendc_asr", inputs_embeds, prompt_positions,
+        all_positions, reference_tokens)
+
+    steps = []
+    first_argmax_divergence = None
+    all_repeat_bitwise_equal = True
+    prompt_tokens = int(inputs_embeds.size(1))
+    for index, ((legacy_logits, legacy_hidden),
+                (ascendc_logits, ascendc_hidden),
+                (repeat_logits, repeat_hidden)) in enumerate(
+                    zip(legacy, ascendc, ascendc_repeat)):
+        legacy_ids, legacy_values = _top2(legacy_logits)
+        ascendc_ids, ascendc_values = _top2(ascendc_logits)
+        repeat_equal = bool(
+            torch.equal(ascendc_logits, repeat_logits) and
+            torch.equal(ascendc_hidden, repeat_hidden)
+        )
+        all_repeat_bitwise_equal = all_repeat_bitwise_equal and repeat_equal
+        argmax_equal = legacy_ids[0] == ascendc_ids[0]
+        if not argmax_equal and first_argmax_divergence is None:
+            # index 0 is the forward consuming reference token 0 and predicts
+            # generated token 1.  Token 0 itself comes from Prefill logits.
+            first_argmax_divergence = index + 1
+        legacy_top1_in_ascendc = float(
+            ascendc_logits.float().flatten()[legacy_ids[0]].cpu())
+        steps.append({
+            "generated_token_index_zero_based": index + 1,
+            "generated_token_ordinal_one_based": index + 2,
+            "kv_length": prompt_tokens + index + 1,
+            "input_reference_token": int(reference_tokens[index]),
+            "expected_next_token": (
+                int(reference_tokens[index + 1])
+                if index + 1 < len(reference_tokens) else None
+            ),
+            "legacy_top2_ids": legacy_ids,
+            "legacy_top2_logits": legacy_values,
+            "legacy_top1_margin": legacy_values[0] - legacy_values[1],
+            "ascendc_top2_ids": ascendc_ids,
+            "ascendc_top2_logits": ascendc_values,
+            "ascendc_logit_at_legacy_top1": legacy_top1_in_ascendc,
+            "argmax_equal": argmax_equal,
+            "logits": _error_metrics(legacy_logits, ascendc_logits),
+            "hidden": _error_metrics(legacy_hidden, ascendc_hidden),
+            "ascendc_repeat_bitwise_equal": repeat_equal,
+        })
+
+    model.xlite_rt.set_decode_attention_backend(selected_backend)
+    _clear_caches(model)
+    return {
+        "mode": "teacher_forced_reference_tokens",
+        "oracle_backend": "legacy",
+        "candidate_backend": "ascendc_asr",
+        "first_argmax_divergence_generated_index_zero_based": (
+            first_argmax_divergence
+        ),
+        "first_argmax_divergence_generated_ordinal_one_based": (
+            first_argmax_divergence + 1
+            if first_argmax_divergence is not None else None
+        ),
+        "ascendc_repeat_bitwise_equal": all_repeat_bitwise_equal,
+        "steps": steps,
+    }
+
+
 def _load_tensor_file(path: Path) -> torch.Tensor:
     if path.suffix == ".npy":
         import numpy as np
@@ -108,6 +241,11 @@ def main() -> int:
         choices=("ascendc_asr", "direct_atb", "native_atb", "batched_aclnn", "legacy"),
         default="legacy",
         help="310P Decode Attention backend; Prefill remains on its validated path",
+    )
+    parser.add_argument(
+        "--decode-diagnostics", action="store_true",
+        help=("teacher-force reference tokens through legacy and ascendc_asr "
+              "Attention and report per-step hidden/logits drift"),
     )
     parser.add_argument("--allow-non-310p", action="store_true")
     parser.add_argument("--report", type=Path, default=Path("poc_310p_report.json"))
@@ -304,6 +442,7 @@ def main() -> int:
     final_memory = int(torch.npu.memory_allocated())
 
     runtime_stats = dict(model.xlite_rt.get_stats())
+    peak_memory_bytes = int(torch.npu.max_memory_allocated())
     backend_acceptance = {}
     if args.matmul_backend == "ascendc_asr":
         backend_acceptance = {
@@ -338,6 +477,14 @@ def main() -> int:
             ),
         })
 
+    # Keep the production-path counters above uncontaminated.  Diagnostics
+    # deliberately run both legacy and AscendC backends after the snapshot.
+    decode_diagnostics = None
+    if args.decode_diagnostics:
+        decode_diagnostics = _build_decode_diagnostics(
+            model, args.decode_attention_backend, inputs_embeds,
+            prompt_positions, all_positions, reference_generated)
+
     report = {
         "device": device_name,
         "dtype": "float16",
@@ -364,10 +511,11 @@ def main() -> int:
         "xlite_prefill_ms": xlite_prefill_ms,
         "decode_ms": decode_ms,
         "mean_decode_ms": sum(decode_ms) / len(decode_ms),
-        "peak_memory_bytes": int(torch.npu.max_memory_allocated()),
+        "peak_memory_bytes": peak_memory_bytes,
         "stability_iterations": args.stability_iters,
         "memory_growth_bytes": final_memory - initial_memory,
         "xlite_runtime_stats": runtime_stats,
+        "decode_diagnostics": decode_diagnostics,
         "acceptance": {
             "hidden_cosine_gte_0_999": hidden_cosine >= 0.999,
             "logits_cosine_gte_0_999": logits_cosine >= 0.999,

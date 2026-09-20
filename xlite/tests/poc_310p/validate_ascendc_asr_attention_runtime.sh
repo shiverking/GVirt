@@ -25,6 +25,7 @@ python3 tests/kernels/attention.py --ascendc-decode-only \
 echo "[       OK ] runtime-ascendc-decode-attention"
 
 echo "[ RUN      ] full28-synthetic129"
+set +e
 python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --checkpoint "${checkpoint}" \
     --input-mode synthetic \
@@ -34,8 +35,18 @@ python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --stability-iters 1 \
     --matmul-backend ascendc_asr \
     --decode-attention-backend ascendc_asr \
+    --decode-diagnostics \
     --report "${report_dir}/full28-synthetic129.json" \
     2>&1 | tee "${report_dir}/full28-synthetic129.log"
+full_model_status=${PIPESTATUS[0]}
+set -e
+python3 tests/poc_310p/summarize_decode_diagnostics.py \
+    "${report_dir}/full28-synthetic129.json" \
+    | tee "${report_dir}/decode-diagnostics-summary.log"
+if [[ ${full_model_status} -ne 0 ]]; then
+    echo "[  FAILED  ] full28-synthetic129 (diagnostics preserved)"
+    exit "${full_model_status}"
+fi
 echo "[       OK ] full28-synthetic129"
 
 echo
