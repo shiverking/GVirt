@@ -88,6 +88,10 @@ if [[ ${#failures[@]} -ne 0 ]]; then
     exit 1
 fi
 if [[ ${variant_filter} == compare ]]; then
+    gate_args=()
+    if [[ ${case_filter} == full ]]; then
+        gate_args+=(--require-gate)
+    fi
     python3 "${script_dir}/summarize_asr_lm_head.py" \
-        "${build_dir}" "${case_filter}" "${repeats}" || exit $?
+        "${build_dir}" "${case_filter}" "${repeats}" "${gate_args[@]}" || exit $?
 fi

@@ -1,10 +1,11 @@
 # LM Head performance backlog
 
-## 2026-09-20 — LMHEAD-L1-A: pending device measurements
+## 2026-09-20 — LMHEAD-L1-A: quick correctness passed; full gate pending
 
 User reports baseline M=1/8/20 passed at commit 1feb60e. Original source is
 preserved by that Git snapshot and by the baseline template specialization.
-No measured latency was supplied; this candidate is NOT performance accepted.
+User reports the M=1/8/20 A/B command passed. No measured latency rows were
+supplied, so this candidate is still NOT performance accepted.
 
 Source: asr_m200_lm_head_fp16.cpp ProcessTile previously copies the same A
 K-slice for each of 1187 vocabulary tiles. Candidate Process preloads 16
@@ -32,7 +33,9 @@ This structured rank-one weight test is not a substitute for random/model
 weight tests. Before runtime promotion, extend those checks and run full
 (M=1..20), then whole-model token comparison.
 
-Summary records raw runs, median latency and CV. Require >=5% reduction on
-at least one shape, <=2% regression on all others, >=8 shapes and three runs
-with CV<=5%. All three quick shapes passing is only a development gate.
+Summary records raw runs, median latency, standard deviation and CV. Require
+>=5% reduction on at least one shape, no regression beyond max(2% of baseline,
+3 sigma) on any shape, >=8 shapes and three runs with CV<=5%. The `full`
+command enforces this as a nonzero exit status. All three quick shapes passing
+is only a development gate.
 No production default or build capability is changed.
