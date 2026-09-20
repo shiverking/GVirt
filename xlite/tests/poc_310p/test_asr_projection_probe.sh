@@ -6,13 +6,25 @@ source_dir="${script_dir}/asr_projection_probe"
 build_dir=${XLITE_ASR_PROJECTION_BUILD_DIR:-/tmp/xlite_asr_projection_probe_release}
 cann_path=${1:-${ASCEND_CANN_PACKAGE_PATH:-/usr/local/Ascend/cann-9.1.0-beta.1}}
 case_filter=${2:-all}
+variant_filter=${3:-baseline}
+repeats=${4:-1}
 jobs=${XLITE_BUILD_JOBS:-8}
 warmup=${XLITE_ASR_PROJECTION_WARMUP:-3}
 iterations=${XLITE_ASR_PROJECTION_ITERATIONS:-20}
+if [[ ! ${repeats} =~ ^[1-9][0-9]*$ ]]; then
+    echo "repeats must be a positive integer" >&2
+    exit 2
+fi
+case "${variant_filter}" in
+    baseline|cached) variants=("${variant_filter}");;
+    compare) variants=(baseline cached);;
+    *) echo "variant must be baseline, cached or compare" >&2; exit 2;;
+esac
 
 echo "[ ASR LOW-LEVEL PROJECTION ] source=${source_dir}"
 echo "[ ASR LOW-LEVEL PROJECTION ] build=${build_dir}"
 echo "[ ASR LOW-LEVEL PROJECTION ] cann=${cann_path}"
+echo "[ ASR LOW-LEVEL PROJECTION ] device mapping is externally owned and unchanged"
 
 cmake -S "${source_dir}" -B "${build_dir}" \
     -DCMAKE_BUILD_TYPE=Release -DRUN_MODE=npu -DSOC_VERSION=Ascend310P3 \
@@ -57,24 +69,43 @@ cases=(
     "down-m20:20:2048:6144"
 )
 
+if [[ ${case_filter} == quick ]]; then
+    cases=(
+        "qkv-m1:1:4096:2048" "qkv-m8:8:4096:2048" "qkv-m20:20:4096:2048"
+        "o-m1:1:2048:2048" "o-m8:8:2048:2048" "o-m20:20:2048:2048"
+        "gate-up-m1:1:12288:2048" "gate-up-m8:8:12288:2048" "gate-up-m20:20:12288:2048"
+        "down-m1:1:2048:6144" "down-m8:8:2048:6144" "down-m20:20:2048:6144"
+    )
+fi
+
 for spec in "${cases[@]}"; do
     IFS=: read -r name m n k <<<"${spec}"
-    if [[ "${case_filter}" != "all" && "${case_filter}" != "${name}" ]]; then
+    if [[ "${case_filter}" != "all" && "${case_filter}" != quick &&
+          "${case_filter}" != "${name}" ]]; then
         continue
     fi
-    executed=$((executed + 1))
-    log="${build_dir}/${name}.log"
-    echo "[ RUN      ] ${name} M=${m} N=${n} K=${k}"
-    "${build_dir}/xlite_asr_projection_probe_runner" \
-        "${m}" "${n}" "${k}" "${warmup}" "${iterations}" >"${log}" 2>&1
-    status=$?
-    if [[ ${status} -eq 0 ]]; then
-        echo "[       OK ] ${name}"
-        cat "${log}"
-    else
-        failures+=("${name}:${status}:${log}")
-        echo "[  FAILED  ] ${name} (recorded; continuing)"
-    fi
+    for ((run=1; run<=repeats; run++)); do
+        run_variants=("${variants[@]}")
+        if [[ ${variant_filter} == compare && $((run % 2)) == 0 ]]; then
+            run_variants=(cached baseline)
+        fi
+        for variant in "${run_variants[@]}"; do
+            executed=$((executed + 1))
+            log="${build_dir}/${name}-${variant}-r${run}.log"
+            echo "[ RUN      ] ${name} variant=${variant} run=${run} M=${m} N=${n} K=${k}"
+            "${build_dir}/xlite_asr_projection_probe_runner" \
+                "${m}" "${n}" "${k}" "${warmup}" "${iterations}" \
+                "${variant}" >"${log}" 2>&1
+            status=$?
+            if [[ ${status} -eq 0 ]]; then
+                echo "[       OK ] ${name}"
+                cat "${log}"
+            else
+                failures+=("${name}:${status}:${log}")
+                echo "[  FAILED  ] ${name} (recorded; continuing)"
+            fi
+        done
+    done
 done
 
 echo
@@ -95,4 +126,12 @@ if [[ ${#failures[@]} -ne 0 ]]; then
         cat "${log}"
     done
     exit 1
+fi
+if [[ ${variant_filter} == compare ]]; then
+    gate_args=()
+    if [[ ${case_filter} == all ]]; then
+        gate_args+=(--require-gate)
+    fi
+    python3 "${script_dir}/summarize_asr_projection.py" \
+        "${build_dir}" "${case_filter}" "${repeats}" "${gate_args[@]}" || exit $?
 fi

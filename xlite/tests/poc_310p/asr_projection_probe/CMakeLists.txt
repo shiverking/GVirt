@@ -26,7 +26,8 @@ endif()
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 
 ascendc_library(xlite_asr_projection_probe_kernel SHARED
-    ../../../csrc/kernels/310p/asr_m200_projection_fp16.cpp)
+    ../../../csrc/kernels/310p/asr_m200_projection_fp16.cpp
+    ../../../csrc/kernels/310p/asr_m200_projection_cached_fp16.cpp)
 ascendc_compile_definitions(xlite_asr_projection_probe_kernel PRIVATE
     CUSTOM_ASCEND310P)
 

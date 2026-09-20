@@ -57,10 +57,15 @@ performance-complete merely because it removes ACLNN launch overhead.
 
 Required follow-up:
 
-1. Add per-shape device timing against `m200_asr` and ACLNN for M=1/8/20.
-2. Reorder or group N tiles so an activation K tile is reused across multiple
-   output tiles when L1 permits.
-3. Evaluate A/B L1 ping-pong with the CANN 9.1 measured pipe costs.
+1. The experimental `asr_m200_projection_cached_fp16` now stages every A K
+   tile once per AIC and reuses it across assigned N tiles.  The production
+   kernel remains the explicit baseline.
+2. Run the same-build full-shape A/B gate for all four projection classes and
+   M=1/2/4/6/8/12/16/20.  Promotion requires the recorded variance-aware gate;
+   source-level traffic reduction alone is not performance evidence.
+3. Only after that gate, compare the winning projection against `m200_asr` and
+   ACLNN using model weights.  Evaluate B ping-pong only if profiling still
+   places projection among the top three Decode costs.
 
 ### Critical boundary: LM Head
 
