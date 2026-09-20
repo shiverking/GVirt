@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -62,6 +63,11 @@ def _clear_caches(model: Llama) -> None:
     for key_cache, value_cache in model.xlite_kv_cache:
         key_cache.zero_()
         value_cache.zero_()
+
+
+def _cpu_sha256(value: torch.Tensor) -> str:
+    contiguous = value.detach().cpu().contiguous()
+    return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
 
 
 def _device_name() -> str:
@@ -253,25 +259,26 @@ def main() -> int:
         parser.error("positions must be in [0, --max-seq-len)")
 
     prompt_positions = all_positions[..., :inputs_embeds.size(1)]
+    # Freeze the replay contract before either implementation can touch model
+    # state.  Version 2 bundles are only produced from independently cleared
+    # Naive and Xlite cache lifetimes.
+    diagnostic_inputs_cpu = inputs_embeds.detach().cpu().contiguous()
+    diagnostic_positions_cpu = all_positions.detach().cpu().contiguous()
 
     _clear_caches(model)
-    (reference_logits, reference_hidden), reference_prefill_ms = _sync_ms(
+    (reference_prefill_logits,
+     reference_hidden), reference_prefill_ms = _sync_ms(
         lambda: model.forward_naive_with_inputs_embeds(
             inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
     )
-    (xlite_logits, xlite_hidden), xlite_prefill_ms = _sync_ms(
-        lambda: model.forward_xlite_with_inputs_embeds(
-            inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
-    )
+    # Keep the Prefill comparison tensors independent from any temporary
+    # storage reused by subsequent Decode calls.
+    reference_prefill_logits = reference_prefill_logits.clone()
+    reference_hidden = reference_hidden.clone()
 
     _require_nonzero_finite("reference hidden state", reference_hidden)
-    _require_nonzero_finite("Xlite hidden state", xlite_hidden)
-    _require_nonzero_finite("reference logits", reference_logits)
-    _require_nonzero_finite("Xlite logits", xlite_logits)
-
-    hidden_cosine = _cosine(reference_hidden, xlite_hidden)
-    logits_cosine = _cosine(reference_logits, xlite_logits)
-    reference_next_token = reference_logits.argmax(dim=-1)
+    _require_nonzero_finite("reference logits", reference_prefill_logits)
+    reference_next_token = reference_prefill_logits.argmax(dim=-1)
     reference_generated = []
     reference_start_pos = inputs_embeds.size(1)
     for _ in range(args.decode_tokens):
@@ -283,13 +290,32 @@ def main() -> int:
         reference_next_token = reference_logits.argmax(dim=-1)
         reference_start_pos += 1
 
+    # The two implementations must never inherit each other's KV state.  The
+    # former ordering ran Xlite Prefill before completing the Naive sequence,
+    # so the serialized reference could not be reproduced from its own saved
+    # inputs in a fresh process.
+    _clear_caches(model)
+    (xlite_logits, xlite_hidden), xlite_prefill_ms = _sync_ms(
+        lambda: model.forward_xlite_with_inputs_embeds(
+            inputs_embeds, 0, return_hidden=True, positions=prompt_positions)
+    )
+
+    _require_nonzero_finite("Xlite hidden state", xlite_hidden)
+    _require_nonzero_finite("Xlite logits", xlite_logits)
+
+    hidden_cosine = _cosine(reference_hidden, xlite_hidden)
+    logits_cosine = _cosine(reference_prefill_logits, xlite_logits)
+
     if args.save_decode_diagnostic_bundle is not None:
         args.save_decode_diagnostic_bundle.parent.mkdir(
             parents=True, exist_ok=True)
         torch.save({
-            "format_version": 1,
-            "inputs_embeds": inputs_embeds.detach().cpu(),
-            "all_positions": all_positions.detach().cpu(),
+            "format_version": 2,
+            "reference_protocol": "clean_naive_cache_then_clean_xlite_cache",
+            "inputs_embeds": diagnostic_inputs_cpu,
+            "inputs_sha256": _cpu_sha256(diagnostic_inputs_cpu),
+            "all_positions": diagnostic_positions_cpu,
+            "positions_sha256": _cpu_sha256(diagnostic_positions_cpu),
             "reference_token_ids": reference_generated,
             "prompt_tokens": int(inputs_embeds.size(1)),
             "decode_tokens": args.decode_tokens,

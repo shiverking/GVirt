@@ -104,8 +104,10 @@ def main() -> int:
         args.report.stem + "_workers")
     work_dir.mkdir(parents=True, exist_ok=True)
     bundle = torch.load(args.bundle, map_location="cpu", weights_only=True)
-    if bundle.get("format_version") != 1:
-        raise RuntimeError("unsupported Decode diagnostic bundle")
+    if bundle.get("format_version") != 2:
+        raise RuntimeError(
+            "unsupported Decode diagnostic bundle; regenerate a version 2 "
+            "bundle with independently cleared Naive/Xlite caches")
     reference_tokens = [int(token) for token in bundle["reference_token_ids"]]
     prompt_tokens = int(bundle["prompt_tokens"])
 

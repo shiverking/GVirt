@@ -78,12 +78,18 @@ def main() -> int:
     torch.manual_seed(20260907)
 
     bundle = torch.load(args.bundle, map_location="cpu", weights_only=True)
-    if bundle.get("format_version") != 1:
-        raise RuntimeError("unsupported Decode diagnostic bundle")
+    if bundle.get("format_version") != 2:
+        raise RuntimeError(
+            "unsupported Decode diagnostic bundle; regenerate a version 2 "
+            "bundle with independently cleared Naive/Xlite caches")
     inputs_embeds_cpu = bundle["inputs_embeds"].to(
         device="cpu", dtype=torch.float16).contiguous()
     all_positions_cpu = bundle["all_positions"].to(
         device="cpu", dtype=torch.int64).contiguous()
+    if _cpu_sha256(inputs_embeds_cpu) != bundle.get("inputs_sha256"):
+        raise RuntimeError("Decode diagnostic input embedding hash mismatch")
+    if _cpu_sha256(all_positions_cpu) != bundle.get("positions_sha256"):
+        raise RuntimeError("Decode diagnostic position hash mismatch")
     reference_tokens = [int(token) for token in bundle["reference_token_ids"]]
 
     model_config = load_qwen3_asr_llm_args(
@@ -171,7 +177,7 @@ def main() -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "format_version": 1,
+        "format_version": 2,
         "backend": args.backend,
         "naive_prefill_logits": naive_prefill_logits,
         "naive_prefill_hidden": naive_prefill_hidden,
