@@ -178,17 +178,19 @@ private:
         WaitFlag<HardEvent::V_M>(l0Reusable_);
     }
 
+    TPipe pipe_;
     GlobalTensor<half> input_, weight_, logits_;
     LocalTensor<half> l1A_, l1B_, l0A_, l0B_, outFp16_;
     LocalTensor<float> l0C_, outFp32_;
-    event_t l1Free_ = 0;
-    event_t l1Ready_ = 0;
-    event_t cubeReady_ = 0;
-    event_t cubeDone_ = 0;
-    event_t vectorReady_ = 0;
-    event_t l0Reusable_ = 0;
-    event_t storeReady_ = 0;
-    event_t storeDone_ = 0;
+    // Assigned from the pipe's event pool in Init(), before Process().
+    event_t l1Free_;
+    event_t l1Ready_;
+    event_t cubeReady_;
+    event_t cubeDone_;
+    event_t vectorReady_;
+    event_t l0Reusable_;
+    event_t storeReady_;
+    event_t storeDone_;
     uint32_t batch_ = 0;
 };
 

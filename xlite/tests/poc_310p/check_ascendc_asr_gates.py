@@ -45,6 +45,8 @@ def _check_sources(errors: list[str]) -> None:
             if pattern.search(text):
                 errors.append(f"{path.relative_to(XLITE_ROOT)}: {label}")
         # The already-shipped projection kernel predates the dynamic-event rule.
+        if re.search(r"\bevent_t\s+\w+\s*=\s*\d+\s*;", text):
+            errors.append(f"{path.relative_to(XLITE_ROOT)}: event_t initialized from integer")
         # Do not allow that debt to spread to any subsequent ASR kernel.
         if path.stem != "asr_m200_projection_fp16" and re.search(r"\bEVENT_ID\d+\b", text):
             errors.append(f"{path.relative_to(XLITE_ROOT)}: fixed event identifier")
