@@ -94,6 +94,16 @@ class Runtime:
             None: Context is updated on the calling thread.
         """
 
+    def configure_ascendc_asr_attention_diagnostic_310p(
+        self, enabled: bool, target_kv_length: int
+    ) -> None:
+        """Enable diagnostic-only per-layer legacy/AscendC attention capture."""
+
+    def get_ascendc_asr_attention_diagnostics_310p(
+        self,
+    ) -> list[dict[str, int | bytes]]:
+        """Return raw FP16 per-layer attention pairs captured by diagnostics."""
+
     def get_stats(self) -> dict[str, int]:
         """Return cumulative 310P runtime and attention synchronization counters."""
 

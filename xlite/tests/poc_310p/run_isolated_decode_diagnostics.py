@@ -33,13 +33,15 @@ def _metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict:
         "cosine": float(F.cosine_similarity(
             reference_fp32, candidate_fp32, dim=0)),
         "max_abs": float(max_abs),
+        "mean_abs": float(difference.mean()),
         "max_abs_index": int(max_index),
         "bitwise_equal": bool(torch.equal(reference, candidate)),
     }
 
 
 def _run_worker(args: argparse.Namespace, name: str, matmul_backend: str,
-                attention_backend: str, work_dir: Path) -> dict:
+                attention_backend: str, work_dir: Path,
+                capture_attention: bool = False) -> dict:
     worker = Path(__file__).with_name("decode_diagnostic_worker.py")
     output = work_dir / f"{name}.pt"
     log = work_dir / f"{name}.log"
@@ -54,6 +56,11 @@ def _run_worker(args: argparse.Namespace, name: str, matmul_backend: str,
     ]
     if args.num_layers is not None:
         command.extend(("--num-layers", str(args.num_layers)))
+    if capture_attention and args.attention_diagnostic_kv:
+        command.extend((
+            "--attention-diagnostic-kv",
+            str(args.attention_diagnostic_kv),
+        ))
     print(
         f"[ RUN      ] {name} (matmul={matmul_backend}, "
         f"attention={attention_backend}, fresh process)", flush=True)
@@ -92,6 +99,7 @@ def main() -> int:
                         choices=("ascendc_asr",))
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--num-layers", type=int)
+    parser.add_argument("--attention-diagnostic-kv", type=int, default=142)
     args = parser.parse_args()
 
     if not args.bundle.is_file():
@@ -117,7 +125,7 @@ def main() -> int:
         args, "b-ascendc-legacy", args.matmul_backend, "legacy", work_dir)
     attention_candidate = _run_worker(
         args, "c-ascendc-ascendc", args.matmul_backend,
-        args.candidate_backend, work_dir)
+        args.candidate_backend, work_dir, capture_attention=True)
     attention_repeat = _run_worker(
         args, "c-repeat-ascendc-ascendc", args.matmul_backend,
         args.candidate_backend, work_dir)
@@ -149,6 +157,32 @@ def main() -> int:
         not oracle_mismatches and naive_processes_agree and
         legacy_matches_naive)
 
+    layer_diagnostics = []
+    for record in attention_candidate.get("attention_diagnostics", []):
+        legacy = record["legacy"]
+        ascendc = record["ascendc"]
+        heads = []
+        for head in range(legacy.shape[0]):
+            heads.append({
+                "head": head,
+                **_metrics(legacy[head], ascendc[head]),
+            })
+        worst_head = max(heads, key=lambda item: item["max_abs"])
+        layer_diagnostics.append({
+            "layer": int(record["layer"]),
+            "kv_length": int(record["kv_length"]),
+            **_metrics(legacy, ascendc),
+            "worst_head": int(worst_head["head"]),
+            "worst_head_cosine": float(worst_head["cosine"]),
+            "worst_head_max_abs": float(worst_head["max_abs"]),
+            "heads": heads,
+        })
+    layer_diagnostics.sort(key=lambda item: item["layer"])
+    diagnostic_layers = [item["layer"] for item in layer_diagnostics]
+    expected_layers = list(range(args.num_layers or 28))
+    layer_diagnostic_complete = (
+        not args.attention_diagnostic_kv or diagnostic_layers == expected_layers)
+
     report = {
         "mode": "isolated_process_three_tier_teacher_forced_reference_tokens",
         "fresh_process_per_run": True,
@@ -170,6 +204,15 @@ def main() -> int:
         "first_common_path_divergence_generated_index_zero_based": None,
         "first_attention_divergence_generated_index_zero_based": None,
         "ascendc_repeat_bitwise_equal": None,
+        "attention_diagnostic_kv": args.attention_diagnostic_kv,
+        "attention_layer_diagnostic_complete": layer_diagnostic_complete,
+        "attention_layer_diagnostics": layer_diagnostics,
+        "first_attention_layer_non_bitwise": next(
+            (item["layer"] for item in layer_diagnostics
+             if not item["bitwise_equal"]), None),
+        "worst_attention_layer_by_max_abs": (
+            max(layer_diagnostics, key=lambda item: item["max_abs"])["layer"]
+            if layer_diagnostics else None),
         "prefill": None,
         "steps": [],
     }
@@ -250,6 +293,7 @@ def main() -> int:
 
     report["passed"] = bool(
         oracle_valid and report["ascendc_repeat_bitwise_equal"] and
+        layer_diagnostic_complete and
         report["first_common_path_divergence_generated_index_zero_based"] is None and
         report["first_attention_divergence_generated_index_zero_based"] is None)
     args.report.parent.mkdir(parents=True, exist_ok=True)

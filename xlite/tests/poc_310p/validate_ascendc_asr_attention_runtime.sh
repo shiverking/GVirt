@@ -62,6 +62,7 @@ python3 tests/poc_310p/run_isolated_decode_diagnostics.py \
     --max-seq-len 512 \
     --matmul-backend ascendc_asr_perf \
     --candidate-backend ascendc_asr \
+    --attention-diagnostic-kv 142 \
     --work-dir "${report_dir}/decode-diagnostic-workers" \
     --report "${report_dir}/decode-diagnostics.json" \
     2>&1 | tee "${report_dir}/decode-diagnostics.log"

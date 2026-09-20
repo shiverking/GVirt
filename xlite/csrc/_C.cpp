@@ -3459,6 +3459,27 @@ PYBIND11_MODULE(_C, m)
              py::arg("enabled"))
         .def("set_decode_attention_backend", &XRuntime::SetDecodeAttentionBackend310P,
              py::arg("backend"))
+        .def("configure_ascendc_asr_attention_diagnostic_310p",
+             &XRuntime::ConfigureAscendCAsrAttentionDiagnostic310P,
+             py::arg("enabled"), py::arg("target_kv_length"))
+        .def("get_ascendc_asr_attention_diagnostics_310p",
+             [](const XRuntime &rt) {
+                 py::list result;
+                 for (const auto &record :
+                      rt.AscendCAsrAttentionDiagnostics310P()) {
+                     py::dict item;
+                     item["layer"] = record.layer;
+                     item["kv_length"] = record.kvLength;
+                     item["legacy_fp16"] = py::bytes(
+                         reinterpret_cast<const char *>(record.legacy.data()),
+                         record.legacy.size() * sizeof(uint16_t));
+                     item["ascendc_fp16"] = py::bytes(
+                         reinterpret_cast<const char *>(record.ascendc.data()),
+                         record.ascendc.size() * sizeof(uint16_t));
+                     result.append(item);
+                 }
+                 return result;
+             })
         .def("set_direct_atb_setup_reuse_310p",
              &XRuntime::SetDirectAtbSetupReuse310P, py::arg("enabled"))
         .def("set_batched_prefill_attention_310p",

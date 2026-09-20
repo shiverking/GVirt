@@ -611,6 +611,60 @@ static void CheckAscendCAsrQkNormMropeCacheContract(
             "interleaved MRoPE [24,20,20] and a pure Decode batch <=20");
     }
 }
+
+static bool CaptureAscendCAsrAttentionDiagnostic310P(
+    XRuntime &rt, uint32_t layer, XTensor &qkv, XTensor &kCache,
+    XTensor &vCache, XTensor &qk, XTensor &output,
+    uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
+    uint32_t blockSize, uint32_t batch)
+{
+    if (batch != 1 || rt._cachedLensHost.size() != 1) {
+        return false;
+    }
+    const uint32_t kvLength = rt._cachedLensHost[0] + 1;
+    if (!rt.ShouldCaptureAscendCAsrAttention310P(kvLength)) {
+        return false;
+    }
+    if (output.dtype != FP16 || output.numel != nHeads * headDim) {
+        throw std::runtime_error(
+            "AscendC ASR Attention diagnostic requires one FP16 output row");
+    }
+
+    XTensor &legacyOutput = rt.GetTensor(output.shape, output.dtype, DBG_LOC);
+    try {
+        rt.SetDecodeAttentionBackend310P("legacy");
+        XliteOpAttention(
+            rt, qkv, kCache, vCache, qk, legacyOutput,
+            rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+            rt._attnBlockTables[0], nHeads, nKvHeads, headDim, blockSize,
+            batch);
+        rt.SetDecodeAttentionBackend310P("ascendc_asr");
+        XliteOpAttention(
+            rt, qkv, kCache, vCache, qk, output,
+            rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+            rt._attnBlockTables[0], nHeads, nKvHeads, headDim, blockSize,
+            batch);
+
+        // Diagnostic-only synchronization: both outputs must be complete
+        // before their raw FP16 payloads are copied to host. This path is
+        // disabled by default and never participates in serving or graphs.
+        rt.Synchronize();
+        std::vector<uint16_t> legacy(output.numel);
+        std::vector<uint16_t> ascendc(output.numel);
+        rt.MemcpyD2H(legacy.data(), legacyOutput.ptr,
+                     output.numel * sizeof(uint16_t));
+        rt.MemcpyD2H(ascendc.data(), output.ptr,
+                     output.numel * sizeof(uint16_t));
+        rt.RecordAscendCAsrAttentionDiagnostic310P(
+            layer, kvLength, std::move(legacy), std::move(ascendc));
+    } catch (...) {
+        rt.SetDecodeAttentionBackend310P("ascendc_asr");
+        rt.PutTensor(legacyOutput);
+        throw;
+    }
+    rt.PutTensor(legacyOutput);
+    return true;
+}
 #endif
 
 void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
@@ -698,9 +752,18 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (maxNumBlocks * _c.blockSizes[0] <= rt._tileSizeOfCachedKV) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlocks * _c.blockSizes[0]},
                                    hiddenState.dtype, DBG_LOC);
-        XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._attnQueryStartLoc, rt._attnLens,
-                         rt._attnCachedLens, rt._attnBlockTables[0], qHeads, kHeads, _c.headDim,
-                         _c.blockSizes[0], rt._batch);
+        bool diagnosticCaptured = false;
+#ifdef XLITE_ARCH_310P
+        diagnosticCaptured = CaptureAscendCAsrAttentionDiagnostic310P(
+            rt, layer, qkv, kCache, vCache, qk, attn, qHeads, kHeads,
+            _c.headDim, _c.blockSizes[0], rt._batch);
+#endif
+        if (!diagnosticCaptured) {
+            XliteOpAttention(
+                rt, qkv, kCache, vCache, qk, attn, rt._attnQueryStartLoc,
+                rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0],
+                qHeads, kHeads, _c.headDim, _c.blockSizes[0], rt._batch);
+        }
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},

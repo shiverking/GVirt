@@ -431,6 +431,23 @@ void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
         "Ascend310P decode attention backend must be one of: ascendc_asr, direct_atb, "
         "native_atb, batched_aclnn, legacy");
 }
+
+const char *XRuntime::DecodeAttentionBackend310PName(void) const
+{
+    switch (_decodeAttentionBackend310P) {
+        case XDecodeAttentionBackend310P::ASCENDC_ASR:
+            return "ascendc_asr";
+        case XDecodeAttentionBackend310P::DIRECT_ATB:
+            return "direct_atb";
+        case XDecodeAttentionBackend310P::NATIVE_ATB:
+            return "native_atb";
+        case XDecodeAttentionBackend310P::BATCHED_ACLNN:
+            return "batched_aclnn";
+        case XDecodeAttentionBackend310P::LEGACY:
+            return "legacy";
+    }
+    return "unknown";
+}
 #endif
 
 int XRuntime::GetNodeIps(void)

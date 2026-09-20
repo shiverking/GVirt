@@ -10,6 +10,8 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <utility>
+#include <vector>
 #include "base.h"
 
 #define XLITE_DEFAULT_PORT 10266
@@ -91,6 +93,13 @@ enum class XDecodeAttentionBackend310P {
     DIRECT_ATB,
     ASCENDC_ASR,
 };
+
+struct XAsrAttentionDiagnosticRecord310P {
+    uint32_t layer = 0;
+    uint32_t kvLength = 0;
+    std::vector<uint16_t> legacy;
+    std::vector<uint16_t> ascendc;
+};
 #endif
 
 class XRuntime
@@ -151,6 +160,33 @@ public:
 #ifdef XLITE_ARCH_310P
     void SetMatmulBackend310P(const std::string &backend);
     void SetDecodeAttentionBackend310P(const std::string &backend);
+    [[nodiscard]] const char *DecodeAttentionBackend310PName(void) const;
+    void ConfigureAscendCAsrAttentionDiagnostic310P(bool enabled,
+                                                     uint32_t targetKvLength)
+    {
+        _ascendcAsrAttentionDiagnosticEnabled = enabled;
+        _ascendcAsrAttentionDiagnosticTargetKv = targetKvLength;
+        _ascendcAsrAttentionDiagnosticRecords.clear();
+    }
+    [[nodiscard]] bool ShouldCaptureAscendCAsrAttention310P(
+        uint32_t kvLength) const
+    {
+        return _ascendcAsrAttentionDiagnosticEnabled &&
+               _decodeAttentionBackend310P == XDecodeAttentionBackend310P::ASCENDC_ASR &&
+               kvLength == _ascendcAsrAttentionDiagnosticTargetKv;
+    }
+    void RecordAscendCAsrAttentionDiagnostic310P(
+        uint32_t layer, uint32_t kvLength, std::vector<uint16_t> legacy,
+        std::vector<uint16_t> ascendc)
+    {
+        _ascendcAsrAttentionDiagnosticRecords.push_back(
+            {layer, kvLength, std::move(legacy), std::move(ascendc)});
+    }
+    [[nodiscard]] const std::vector<XAsrAttentionDiagnosticRecord310P> &
+    AscendCAsrAttentionDiagnostics310P(void) const
+    {
+        return _ascendcAsrAttentionDiagnosticRecords;
+    }
     void SetAclnnMatmulAsync310P(bool enabled)
     {
         _aclnnMatmulAsync310P = enabled;
@@ -788,6 +824,10 @@ protected:
     XMatmulBackend310P _matmulBackend310P = XMatmulBackend310P::M200_ASR;
     XDecodeAttentionBackend310P _decodeAttentionBackend310P =
         XDecodeAttentionBackend310P::LEGACY;
+    bool _ascendcAsrAttentionDiagnosticEnabled = false;
+    uint32_t _ascendcAsrAttentionDiagnosticTargetKv = 0;
+    std::vector<XAsrAttentionDiagnosticRecord310P>
+        _ascendcAsrAttentionDiagnosticRecords;
     bool _directAtbSetupReuse310P = false;
     // The V2 batch path is retained for targeted shape diagnosis, but real
     // long/chunked ASR prefills have not passed transcript equivalence yet.

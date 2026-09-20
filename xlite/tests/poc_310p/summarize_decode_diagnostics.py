@@ -35,6 +35,24 @@ def main() -> int:
               "first_attention_divergence_generated_index_zero_based"])
     print("C repeat bitwise equal:",
           diagnostics["ascendc_repeat_bitwise_equal"])
+    print("Attention layer diagnostic complete:",
+          diagnostics.get("attention_layer_diagnostic_complete"))
+    print("first non-bitwise Attention layer:",
+          diagnostics.get("first_attention_layer_non_bitwise"))
+    print("worst Attention layer by max abs:",
+          diagnostics.get("worst_attention_layer_by_max_abs"))
+    layer_diagnostics = diagnostics.get("attention_layer_diagnostics", [])
+    if layer_diagnostics:
+        print("layer\tkv\tcosine\tmean_abs\tmax_abs\tworst_head\t"
+              "head_cosine\thead_max_abs")
+        for item in layer_diagnostics:
+            print(
+                f"{item['layer']}\t{item['kv_length']}\t"
+                f"{item['cosine']:.9f}\t{item['mean_abs']:.9f}\t"
+                f"{item['max_abs']:.9f}\t{item['worst_head']}\t"
+                f"{item['worst_head_cosine']:.9f}\t"
+                f"{item['worst_head_max_abs']:.9f}"
+            )
     print("idx\tkv\toracle\tcommon\tattention\tA=B\tB=C\t"
           "AB_logit_cos\tAB_hidden_cos\tBC_logit_cos\tBC_hidden_cos")
     for step in diagnostics["steps"]:

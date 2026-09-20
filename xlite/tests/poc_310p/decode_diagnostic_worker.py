@@ -70,6 +70,7 @@ def main() -> int:
     parser.add_argument("--matmul-backend", default="ascendc_asr")
     parser.add_argument("--max-seq-len", type=int, required=True)
     parser.add_argument("--num-layers", type=int)
+    parser.add_argument("--attention-diagnostic-kv", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -102,6 +103,19 @@ def main() -> int:
     model.load_weights(args.checkpoint)
     model.xlite_rt.set_matmul_backend_310p(args.matmul_backend)
     model.xlite_rt.set_decode_attention_backend(args.backend)
+    if args.attention_diagnostic_kv:
+        if args.backend != "ascendc_asr":
+            raise RuntimeError(
+                "per-layer Attention diagnostics require ascendc_asr backend")
+        if not hasattr(
+            model.xlite_rt,
+            "configure_ascendc_asr_attention_diagnostic_310p",
+        ):
+            raise RuntimeError(
+                "loaded Xlite extension lacks per-layer Attention diagnostics; "
+                "rebuild the editable extension")
+        model.xlite_rt.configure_ascendc_asr_attention_diagnostic_310p(
+            True, args.attention_diagnostic_kv)
 
     # Match the generator's allocation order: construct the model and native
     # Runtime first, then materialize replay inputs.  CPU->NPU copies may
@@ -175,6 +189,20 @@ def main() -> int:
         "positions_sha256": _cpu_sha256(all_positions_cpu),
         "positions_npu_format": _npu_format(all_positions),
     }
+    attention_diagnostics = []
+    for item in model.xlite_rt.get_ascendc_asr_attention_diagnostics_310p():
+        legacy = torch.frombuffer(
+            bytearray(item["legacy_fp16"]), dtype=torch.float16
+        ).clone().reshape(16, 128)
+        ascendc = torch.frombuffer(
+            bytearray(item["ascendc_fp16"]), dtype=torch.float16
+        ).clone().reshape(16, 128)
+        attention_diagnostics.append({
+            "layer": int(item["layer"]),
+            "kv_length": int(item["kv_length"]),
+            "legacy": legacy,
+            "ascendc": ascendc,
+        })
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "format_version": 2,
@@ -189,8 +217,13 @@ def main() -> int:
         "decode_hidden": torch.stack(decode_hidden),
         "runtime_stats": dict(model.xlite_rt.get_stats()),
         "replay_input": replay_input,
+        "attention_diagnostics": attention_diagnostics,
     }, args.output)
     print(f"replay input contract: {replay_input}")
+    if args.attention_diagnostic_kv:
+        print(
+            "per-layer Attention captures: "
+            f"{len(attention_diagnostics)} at KV={args.attention_diagnostic_kv}")
     print(f"isolated Decode diagnostic worker PASS: backend={args.backend}")
     return 0
 
