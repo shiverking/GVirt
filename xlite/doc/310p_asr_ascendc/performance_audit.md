@@ -103,6 +103,11 @@ per token for all three heads.  The production kernel remains the baseline;
 promotion requires the eight-shape same-build device A/B gate followed by
 model-weight token equivalence.
 
+That gate rejected the grouped schedule: all correctness runs passed, but
+M=2--20 regressed 1.18--4.53% and no shape achieved the required 5% gain.
+The original head-parallel production kernel therefore remains the measured
+winner.
+
 ### Medium: RMSNorm, Add-RMSNorm and SiLU-Mul
 
 These kernels are correct production vector paths, but remain launch-oriented:
@@ -116,6 +121,12 @@ These kernels are correct production vector paths, but remain launch-oriented:
 Their individual payloads are small, so the next optimization is graph replay
 or carefully justified fusion, not a speculative rewrite.  They should only be
 retiled if profiling places one of them in the top three device-time costs.
+
+RMSNorm and Add-RMSNorm already load and convert weights once per active core
+and reuse them across assigned rows, so no additional eager candidate is
+justified before profiling.  SiLU-Mul still performs three complete
+load/event/store rounds per row; `asr_silu_mul_row_fp16` is an isolated
+whole-row candidate subject to the same eight-shape device A/B gate.
 
 ## Decision gates
 

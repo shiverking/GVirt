@@ -52,7 +52,7 @@
       "arithmetic": "fp32_rmsnorm_fp16_mrope_and_cache"
     },
     "asr_qk_norm_mrope_cache_grouped_fp16": {
-      "status": "experimental_pending_device_measurement",
+      "status": "experimental_rejected_no_performance_gain",
       "ub_bytes": 4864,
       "l1_bytes": 0,
       "l0a_bytes": 0,
@@ -62,7 +62,8 @@
       "shape": {"max_tokens": 20, "q_heads": 16, "kv_heads": 8, "head_dim": 128},
       "arithmetic": "fp32_rmsnorm_fp16_mrope_and_cache",
       "schedule": "one_aiv_owns_2q_1kv_persistent_weights_per_token_mrope",
-      "runtime_eligible": false
+      "runtime_eligible": false,
+      "measured_result": "correctness_passed_48_of_48_but_m2_to_m20_regressed_1.18_to_4.53_percent"
     },
     "asr_paged_decode_attention_fp16": {
       "status": "production_runtime_candidate",
@@ -147,6 +148,19 @@
       "event_pairs": 3,
       "shape": {"max_tokens": 20, "intermediate": 6144, "tile": 2048},
       "arithmetic": "fp16_vector"
+    },
+    "asr_silu_mul_row_fp16": {
+      "status": "experimental_pending_device_measurement",
+      "ub_bytes": 36864,
+      "l1_bytes": 0,
+      "l0a_bytes": 0,
+      "l0b_bytes": 0,
+      "l0c_bytes": 0,
+      "event_pairs": 3,
+      "shape": {"max_tokens": 20, "intermediate": 6144, "tile": 6144},
+      "arithmetic": "fp16_vector",
+      "schedule": "one_full_row_per_pipeline_iteration",
+      "runtime_eligible": false
     },
     "asr_m200_lm_head_fp16": {
       "status": "experimental_microprobe",

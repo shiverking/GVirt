@@ -15,6 +15,7 @@
 #include "aclrtlaunch_asr_qk_norm_mrope_cache_grouped_fp16.h"
 #include "aclrtlaunch_asr_rmsnorm_fp16.h"
 #include "aclrtlaunch_asr_silu_mul_fp16.h"
+#include "aclrtlaunch_asr_silu_mul_row_fp16.h"
 
 namespace {
 
@@ -377,12 +378,15 @@ void RunAddRmsNorm(uint32_t tokens, uint32_t warmup, uint32_t iterations)
               << ", guards_intact=" << guardsIntact << std::endl;
 }
 
-void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations)
+void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations,
+                bool wholeRow)
 {
     const size_t inputElements = static_cast<size_t>(tokens) * 2 * kIntermediate;
     const size_t outputElements = static_cast<size_t>(tokens) * kIntermediate;
     std::vector<uint16_t> input(inputElements);
-    std::vector<uint16_t> output(outputElements, kHalfNan);
+    constexpr size_t guardElements = 256;
+    std::vector<uint16_t> outputStorage(outputElements + 2 * guardElements,
+                                        kHalfNan);
     std::vector<uint16_t> expected(outputElements);
     for (uint32_t row = 0; row < tokens; ++row) {
         for (uint32_t col = 0; col < kIntermediate; ++col) {
@@ -402,35 +406,54 @@ void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations)
         }
     }
     DeviceBuffer inputDevice(input.size() * sizeof(uint16_t));
-    DeviceBuffer outputDevice(output.size() * sizeof(uint16_t));
+    DeviceBuffer outputDevice(outputStorage.size() * sizeof(uint16_t));
     Check(aclrtMemcpy(inputDevice.ptr, input.size() * sizeof(uint16_t), input.data(),
                      input.size() * sizeof(uint16_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy input");
-    Check(aclrtMemcpy(outputDevice.ptr, output.size() * sizeof(uint16_t), output.data(),
-                     output.size() * sizeof(uint16_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy output");
+    Check(aclrtMemcpy(outputDevice.ptr, outputStorage.size() * sizeof(uint16_t),
+                     outputStorage.data(), outputStorage.size() * sizeof(uint16_t),
+                     ACL_MEMCPY_HOST_TO_DEVICE), "copy guarded output");
     aclrtStream stream = nullptr;
     Check(aclrtCreateStream(&stream), "aclrtCreateStream");
     const uint32_t cores = std::min(8U, tokens);
+    auto *output = static_cast<uint8_t *>(outputDevice.ptr) +
+                   guardElements * sizeof(uint16_t);
     const auto launch = [&]() {
-        ACLRT_LAUNCH_KERNEL(asr_silu_mul_fp16)
-        (cores, stream, inputDevice.ptr, outputDevice.ptr, tokens);
+        if (wholeRow) {
+            ACLRT_LAUNCH_KERNEL(asr_silu_mul_row_fp16)
+            (cores, stream, inputDevice.ptr, output, tokens);
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_silu_mul_fp16)
+            (cores, stream, inputDevice.ptr, output, tokens);
+        }
     };
     const double averageMs = Benchmark(stream, warmup, iterations, launch);
     Check(aclrtDestroyStream(stream), "aclrtDestroyStream");
-    Check(aclrtMemcpy(output.data(), output.size() * sizeof(uint16_t), outputDevice.ptr,
-                     output.size() * sizeof(uint16_t), ACL_MEMCPY_DEVICE_TO_HOST), "read output");
-    const Metrics metrics = Compare(output, expected, 0.04);
-    if (metrics.sentinels != 0 || metrics.nonFinite != 0 ||
+    Check(aclrtMemcpy(outputStorage.data(), outputStorage.size() * sizeof(uint16_t),
+                     outputDevice.ptr, outputStorage.size() * sizeof(uint16_t),
+                     ACL_MEMCPY_DEVICE_TO_HOST), "read guarded output");
+    const bool guardsIntact = std::all_of(
+        outputStorage.begin(), outputStorage.begin() + guardElements,
+        [](uint16_t value) { return value == kHalfNan; }) &&
+        std::all_of(outputStorage.end() - guardElements, outputStorage.end(),
+                    [](uint16_t value) { return value == kHalfNan; });
+    std::vector<uint16_t> actual(outputStorage.begin() + guardElements,
+                                 outputStorage.end() - guardElements);
+    const Metrics metrics = Compare(actual, expected, 0.04);
+    if (!guardsIntact || metrics.sentinels != 0 || metrics.nonFinite != 0 ||
         metrics.cosine < 0.999 || metrics.maxAbs > 0.04) {
-        PrintDiagnostics("SiLU-Mul", output, expected, kIntermediate, 0.04, metrics);
+        PrintDiagnostics("SiLU-Mul", actual, expected, kIntermediate, 0.04, metrics);
         throw std::runtime_error("SiLU-Mul mismatch: cosine=" +
                                  std::to_string(metrics.cosine) + ", max_abs=" +
                                  std::to_string(metrics.maxAbs) + ", sentinel=" +
-                                 std::to_string(metrics.sentinels));
+                                 std::to_string(metrics.sentinels) + ", guards=" +
+                                 std::to_string(guardsIntact));
     }
     std::cout << std::fixed << std::setprecision(6)
               << "ASR SiLU-Mul PASS: tokens=" << tokens << ", cores=" << cores
+              << ", variant=" << (wholeRow ? "row" : "baseline")
               << ", average_ms=" << averageMs << ", cosine=" << metrics.cosine
-              << ", max_abs=" << metrics.maxAbs << std::endl;
+              << ", max_abs=" << metrics.maxAbs
+              << ", guards_intact=" << guardsIntact << std::endl;
 }
 
 float RoundHalf(float value) { return HalfValue(HalfBits(value)); }
@@ -568,7 +591,7 @@ int main(int argc, char **argv)
         if (argc != 5 && argc != 6) {
             throw std::invalid_argument(
                 "usage: runner rmsnorm|add-rmsnorm|qk-mrope-cache|silu "
-                "TOKENS WARMUP ITERATIONS [baseline|grouped]");
+                "TOKENS WARMUP ITERATIONS [baseline|grouped|row]");
         }
         Check(aclInit(nullptr), "aclInit");
         Check(aclrtSetDevice(0), "aclrtSetDevice");
@@ -577,7 +600,7 @@ int main(int argc, char **argv)
         const uint32_t warmup = static_cast<uint32_t>(std::stoul(argv[3]));
         const uint32_t iterations = static_cast<uint32_t>(std::stoul(argv[4]));
         const std::string variant = argc == 6 ? argv[5] : "baseline";
-        if (variant != "baseline" && variant != "grouped") {
+        if (variant != "baseline" && variant != "grouped" && variant != "row") {
             throw std::invalid_argument("unknown vector variant: " + variant);
         }
         if (tokens == 0 || tokens > 20 || iterations == 0) {
@@ -590,7 +613,7 @@ int main(int argc, char **argv)
         } else if (op == "qk-mrope-cache") {
             RunQkMropeCache(tokens, warmup, iterations, variant == "grouped");
         } else if (op == "silu") {
-            RunSiluMul(tokens, warmup, iterations);
+            RunSiluMul(tokens, warmup, iterations, variant == "row");
         } else {
             throw std::invalid_argument("unknown op: " + op);
         }

@@ -1,6 +1,6 @@
 # QK Norm/MRoPE/Cache performance backlog
 
-## 2026-09-20 — QK-MROPE-GROUPED: device A/B gate pending
+## 2026-09-20 — QK-MROPE-GROUPED: rejected by device A/B gate
 
 The production kernel schedules `tokens * 24` independent head tasks.  Each
 task loads the same Q or K norm weight and all three token-position frequency
@@ -25,3 +25,9 @@ latency reduction, and no shape regression beyond max(2%, three sigma).
 
 Passing this synthetic microprobe does not change runtime routing.  Model
 weights, 16-step greedy equivalence and real-ASR performance remain mandatory.
+
+Measured result: all 48 correctness runs passed.  M=1 improved only 1.93%,
+while M=2/4/6/8/12/16/20 regressed 1.18/3.63/2.52/4.53/4.22/4.48/4.38%.
+M=8 grouped CV was 8.26%.  The required performance gate therefore failed.
+The grouped kernel is retained only as an explicit experiment and is not
+eligible for runtime promotion.  The production baseline remains selected.

@@ -31,7 +31,8 @@ ascendc_library(xlite_asr_vector_probe_kernel SHARED
     ../../../csrc/kernels/310p/asr_qk_norm_mrope_cache_fp16.cpp
     ../../../csrc/kernels/310p/asr_qk_norm_mrope_cache_grouped_fp16.cpp
     ../../../csrc/kernels/310p/asr_rmsnorm_fp16.cpp
-    ../../../csrc/kernels/310p/asr_silu_mul_fp16.cpp)
+    ../../../csrc/kernels/310p/asr_silu_mul_fp16.cpp
+    ../../../csrc/kernels/310p/asr_silu_mul_row_fp16.cpp)
 ascendc_compile_definitions(xlite_asr_vector_probe_kernel PRIVATE CUSTOM_ASCEND310P)
 
 add_executable(xlite_asr_vector_probe_runner main.cpp)
