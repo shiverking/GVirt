@@ -12,6 +12,7 @@
 #include "acl/acl.h"
 #include "aclrtlaunch_asr_add_rmsnorm_fp16.h"
 #include "aclrtlaunch_asr_qk_norm_mrope_cache_fp16.h"
+#include "aclrtlaunch_asr_qk_norm_mrope_cache_grouped_fp16.h"
 #include "aclrtlaunch_asr_rmsnorm_fp16.h"
 #include "aclrtlaunch_asr_silu_mul_fp16.h"
 
@@ -434,7 +435,8 @@ void RunSiluMul(uint32_t tokens, uint32_t warmup, uint32_t iterations)
 
 float RoundHalf(float value) { return HalfValue(HalfBits(value)); }
 
-void RunQkMropeCache(uint32_t tokens, uint32_t warmup, uint32_t iterations)
+void RunQkMropeCache(uint32_t tokens, uint32_t warmup, uint32_t iterations,
+                     bool grouped)
 {
     constexpr float eps = 1.0e-6F;
     constexpr float qScale = 0.08838834764831845F;
@@ -523,9 +525,17 @@ void RunQkMropeCache(uint32_t tokens, uint32_t warmup, uint32_t iterations)
     h2d(csD.ptr,cossin.data(),cossin.size()*2,"copy cossin"); h2d(slotD.ptr,slots.data(),slots.size()*4,"copy slots");
     h2d(kcD.ptr,kCache.data(),kCache.size()*2,"copy kcache"); h2d(vcD.ptr,vCache.data(),vCache.size()*2,"copy vcache");
     aclrtStream stream = nullptr; Check(aclrtCreateStream(&stream), "aclrtCreateStream");
-    auto launch = [&]() { ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_fp16)
-        (8, stream, qkvD.ptr, qwD.ptr, kwD.ptr, posD.ptr, csD.ptr, slotD.ptr,
-         kcD.ptr, vcD.ptr, tokens, eps, qScale); };
+    auto launch = [&]() {
+        if (grouped) {
+            ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_grouped_fp16)
+            (8, stream, qkvD.ptr, qwD.ptr, kwD.ptr, posD.ptr, csD.ptr,
+             slotD.ptr, kcD.ptr, vcD.ptr, tokens, eps, qScale);
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_fp16)
+            (8, stream, qkvD.ptr, qwD.ptr, kwD.ptr, posD.ptr, csD.ptr,
+             slotD.ptr, kcD.ptr, vcD.ptr, tokens, eps, qScale);
+        }
+    };
     launch(); Check(aclrtSynchronizeStream(stream), "correctness sync");
     auto d2h = [&](void *h, void *d, size_t n, const char *name) {
         Check(aclrtMemcpy(h, n, d, n, ACL_MEMCPY_DEVICE_TO_HOST), name);
@@ -545,6 +555,7 @@ void RunQkMropeCache(uint32_t tokens, uint32_t warmup, uint32_t iterations)
     const double ms=Benchmark(stream,warmup,iterations,launch);
     Check(aclrtDestroyStream(stream),"destroy stream");
     std::cout<<std::fixed<<std::setprecision(6)<<"ASR QK-Norm-MRoPE-Cache PASS: tokens="<<tokens
+             <<", variant="<<(grouped ? "grouped" : "baseline")
              <<", average_ms="<<ms<<", qkv_cosine="<<qm.cosine<<", qkv_max_abs="<<qm.maxAbs
              <<", cache_max_abs="<<std::max(km.maxAbs,vm.maxAbs)<<std::endl;
 }
@@ -554,9 +565,10 @@ void RunQkMropeCache(uint32_t tokens, uint32_t warmup, uint32_t iterations)
 int main(int argc, char **argv)
 {
     try {
-        if (argc != 5) {
+        if (argc != 5 && argc != 6) {
             throw std::invalid_argument(
-                "usage: runner rmsnorm|add-rmsnorm|qk-mrope-cache|silu TOKENS WARMUP ITERATIONS");
+                "usage: runner rmsnorm|add-rmsnorm|qk-mrope-cache|silu "
+                "TOKENS WARMUP ITERATIONS [baseline|grouped]");
         }
         Check(aclInit(nullptr), "aclInit");
         Check(aclrtSetDevice(0), "aclrtSetDevice");
@@ -564,6 +576,10 @@ int main(int argc, char **argv)
         const uint32_t tokens = static_cast<uint32_t>(std::stoul(argv[2]));
         const uint32_t warmup = static_cast<uint32_t>(std::stoul(argv[3]));
         const uint32_t iterations = static_cast<uint32_t>(std::stoul(argv[4]));
+        const std::string variant = argc == 6 ? argv[5] : "baseline";
+        if (variant != "baseline" && variant != "grouped") {
+            throw std::invalid_argument("unknown vector variant: " + variant);
+        }
         if (tokens == 0 || tokens > 20 || iterations == 0) {
             throw std::invalid_argument("tokens must be 1-20 and iterations positive");
         }
@@ -572,7 +588,7 @@ int main(int argc, char **argv)
         } else if (op == "add-rmsnorm") {
             RunAddRmsNorm(tokens, warmup, iterations);
         } else if (op == "qk-mrope-cache") {
-            RunQkMropeCache(tokens, warmup, iterations);
+            RunQkMropeCache(tokens, warmup, iterations, variant == "grouped");
         } else if (op == "silu") {
             RunSiluMul(tokens, warmup, iterations);
         } else {

@@ -96,6 +96,13 @@ vector pipeline with many full `PIPE_V` barriers. Position rows and norm
 weights should be staged/reused per token after correctness profiling proves
 this kernel is material in Decode time.
 
+The experimental `asr_qk_norm_mrope_cache_grouped_fp16` addresses only those
+measured structural redundancies: each AIV owns two Q heads and one K/V head,
+converts Q/K weights once per launch, and composes the three position rows once
+per token for all three heads.  The production kernel remains the baseline;
+promotion requires the eight-shape same-build device A/B gate followed by
+model-weight token equivalence.
+
 ### Medium: RMSNorm, Add-RMSNorm and SiLU-Mul
 
 These kernels are correct production vector paths, but remain launch-oriented:
