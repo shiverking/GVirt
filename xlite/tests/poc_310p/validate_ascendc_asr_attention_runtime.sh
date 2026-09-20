@@ -47,7 +47,7 @@ python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --decode-tokens 16 \
     --max-seq-len 512 \
     --stability-iters 1 \
-    --matmul-backend ascendc_asr \
+    --matmul-backend ascendc_asr_perf \
     --decode-attention-backend ascendc_asr \
     --report "${report_dir}/full28-synthetic129.json" \
     2>&1 | tee "${report_dir}/full28-synthetic129.log"
@@ -60,7 +60,7 @@ python3 tests/poc_310p/run_isolated_decode_diagnostics.py \
     --checkpoint "${checkpoint}" \
     --bundle "${diagnostic_bundle}" \
     --max-seq-len 512 \
-    --matmul-backend ascendc_asr \
+    --matmul-backend ascendc_asr_perf \
     --candidate-backend ascendc_asr \
     --work-dir "${report_dir}/decode-diagnostic-workers" \
     --report "${report_dir}/decode-diagnostics.json" \

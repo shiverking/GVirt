@@ -41,6 +41,14 @@ Required follow-up after strict token correctness:
 3. Profile MTE2, M, V and MTE3 separately; do not select tiling from kernel
    wall time alone.
 
+The whole-model Attention gate uses a local Naive oracle inside every fresh
+worker process. Saved token IDs are only a provenance self-check. Each worker
+first captures Naive prefill and teacher-forced Decode tensors, clears both
+cache families, then executes exactly one Xlite backend. Candidate results are
+interpreted only when all local Naive predictions agree, the bundle tokens
+match that oracle and ACLNN+legacy Xlite matches its local Naive result. This
+replaces the invalid earlier comparison against a cross-process token list.
+
 ### Critical: projection kernel
 
 Source evidence (`csrc/kernels/310p/asr_m200_projection_fp16.cpp`):

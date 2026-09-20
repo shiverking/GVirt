@@ -104,6 +104,35 @@ def main() -> int:
     inputs_embeds = _to_npu_nd(inputs_embeds_cpu, torch.float16)
     all_positions = _to_npu_nd(all_positions_cpu, torch.int64)
 
+    # Build the numerical oracle inside this exact process, with the same
+    # loaded weights and replay tensors as the candidate. Cross-process token
+    # IDs from the bundle remain a provenance/self-check, not the oracle
+    # tensor itself.
+    _clear_caches(model)
+    torch.npu.synchronize()
+    prompt_tokens = int(inputs_embeds.size(1))
+    naive_prefill_logits, naive_prefill_hidden = (
+        model.forward_naive_with_inputs_embeds(
+            inputs_embeds, 0, return_hidden=True,
+            positions=all_positions[..., :prompt_tokens]
+        )
+    )
+    naive_prefill_logits, naive_prefill_hidden = _copy_snapshot(
+        naive_prefill_logits, naive_prefill_hidden)
+    naive_decode_logits = []
+    naive_decode_hidden = []
+    naive_position = prompt_tokens
+    for token in reference_tokens:
+        token_tensor = torch.tensor([[token]], dtype=torch.int64, device="npu")
+        token_embed = model.embed_tokens(token_tensor).to(torch.float16)
+        logits, hidden = model.forward_naive_with_inputs_embeds(
+            token_embed, naive_position, return_hidden=True,
+            positions=all_positions[..., naive_position:naive_position + 1])
+        logits_cpu, hidden_cpu = _copy_snapshot(logits, hidden)
+        naive_decode_logits.append(logits_cpu)
+        naive_decode_hidden.append(hidden_cpu)
+        naive_position += 1
+
     _clear_caches(model)
     # Cache zeroing and bundle tensor uploads run on the torch_npu stream,
     # while Xlite owns a separate ACL stream.  This diagnostic process has no
@@ -112,7 +141,6 @@ def main() -> int:
     # This synchronization is diagnostic-only and is outside measured serving
     # or Decode paths.
     torch.npu.synchronize()
-    prompt_tokens = int(inputs_embeds.size(1))
     prefill_logits, prefill_hidden = model.forward_xlite_with_inputs_embeds(
         inputs_embeds, 0, return_hidden=True,
         positions=all_positions[..., :prompt_tokens])
@@ -145,6 +173,10 @@ def main() -> int:
     torch.save({
         "format_version": 1,
         "backend": args.backend,
+        "naive_prefill_logits": naive_prefill_logits,
+        "naive_prefill_hidden": naive_prefill_hidden,
+        "naive_decode_logits": torch.stack(naive_decode_logits),
+        "naive_decode_hidden": torch.stack(naive_decode_hidden),
         "prefill_logits": prefill_logits,
         "prefill_hidden": prefill_hidden,
         "decode_logits": torch.stack(decode_logits),

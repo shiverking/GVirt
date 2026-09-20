@@ -18,6 +18,10 @@ def main() -> int:
     print("tiers:", diagnostics.get("tiers"))
     print("ACLNN + legacy oracle valid:",
           diagnostics["legacy_oracle_valid"])
+    print("Naive oracle agrees across fresh processes:",
+          diagnostics.get("naive_processes_agree"))
+    print("Legacy Xlite matches local Naive oracle:",
+          diagnostics.get("legacy_xlite_matches_local_naive"))
     if not diagnostics["legacy_oracle_valid"]:
         print("oracle mismatches:",
               diagnostics["legacy_oracle_mismatches"])
@@ -47,7 +51,7 @@ def main() -> int:
             f"{step['attention_vs_common_logits']['cosine']:.9f}\t"
             f"{step['attention_vs_common_hidden']['cosine']:.9f}"
         )
-    return 0 if diagnostics["ascendc_repeat_bitwise_equal"] else 1
+    return 0 if diagnostics.get("passed") else 1
 
 
 if __name__ == "__main__":

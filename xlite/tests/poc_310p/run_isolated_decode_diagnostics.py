@@ -67,10 +67,10 @@ def _run_worker(args: argparse.Namespace, name: str, matmul_backend: str,
     return torch.load(output, map_location="cpu", weights_only=True)
 
 
-def _predictions(result: dict) -> list[int]:
+def _predictions(result: dict, prefix: str = "") -> list[int]:
     return [
-        int(result["prefill_logits"].argmax()),
-        *[int(step.argmax()) for step in result["decode_logits"][:-1]],
+        int(result[f"{prefix}prefill_logits"].argmax()),
+        *[int(step.argmax()) for step in result[f"{prefix}decode_logits"][:-1]],
     ]
 
 
@@ -120,7 +120,8 @@ def main() -> int:
         args, "c-repeat-ascendc-ascendc", args.matmul_backend,
         args.candidate_backend, work_dir)
 
-    oracle_predictions = _predictions(oracle)
+    oracle_predictions = _predictions(oracle, "naive_")
+    legacy_predictions = _predictions(oracle)
     common_predictions = _predictions(common_candidate)
     attention_predictions = _predictions(attention_candidate)
     oracle_mismatches = [
@@ -133,7 +134,18 @@ def main() -> int:
             zip(reference_tokens, oracle_predictions))
         if expected != actual
     ]
-    oracle_valid = not oracle_mismatches
+    local_naive_predictions = [
+        _predictions(result, "naive_") for result in (
+            oracle, common_candidate, attention_candidate, attention_repeat)
+    ]
+    naive_processes_agree = all(
+        prediction == oracle_predictions
+        for prediction in local_naive_predictions[1:]
+    )
+    legacy_matches_naive = legacy_predictions == oracle_predictions
+    oracle_valid = bool(
+        not oracle_mismatches and naive_processes_agree and
+        legacy_matches_naive)
 
     report = {
         "mode": "isolated_process_three_tier_teacher_forced_reference_tokens",
@@ -151,6 +163,8 @@ def main() -> int:
         },
         "legacy_oracle_valid": oracle_valid,
         "legacy_oracle_mismatches": oracle_mismatches,
+        "naive_processes_agree": naive_processes_agree,
+        "legacy_xlite_matches_local_naive": legacy_matches_naive,
         "first_common_path_divergence_generated_index_zero_based": None,
         "first_attention_divergence_generated_index_zero_based": None,
         "ascendc_repeat_bitwise_equal": None,
@@ -180,12 +194,15 @@ def main() -> int:
         report["ascendc_repeat_bitwise_equal"] = repeat_equal
         report["prefill"] = {
             "oracle_top1": oracle_predictions[0],
+            "legacy_xlite_top1": legacy_predictions[0],
             "common_candidate_top1": common_predictions[0],
             "attention_candidate_top1": attention_predictions[0],
             "common_vs_oracle_logits": _metrics(
-                oracle["prefill_logits"], common_candidate["prefill_logits"]),
+                oracle["naive_prefill_logits"],
+                common_candidate["prefill_logits"]),
             "common_vs_oracle_hidden": _metrics(
-                oracle["prefill_hidden"], common_candidate["prefill_hidden"]),
+                oracle["naive_prefill_hidden"],
+                common_candidate["prefill_hidden"]),
             "attention_vs_common_logits": _metrics(
                 common_candidate["prefill_logits"],
                 attention_candidate["prefill_logits"]),
@@ -195,10 +212,10 @@ def main() -> int:
         }
 
         for index in range(len(reference_tokens) - 1):
-            oracle_logits = oracle["decode_logits"][index]
+            oracle_logits = oracle["naive_decode_logits"][index]
             common_logits = common_candidate["decode_logits"][index]
             attention_logits = attention_candidate["decode_logits"][index]
-            oracle_hidden = oracle["decode_hidden"][index]
+            oracle_hidden = oracle["naive_decode_hidden"][index]
             common_hidden = common_candidate["decode_hidden"][index]
             attention_hidden = attention_candidate["decode_hidden"][index]
             oracle_ids, oracle_values = _top2(oracle_logits)
@@ -230,7 +247,9 @@ def main() -> int:
             })
 
     report["passed"] = bool(
-        oracle_valid and report["ascendc_repeat_bitwise_equal"])
+        oracle_valid and report["ascendc_repeat_bitwise_equal"] and
+        report["first_common_path_divergence_generated_index_zero_based"] is None and
+        report["first_attention_divergence_generated_index_zero_based"] is None)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
