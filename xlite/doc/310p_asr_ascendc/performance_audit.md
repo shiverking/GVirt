@@ -64,9 +64,23 @@ Required follow-up:
 
 ### Critical boundary: LM Head
 
-`asr_m200_lm_head_fp16` is not implemented.  Decode still executes ACLNN LM
-Head and synchronizes once per token.  Pure AscendC eager and full Decode Graph
-cannot close until the fixed `[M,2048] x [2048,151936]` kernel exists.
+`asr_m200_lm_head_fp16` now has an isolated correctness microprobe, but is not
+runtime eligible yet.  It executes the fixed `[M,2048] x [2048,151936]`
+contract in one launch with eight AICs, FP32 accumulation and direct full-logit
+output.  The initial schedule intentionally matches the already proven
+low-level projection data layout.  It restages A for each N tile and therefore
+must not replace ACLNN until M=1/8/20 correctness and CANN 9.1 timing pass;
+grouped N-tile activation reuse is the next measured optimization.
+
+### External device-state diagnostic limitation
+
+The isolated attention suite can fail before any kernel launch when its
+required `aclrtSetDevice(0)` returns `507033`.  This is classified as external
+device/context availability, not kernel evidence.  Device visibility and
+logical-to-physical mapping are deployment-owned and must not be rewritten by
+the test or runtime.  Re-run the affected probe only after the existing device
+environment is healthy; this known issue does not block source-only LM Head
+development.
 
 ### Medium: QK-Norm/MRoPE/Cache
 

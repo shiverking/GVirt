@@ -120,6 +120,18 @@
       "shape": {"max_tokens": 20, "intermediate": 6144, "tile": 2048},
       "arithmetic": "fp16_vector"
     },
-    "asr_m200_lm_head_fp16": {"status": "planned", "ub_bytes": null, "event_pairs": null}
+    "asr_m200_lm_head_fp16": {
+      "status": "experimental_microprobe",
+      "ub_bytes": 24576,
+      "l1_bytes": 40960,
+      "l0a_bytes": 8192,
+      "l0b_bytes": 32768,
+      "l0c_bytes": 16384,
+      "event_pairs": 8,
+      "shape": {"max_batch": 20, "hidden": 2048, "vocabulary": 151936},
+      "tile": {"m": 32, "n": 128, "k": 128},
+      "arithmetic": "fp32_accumulate_fp16_full_logits",
+      "runtime_eligible": false
+    }
   }
 }
