@@ -18,12 +18,6 @@ bash tests/poc_310p/test_asr_attention_fused_partition_probe.sh \
     2>&1 | tee "${report_dir}/fused-partition.log"
 echo "[       OK ] fused-partition-production-source"
 
-echo "[ RUN      ] runtime-ascendc-decode-attention"
-XLITE_TEST_FP16_ONLY=1 \
-python3 tests/kernels/attention.py --ascendc-decode-only \
-    2>&1 | tee "${report_dir}/runtime-attention.log"
-echo "[       OK ] runtime-ascendc-decode-attention"
-
 echo "[ RUN      ] oracle-bundle-aclnn-legacy"
 diagnostic_bundle="${report_dir}/full28-synthetic129-diagnostic-inputs.pt"
 python3 tests/poc_310p/run_qwen3_asr_llm.py \
@@ -99,6 +93,16 @@ if [[ ${full_model_status} -ne 0 ]]; then
     exit "${full_model_status}"
 fi
 echo "[       OK ] full28-synthetic129"
+
+# Run the multi-shape Runtime integration test only after the full-model
+# diagnosis has been preserved.  A single process mirrors serving and avoids
+# repeatedly resetting the shared NPU between short shape workers.
+echo "[ RUN      ] runtime-ascendc-decode-attention"
+XLITE_TEST_FP16_ONLY=1 \
+python3 tests/kernels/attention.py \
+    --ascendc-decode-only --in-process \
+    2>&1 | tee "${report_dir}/runtime-attention.log"
+echo "[       OK ] runtime-ascendc-decode-attention"
 
 echo
 echo "AscendC ASR Attention Runtime validation PASS"

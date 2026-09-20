@@ -300,9 +300,14 @@ XRuntime::~XRuntime(void)
     if (stream) {
         (void)aclrtDestroyStream(stream);
     }
-    (void)aclrtResetDevice(static_cast<int32_t>(_devid));
-
+    // aclInit() returning ACL_ERROR_REPEAT_INITIALIZE means an embedding
+    // runtime (torch_npu in the Python extension) owns ACL and the device
+    // context.  Resetting that shared device here invalidates the owner's
+    // context and can make the next short-lived test process lose TSD/device
+    // heartbeat.  Only undo global ACL/device initialization that XRuntime
+    // itself established.
     if (!_initOutside) {
+        (void)aclrtResetDevice(static_cast<int32_t>(_devid));
         (void)aclFinalize();
     }
 }

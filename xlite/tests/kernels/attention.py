@@ -103,6 +103,10 @@ parser.add_argument("--batched-decode-only", action="store_true",
                     help="310P FP16: run only the new multi-request decode path")
 parser.add_argument("--ascendc-decode-only", action="store_true",
                     help="310P FP16: run only scratch-free AscendC decode attention")
+parser.add_argument(
+    "--in-process", action="store_true",
+    help=("310P FP16: execute selected shapes in one process; this avoids "
+          "resetting the shared NPU between short AscendC Runtime cases"))
 parser.add_argument("--batched-prefill-only", action="store_true",
                     help="310P FP16: run only equal-length batched prefill cases")
 parser.add_argument("--shape-cases", type=Path,
@@ -125,7 +129,8 @@ if test_args.shape_cases is not None:
     if not work:
         parser.error(f"no shape cases found in {test_args.shape_cases}")
 poc_case_index = os.getenv("XLITE_ATTENTION_CASE_INDEX")
-if os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None:
+if (os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None
+        and not test_args.in_process):
     report_dir = Path("attention_310p_report")
     report_dir.mkdir(parents=True, exist_ok=True)
     selected_indices = list(range(len(work)))
@@ -216,6 +221,16 @@ if poc_case_index is not None:
         work = [work[selected_index]]
     except (ValueError, IndexError):
         raise SystemExit(f"invalid XLITE_ATTENTION_CASE_INDEX={poc_case_index!r}")
+elif test_args.in_process:
+    if test_args.ascendc_decode_only:
+        work = [case for case in work if all(length == 1 for length in case[2])]
+    elif test_args.batched_decode_only:
+        work = [case for case in work
+                if case[0] > 1 and all(length == 1 for length in case[2])]
+    elif test_args.batched_prefill_only:
+        work = [case for case in work
+                if case[0] > 1 and len(set(case[2])) == 1
+                and case[2][0] > 1 and len(set(case[1])) == 1]
 
 torch.npu.set_device(0)
 rt = Runtime(0, 3000)
@@ -247,6 +262,9 @@ def rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
     for batch, cached_lens_list, query_len_list in work:
+        if test_args.in_process:
+            print(f"[ RUN      ] {case_name(batch, cached_lens_list, query_len_list)}",
+                  flush=True)
         max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE)
         max_seq_len = max_num_blocks * BLOCK_SIZE
         total_query_len = sum(query_len_list)
@@ -398,6 +416,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 block_tables_array.reshape(-1).tolist(),
                 int(block_tables_array.shape[1]),
             )
+        runtime_stats_before = (
+            dict(rt.get_stats()) if hasattr(rt, "get_stats") else {})
         attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
                   output_xlite, query_start_loc, query_lens, cached_lens,
                   block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash)
@@ -422,17 +442,27 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 launch_key = ("ascendc_asr_decode_attention_launches"
                               if test_args.ascendc_decode_only else
                               "batched_decode_attention_launches")
-                if runtime_stats.get(request_key) != batch:
+                request_delta = (runtime_stats.get(request_key, 0) -
+                                 runtime_stats_before.get(request_key, 0))
+                launch_delta = (runtime_stats.get(launch_key, 0) -
+                                runtime_stats_before.get(launch_key, 0))
+                legacy_delta = (
+                    runtime_stats.get("legacy_attention_requests", 0) -
+                    runtime_stats_before.get("legacy_attention_requests", 0))
+                if request_delta != batch:
                     raise AssertionError(
-                        f"decode backend did not consume all requests: {runtime_stats}"
+                        "decode backend did not consume all requests in this "
+                        f"case (delta={request_delta}): {runtime_stats}"
                     )
-                if runtime_stats.get(launch_key) != 1:
+                if launch_delta != 1:
                     raise AssertionError(
-                        f"decode backend did not use exactly one kernel launch: {runtime_stats}"
+                        "decode backend did not use exactly one kernel launch "
+                        f"in this case (delta={launch_delta}): {runtime_stats}"
                     )
-                if runtime_stats.get("legacy_attention_requests") != 0:
+                if legacy_delta != 0:
                     raise AssertionError(
-                        f"batched decode silently used legacy attention: {runtime_stats}"
+                        "batched decode silently used legacy attention in this "
+                        f"case (delta={legacy_delta}): {runtime_stats}"
                     )
             if os.getenv("XLITE_TEST_BATCHED_PREFILL") == "1":
                 groups = {}
@@ -502,6 +532,10 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 torch.testing.assert_close(output_standard, output_xlite, atol=1e-2, rtol=1e-2)
             else:
                 torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)
+            if test_args.in_process:
+                print(
+                    f"[       OK ] {case_name(batch, cached_lens_list, query_len_list)}",
+                    flush=True)
         except AssertionError as e:
             if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
                 raise
