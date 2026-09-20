@@ -78,6 +78,12 @@ if os.getenv("XLITE_TEST_FP16_ONLY") == "1":
         (1, [511], [1]),
         (1, [2047], [1]),
         (2, [0, 127], [129, 1]),
+        (8, [0, 15, 31, 127, 255, 511, 1023, 2047],
+         [129, 1, 1, 1, 1, 1, 1, 1]),
+        (20,
+         [0 if index in (0, 7, 14) else 16 + index * 7
+          for index in range(20)],
+         [129 if index in (0, 7, 14) else 1 for index in range(20)]),
         (2, [128, 64], [65, 129]),
         (2, [0, 0], [129, 129]),
         (4, [0, 0, 0, 0], [129, 129, 129, 129]),
@@ -92,6 +98,10 @@ def case_name(batch: int, cached_lens: list[int], query_lens: list[int]) -> str:
     return (f"batch{batch}-cache{'_'.join(map(str, cached_lens))}"
             f"-query{'_'.join(map(str, query_lens))}")
 
+def has_cached_decode(cached_lens: list[int], query_lens: list[int]) -> bool:
+    return any(query == 1 and cached > 0
+               for cached, query in zip(cached_lens, query_lens))
+
 # Keep every 310P attention shape diagnosable even when one ACLNN invocation
 # fails or poisons its process.  The parent runs each shape in isolation and
 # prints all failures at the end; a hidden environment variable selects the
@@ -102,7 +112,8 @@ parser.add_argument("--rerun-failed", action="store_true",
 parser.add_argument("--batched-decode-only", action="store_true",
                     help="310P FP16: run only the new multi-request decode path")
 parser.add_argument("--ascendc-decode-only", action="store_true",
-                    help="310P FP16: run only scratch-free AscendC decode attention")
+                    help=("310P FP16: run pure and mixed batches containing "
+                          "scratch-free AscendC decode attention"))
 parser.add_argument(
     "--in-process", action="store_true",
     help=("310P FP16: execute selected shapes in one process; this avoids "
@@ -141,8 +152,8 @@ if (os.getenv("XLITE_TEST_FP16_ONLY") == "1" and poc_case_index is None
         ]
     if test_args.ascendc_decode_only:
         selected_indices = [
-            index for index, (_batch, _cached, query) in enumerate(work)
-            if all(length == 1 for length in query)
+            index for index, (_batch, cached, query) in enumerate(work)
+            if has_cached_decode(cached, query)
         ]
     if test_args.batched_prefill_only:
         selected_indices = [
@@ -223,7 +234,7 @@ if poc_case_index is not None:
         raise SystemExit(f"invalid XLITE_ATTENTION_CASE_INDEX={poc_case_index!r}")
 elif test_args.in_process:
     if test_args.ascendc_decode_only:
-        work = [case for case in work if all(length == 1 for length in case[2])]
+        work = [case for case in work if has_cached_decode(case[1], case[2])]
     elif test_args.batched_decode_only:
         work = [case for case in work
                 if case[0] > 1 and all(length == 1 for length in case[2])]
@@ -434,8 +445,67 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
                 raise AssertionError(
                     f"attention ACLNN launch counter was not updated: {runtime_stats}"
                 )
-            if ((test_args.batched_decode_only or test_args.ascendc_decode_only)
-                    and all(length == 1 for length in query_len_list)):
+            decode_requests = sum(
+                query == 1 and cached > 0
+                for cached, query in zip(cached_lens_list, query_len_list))
+            if (test_args.ascendc_decode_only and decode_requests > 0):
+                request_key = "ascendc_asr_decode_attention_requests"
+                launch_key = "ascendc_asr_decode_attention_launches"
+                request_delta = (runtime_stats.get(request_key, 0) -
+                                 runtime_stats_before.get(request_key, 0))
+                launch_delta = (runtime_stats.get(launch_key, 0) -
+                                runtime_stats_before.get(launch_key, 0))
+                legacy_decode_delta = (
+                    runtime_stats.get("legacy_decode_attention_requests", 0) -
+                    runtime_stats_before.get("legacy_decode_attention_requests", 0))
+                legacy_prefill_delta = (
+                    runtime_stats.get("legacy_prefill_attention_requests", 0) -
+                    runtime_stats_before.get("legacy_prefill_attention_requests", 0))
+                if request_delta != decode_requests:
+                    raise AssertionError(
+                        "AscendC decode did not consume every selected request "
+                        f"(delta={request_delta}, expected={decode_requests}): "
+                        f"{runtime_stats}"
+                    )
+                if launch_delta != 1:
+                    raise AssertionError(
+                        "AscendC decode did not use exactly one kernel launch "
+                        f"(delta={launch_delta}): {runtime_stats}"
+                    )
+                if legacy_decode_delta != 0:
+                    raise AssertionError(
+                        "mixed batch silently used legacy decode attention "
+                        f"(delta={legacy_decode_delta}): {runtime_stats}"
+                    )
+                expected_prefill = batch - decode_requests
+                if legacy_prefill_delta != expected_prefill:
+                    raise AssertionError(
+                        "mixed batch legacy prefill count is incorrect "
+                        f"(delta={legacy_prefill_delta}, "
+                        f"expected={expected_prefill}): {runtime_stats}"
+                    )
+                if expected_prefill > 0:
+                    mixed_decode_delta = (
+                        runtime_stats.get("ascendc_asr_mixed_decode_requests", 0) -
+                        runtime_stats_before.get(
+                            "ascendc_asr_mixed_decode_requests", 0))
+                    mixed_prefill_delta = (
+                        runtime_stats.get("ascendc_asr_mixed_prefill_requests", 0) -
+                        runtime_stats_before.get(
+                            "ascendc_asr_mixed_prefill_requests", 0))
+                    mixed_launch_delta = (
+                        runtime_stats.get("ascendc_asr_mixed_attention_launches", 0) -
+                        runtime_stats_before.get(
+                            "ascendc_asr_mixed_attention_launches", 0))
+                    if (mixed_decode_delta != decode_requests or
+                            mixed_prefill_delta != expected_prefill or
+                            mixed_launch_delta != 1):
+                        raise AssertionError(
+                            "mixed AscendC telemetry does not match the packed "
+                            f"batch contract: {runtime_stats}"
+                        )
+            elif (test_args.batched_decode_only and
+                  all(length == 1 for length in query_len_list)):
                 request_key = ("ascendc_asr_decode_attention_requests"
                                if test_args.ascendc_decode_only else
                                "batched_decode_attention_requests")

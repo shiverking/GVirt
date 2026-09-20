@@ -1244,7 +1244,6 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     }
 #ifdef XLITE_ARCH_310P
     (void)qk;
-    (void)queryStartLoc;
     (void)lens;
     (void)cachedLens;
     if (rt.UseNativeKvDecodeAttention310P()) {
@@ -1261,8 +1260,9 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
         }
     }
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
-    XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, lens, cachedLens, blockTables,
-                            maxNumBlocks, nHeads, nKvHeads, headDim, blockSize, batch, true);
+    XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, queryStartLoc, lens,
+                            cachedLens, blockTables, maxNumBlocks, nHeads, nKvHeads,
+                            headDim, blockSize, batch, true);
 #else
     KERNEL_PTR_TYPE(attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
@@ -1334,14 +1334,14 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
     (void)lastMax;
     (void)lastSum;
     (void)sync;
-    (void)queryStartLoc;
     (void)lens;
     (void)cachedLens;
     (void)blockTables;
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     (void)tileSizeOfCachedKV;
-    XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, lens, cachedLens, blockTables,
-                            maxNumBlocks, nHeads, nKvHeads, headDim, blockSize, batch, false);
+    XliteAclnn310PAttention(rt, qkv, kCache, vCache, output, queryStartLoc, lens,
+                            cachedLens, blockTables, maxNumBlocks, nHeads, nKvHeads,
+                            headDim, blockSize, batch, false);
 #else
     KERNEL_PTR_TYPE(flash_attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {

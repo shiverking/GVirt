@@ -24,7 +24,8 @@ void XliteAclnn310PMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                           bool transpose);
 
 void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
-                             XTensor &output, XTensor &lens, XTensor &cachedLens,
+                             XTensor &output, XTensor &queryStartLoc, XTensor &lens,
+                             XTensor &cachedLens,
                              XTensor &blockTables, uint32_t maxNumBlock,
                              uint32_t nHeads, uint32_t nKvHeads,
                              uint32_t headDim, uint32_t blockSize, uint32_t batch,

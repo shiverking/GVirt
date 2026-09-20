@@ -80,6 +80,14 @@
       "arithmetic": "gqa_pair_low_level_mmad_fp32_partition_softmax_and_merge",
       "runtime_eligible": true,
       "gm_intermediate_scratch_bytes": 0,
+      "mixed_batch": {
+        "entry": "asr_paged_mixed_decode_attention_fp16",
+        "selection": "query_len == 1 && cached_len > 0",
+        "query_row": "query_start_loc[request]",
+        "prefill_backend": "legacy_same_stream",
+        "extra_ub_bytes": 0,
+        "extra_workspace_bytes": 0
+      },
       "kv_stage": {
         "layout": "BSHD",
         "tile_tokens": 16,

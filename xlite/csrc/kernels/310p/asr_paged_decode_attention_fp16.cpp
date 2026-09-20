@@ -105,6 +105,18 @@ public:
         Bind(globalPairF_, TPosition::VECCALC, 19840);
     }
 
+    __aicore__ inline void InitFusedPacked(
+        GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
+        GM_ADDR cachedLengths, GM_ADDR queryStartLoc, GM_ADDR queryLens,
+        GM_ADDR output, uint32_t batch, uint32_t tableStride)
+    {
+        InitFused(qkv, kCache, vCache, blockTable, cachedLengths, output,
+                  batch, tableStride);
+        queryStartLoc_ = reinterpret_cast<__gm__ int32_t *>(queryStartLoc);
+        queryLens_ = reinterpret_cast<__gm__ int32_t *>(queryLens);
+        packed_ = true;
+    }
+
     __aicore__ inline void InitCommon(GM_ADDR qkv, GM_ADDR kCache,
                                       GM_ADDR vCache, GM_ADDR blockTable,
                                       GM_ADDR lengths, uint32_t batch,
@@ -115,6 +127,9 @@ public:
         vCache_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(vCache));
         blockTable_ = reinterpret_cast<__gm__ int32_t *>(blockTable);
         lengths_ = reinterpret_cast<__gm__ int32_t *>(lengths);
+        queryStartLoc_ = nullptr;
+        queryLens_ = nullptr;
+        packed_ = false;
         batch_ = batch;
         tableStride_ = tableStride;
         Bind(l1Q_, TPosition::A1, 0);
@@ -173,12 +188,18 @@ public:
              item += GetBlockNum()) {
             const uint32_t request = item / kKvHeads;
             const uint32_t kvHead = item % kKvHeads;
+            if (packed_ &&
+                (queryLens_[request] != 1 || lengths_[request] <= 0)) {
+                continue;
+            }
             const int32_t lengthSigned = lengths_[request] + 1;
             if (lengthSigned <= 0 ||
                 lengthSigned > static_cast<int32_t>(kMaxKv)) {
                 continue;
             }
-            RunFusedGroup(request, kvHead,
+            const uint32_t queryRow = packed_ ?
+                static_cast<uint32_t>(queryStartLoc_[request]) : request;
+            RunFusedGroup(request, queryRow, kvHead,
                           static_cast<uint32_t>(lengthSigned));
         }
         WaitFlag<HardEvent::MTE3_V>(mte3ToV_);
@@ -248,12 +269,12 @@ private:
     }
 
     __aicore__ inline void StageQuery(LocalTensor<half> &destination,
-                                      uint32_t request,
+                                      uint32_t queryRow,
                                       uint32_t queryHead)
     {
         ZeroL1(destination, true);
         GmRowToL1Nz(destination,
-                     qkv_[static_cast<uint64_t>(request) * kQkvDim +
+                     qkv_[static_cast<uint64_t>(queryRow) * kQkvDim +
                           queryHead * kHeadDim], 0);
         SetFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
         WaitFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
@@ -546,7 +567,7 @@ private:
         pipe_barrier(PIPE_V);
     }
 
-    __aicore__ inline void StoreFusedOutput(uint32_t request,
+    __aicore__ inline void StoreFusedOutput(uint32_t queryRow,
                                             uint32_t queryHead,
                                             float globalSum,
                                             __ubuf__ float *globalAccumulator)
@@ -568,13 +589,14 @@ private:
         WaitFlag<HardEvent::V_MTE3>(vToMte3_);
         DataCopyParams store{1, kHeadDim * sizeof(half) / 32, 0, 0};
         const uint64_t outputOffset =
-            static_cast<uint64_t>(request) * kQDim +
+            static_cast<uint64_t>(queryRow) * kQDim +
             queryHead * kHeadDim;
         DataCopy(output_[outputOffset], outputH_, store);
         SetFlag<HardEvent::MTE3_V>(mte3ToV_);
     }
 
     __aicore__ inline void RunFusedGroup(uint32_t request,
+                                         uint32_t queryRow,
                                          uint32_t kvHead,
                                          uint32_t kvLength)
     {
@@ -590,8 +612,8 @@ private:
         float globalSum1 = 0.0F;
         const uint32_t queryHead0 = kvHead * 2;
         const uint32_t queryHead1 = queryHead0 + 1;
-        StageQuery(l1Q_, request, queryHead0);
-        StageQuery(l1QPair_, request, queryHead1);
+        StageQuery(l1Q_, queryRow, queryHead0);
+        StageQuery(l1QPair_, queryRow, queryHead1);
 
         for (uint32_t partitionStart = 0; partitionStart < kvLength;
              partitionStart += kPartitionTokens) {
@@ -664,8 +686,8 @@ private:
             MergePartition(globalMax1, globalSum1, partitionMax1,
                            partitionSum1, accumulator1, F(globalPairF_));
         }
-        StoreFusedOutput(request, queryHead0, globalSum0, F(globalAccF_));
-        StoreFusedOutput(request, queryHead1, globalSum1, F(globalPairF_));
+        StoreFusedOutput(queryRow, queryHead0, globalSum0, F(globalAccF_));
+        StoreFusedOutput(queryRow, queryHead1, globalSum1, F(globalPairF_));
     }
 
     template <typename T>
@@ -685,6 +707,9 @@ private:
     GlobalTensor<float> states_;
     __gm__ int32_t *blockTable_ = nullptr;
     __gm__ int32_t *lengths_ = nullptr;
+    __gm__ int32_t *queryStartLoc_ = nullptr;
+    __gm__ int32_t *queryLens_ = nullptr;
+    bool packed_ = false;
     LocalTensor<half> l1Q_, l1B_, l1P_, l1QPair_, l0A_, l0B_;
     LocalTensor<float> l0C_;
     LocalTensor<half> zeroH_, probabilityH_;
@@ -737,5 +762,25 @@ extern "C" __global__ __aicore__ void asr_paged_decode_attention_fp16(
     AsrPagedDecodeAttentionKernel kernel;
     kernel.InitFused(qkv, kCache, vCache, blockTable, cachedLengths, output,
                      batch, tableStride);
+    kernel.ProcessFused();
+}
+
+extern "C" __global__ __aicore__ void asr_paged_mixed_decode_attention_fp16(
+    GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
+    GM_ADDR cachedLengths, GM_ADDR queryStartLoc, GM_ADDR queryLens,
+    GM_ADDR output, uint32_t batch, uint32_t tableStride)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_paged_mixed_decode_attention_fp16 requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch || tableStride == 0 ||
+        tableStride > 16) {
+        return;
+    }
+    AsrPagedDecodeAttentionKernel kernel;
+    kernel.InitFusedPacked(qkv, kCache, vCache, blockTable, cachedLengths,
+                           queryStartLoc, queryLens, output, batch,
+                           tableStride);
     kernel.ProcessFused();
 }

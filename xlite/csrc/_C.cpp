@@ -3267,7 +3267,7 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_backend"] = true;
         info["ascendc_asr_backend_status"] =
             "decode_baseline_plus_explicit_perf_projection_silu_lm_head";
-        info["ascendc_asr_contract_version"] = 7;
+        info["ascendc_asr_contract_version"] = 8;
         info["ascendc_asr_ub_budget_bytes"] = 192 * 1024;
         info["ascendc_asr_requires_npu_arch"] = 2002;
         info["ascendc_asr_projection_max_batch"] = 20;
@@ -3285,6 +3285,9 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
         info["ascendc_asr_paged_decode_attention_work"] =
             "request_kv_head_gqa_pair";
+        info["ascendc_asr_mixed_batch_decode"] = true;
+        info["ascendc_asr_mixed_batch_policy"] =
+            "legacy_prefill_packed_ascendc_decode";
         info["ascendc_asr_prefill"] = false;
         info["ascendc_asr_lm_head"] = true;
         info["m200_asr_prefill"] = true;
@@ -3360,6 +3363,12 @@ PYBIND11_MODULE(_C, m)
             rt.AscendCAsrDecodeAttentionRequests();
         stats["ascendc_asr_decode_attention_launches"] =
             rt.AscendCAsrDecodeAttentionLaunches();
+        stats["ascendc_asr_mixed_decode_requests"] =
+            rt.AscendCAsrMixedDecodeRequests();
+        stats["ascendc_asr_mixed_prefill_requests"] =
+            rt.AscendCAsrMixedPrefillRequests();
+        stats["ascendc_asr_mixed_attention_launches"] =
+            rt.AscendCAsrMixedAttentionLaunches();
         stats["batched_prefill_attention_requests"] =
             rt.BatchedPrefillAttentionRequests();
         stats["batched_prefill_attention_launches"] =
@@ -3550,6 +3559,12 @@ PYBIND11_MODULE(_C, m)
                 rt.AscendCAsrDecodeAttentionRequests();
             stats["ascendc_asr_decode_attention_launches"] =
                 rt.AscendCAsrDecodeAttentionLaunches();
+            stats["ascendc_asr_mixed_decode_requests"] =
+                rt.AscendCAsrMixedDecodeRequests();
+            stats["ascendc_asr_mixed_prefill_requests"] =
+                rt.AscendCAsrMixedPrefillRequests();
+            stats["ascendc_asr_mixed_attention_launches"] =
+                rt.AscendCAsrMixedAttentionLaunches();
             stats["batched_prefill_attention_requests"] =
                 rt.BatchedPrefillAttentionRequests();
             stats["batched_prefill_attention_launches"] =

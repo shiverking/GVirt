@@ -341,6 +341,13 @@ public:
         _ascendcAsrDecodeAttentionRequests += requests;
         ++_ascendcAsrDecodeAttentionLaunches;
     }
+    void RecordAscendCAsrMixedAttention(uint32_t decodeRequests,
+                                         uint32_t prefillRequests)
+    {
+        _ascendcAsrMixedDecodeRequests += decodeRequests;
+        _ascendcAsrMixedPrefillRequests += prefillRequests;
+        ++_ascendcAsrMixedAttentionLaunches;
+    }
     void RecordLegacyAttentionRequest(bool decode)
     {
         ++_legacyAttentionRequests;
@@ -533,6 +540,18 @@ public:
     [[nodiscard]] uint64_t AscendCAsrDecodeAttentionLaunches(void) const
     {
         return _ascendcAsrDecodeAttentionLaunches;
+    }
+    [[nodiscard]] uint64_t AscendCAsrMixedDecodeRequests(void) const
+    {
+        return _ascendcAsrMixedDecodeRequests;
+    }
+    [[nodiscard]] uint64_t AscendCAsrMixedPrefillRequests(void) const
+    {
+        return _ascendcAsrMixedPrefillRequests;
+    }
+    [[nodiscard]] uint64_t AscendCAsrMixedAttentionLaunches(void) const
+    {
+        return _ascendcAsrMixedAttentionLaunches;
     }
     [[nodiscard]] uint64_t LegacyAttentionRequests(void) const
     {
@@ -879,6 +898,9 @@ protected:
     uint64_t _batchedDecodeAttentionLaunches = 0;
     uint64_t _ascendcAsrDecodeAttentionRequests = 0;
     uint64_t _ascendcAsrDecodeAttentionLaunches = 0;
+    uint64_t _ascendcAsrMixedDecodeRequests = 0;
+    uint64_t _ascendcAsrMixedPrefillRequests = 0;
+    uint64_t _ascendcAsrMixedAttentionLaunches = 0;
     uint64_t _batchedPrefillAttentionRequests = 0;
     uint64_t _batchedPrefillAttentionLaunches = 0;
     uint64_t _prefillShapeForwardCalls = 0;
