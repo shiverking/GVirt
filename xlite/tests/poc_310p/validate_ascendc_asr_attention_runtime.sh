@@ -24,8 +24,27 @@ python3 tests/kernels/attention.py --ascendc-decode-only \
     2>&1 | tee "${report_dir}/runtime-attention.log"
 echo "[       OK ] runtime-ascendc-decode-attention"
 
-echo "[ RUN      ] full28-synthetic129"
+echo "[ RUN      ] oracle-bundle-aclnn-legacy"
 diagnostic_bundle="${report_dir}/full28-synthetic129-diagnostic-inputs.pt"
+python3 tests/poc_310p/run_qwen3_asr_llm.py \
+    --checkpoint "${checkpoint}" \
+    --input-mode synthetic \
+    --prompt-tokens 129 \
+    --decode-tokens 16 \
+    --max-seq-len 512 \
+    --stability-iters 1 \
+    --matmul-backend aclnn \
+    --decode-attention-backend legacy \
+    --save-decode-diagnostic-bundle "${diagnostic_bundle}" \
+    --report "${report_dir}/oracle-aclnn-legacy.json" \
+    2>&1 | tee "${report_dir}/oracle-aclnn-legacy.log"
+if [[ ! -s "${diagnostic_bundle}" ]]; then
+    echo "oracle bundle was not created: ${diagnostic_bundle}" >&2
+    exit 1
+fi
+echo "[       OK ] oracle-bundle-aclnn-legacy"
+
+echo "[ RUN      ] full28-synthetic129"
 set +e
 python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --checkpoint "${checkpoint}" \
@@ -36,7 +55,6 @@ python3 tests/poc_310p/run_qwen3_asr_llm.py \
     --stability-iters 1 \
     --matmul-backend ascendc_asr \
     --decode-attention-backend ascendc_asr \
-    --save-decode-diagnostic-bundle "${diagnostic_bundle}" \
     --report "${report_dir}/full28-synthetic129.json" \
     2>&1 | tee "${report_dir}/full28-synthetic129.log"
 full_model_status=${PIPESTATUS[0]}

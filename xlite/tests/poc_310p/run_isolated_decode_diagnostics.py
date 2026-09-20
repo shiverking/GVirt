@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Coordinate fresh-process legacy/AscendC teacher-forced diagnostics."""
+"""Run isolated A/B/C Decode diagnostics in fresh processes.
+
+The tiers change one backend boundary at a time:
+A = ACLNN MatMul + legacy attention, B = AscendC MatMul + legacy
+attention, and C = AscendC MatMul + AscendC attention. A repeated C
+process checks determinism.
+"""
 
 from __future__ import annotations
 
@@ -32,8 +38,8 @@ def _metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict:
     }
 
 
-def _run_worker(args: argparse.Namespace, name: str, backend: str,
-                work_dir: Path) -> dict:
+def _run_worker(args: argparse.Namespace, name: str, matmul_backend: str,
+                attention_backend: str, work_dir: Path) -> dict:
     worker = Path(__file__).with_name("decode_diagnostic_worker.py")
     output = work_dir / f"{name}.pt"
     log = work_dir / f"{name}.log"
@@ -41,14 +47,16 @@ def _run_worker(args: argparse.Namespace, name: str, backend: str,
         sys.executable, str(worker),
         "--checkpoint", args.checkpoint,
         "--bundle", str(args.bundle),
-        "--backend", backend,
-        "--matmul-backend", args.matmul_backend,
+        "--backend", attention_backend,
+        "--matmul-backend", matmul_backend,
         "--max-seq-len", str(args.max_seq_len),
         "--output", str(output),
     ]
     if args.num_layers is not None:
         command.extend(("--num-layers", str(args.num_layers)))
-    print(f"[ RUN      ] {name} ({backend}, fresh process)", flush=True)
+    print(
+        f"[ RUN      ] {name} (matmul={matmul_backend}, "
+        f"attention={attention_backend}, fresh process)", flush=True)
     with log.open("w", encoding="utf-8") as stream:
         completed = subprocess.run(
             command, stdout=stream, stderr=subprocess.STDOUT, check=False)
@@ -59,18 +67,38 @@ def _run_worker(args: argparse.Namespace, name: str, backend: str,
     return torch.load(output, map_location="cpu", weights_only=True)
 
 
+def _predictions(result: dict) -> list[int]:
+    return [
+        int(result["prefill_logits"].argmax()),
+        *[int(step.argmax()) for step in result["decode_logits"][:-1]],
+    ]
+
+
+def _first_mismatch(left: list[int], right: list[int]) -> int | None:
+    return next((index for index, values in enumerate(zip(left, right))
+                 if values[0] != values[1]), None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path)
-    parser.add_argument("--matmul-backend", default="ascendc_asr")
+    parser.add_argument(
+        "--matmul-backend", default="ascendc_asr",
+        help="candidate MatMul/vector backend used by tiers B and C")
     parser.add_argument("--candidate-backend", default="ascendc_asr",
                         choices=("ascendc_asr",))
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--num-layers", type=int)
     args = parser.parse_args()
+
+    if not args.bundle.is_file():
+        parser.error(
+            f"diagnostic bundle does not exist: {args.bundle}; generate a "
+            "fresh bundle with run_qwen3_asr_llm.py "
+            "--save-decode-diagnostic-bundle before running diagnostics")
 
     work_dir = args.work_dir or args.report.with_suffix("").with_name(
         args.report.stem + "_workers")
@@ -81,22 +109,25 @@ def main() -> int:
     reference_tokens = [int(token) for token in bundle["reference_token_ids"]]
     prompt_tokens = int(bundle["prompt_tokens"])
 
-    legacy = _run_worker(args, "legacy", "legacy", work_dir)
-    candidate = _run_worker(
-        args, "ascendc-a", args.candidate_backend, work_dir)
-    candidate_repeat = _run_worker(
-        args, "ascendc-b", args.candidate_backend, work_dir)
+    oracle = _run_worker(
+        args, "a-aclnn-legacy", "aclnn", "legacy", work_dir)
+    common_candidate = _run_worker(
+        args, "b-ascendc-legacy", args.matmul_backend, "legacy", work_dir)
+    attention_candidate = _run_worker(
+        args, "c-ascendc-ascendc", args.matmul_backend,
+        args.candidate_backend, work_dir)
+    attention_repeat = _run_worker(
+        args, "c-repeat-ascendc-ascendc", args.matmul_backend,
+        args.candidate_backend, work_dir)
 
-    legacy_prefill_top1 = int(legacy["prefill_logits"].argmax())
-    legacy_decode_top1 = [
-        int(step.argmax()) for step in legacy["decode_logits"]
-    ]
-    oracle_predictions = [legacy_prefill_top1, *legacy_decode_top1[:-1]]
+    oracle_predictions = _predictions(oracle)
+    common_predictions = _predictions(common_candidate)
+    attention_predictions = _predictions(attention_candidate)
     oracle_mismatches = [
         {
             "generated_token_index_zero_based": index,
             "expected": expected,
-            "legacy": actual,
+            "oracle": actual,
         }
         for index, (expected, actual) in enumerate(
             zip(reference_tokens, oracle_predictions))
@@ -105,79 +136,98 @@ def main() -> int:
     oracle_valid = not oracle_mismatches
 
     report = {
-        "mode": "isolated_process_teacher_forced_reference_tokens",
-        "oracle_backend": "legacy",
-        "candidate_backend": args.candidate_backend,
+        "mode": "isolated_process_three_tier_teacher_forced_reference_tokens",
         "fresh_process_per_run": True,
+        "bundle": str(args.bundle.resolve()),
         "worker_artifacts": str(work_dir.resolve()),
+        "tiers": {
+            "a_oracle": {"matmul": "aclnn", "attention": "legacy"},
+            "b_common_candidate": {
+                "matmul": args.matmul_backend, "attention": "legacy"},
+            "c_attention_candidate": {
+                "matmul": args.matmul_backend,
+                "attention": args.candidate_backend,
+            },
+        },
         "legacy_oracle_valid": oracle_valid,
         "legacy_oracle_mismatches": oracle_mismatches,
-        "prefill": None,
-        "ascendc_prefill_repeat_bitwise_equal": None,
+        "first_common_path_divergence_generated_index_zero_based": None,
+        "first_attention_divergence_generated_index_zero_based": None,
         "ascendc_repeat_bitwise_equal": None,
-        "first_argmax_divergence_generated_index_zero_based": None,
-        "first_argmax_divergence_generated_ordinal_one_based": None,
+        "prefill": None,
         "steps": [],
     }
 
     if oracle_valid:
-        first_divergence = None
-        prefill_repeat_equal = bool(
-            torch.equal(candidate["prefill_logits"],
-                        candidate_repeat["prefill_logits"]) and
-            torch.equal(candidate["prefill_hidden"],
-                        candidate_repeat["prefill_hidden"]))
-        repeat_all = prefill_repeat_equal
+        first_common = _first_mismatch(oracle_predictions, common_predictions)
+        first_attention = _first_mismatch(
+            common_predictions, attention_predictions)
+        repeat_equal = bool(
+            torch.equal(attention_candidate["prefill_logits"],
+                        attention_repeat["prefill_logits"]) and
+            torch.equal(attention_candidate["prefill_hidden"],
+                        attention_repeat["prefill_hidden"]) and
+            torch.equal(attention_candidate["decode_logits"],
+                        attention_repeat["decode_logits"]) and
+            torch.equal(attention_candidate["decode_hidden"],
+                        attention_repeat["decode_hidden"]))
+        report[
+            "first_common_path_divergence_generated_index_zero_based"
+        ] = first_common
+        report[
+            "first_attention_divergence_generated_index_zero_based"
+        ] = first_attention
+        report["ascendc_repeat_bitwise_equal"] = repeat_equal
         report["prefill"] = {
-            "legacy_top1": legacy_prefill_top1,
-            "ascendc_top1": int(candidate["prefill_logits"].argmax()),
-            "logits": _metrics(
-                legacy["prefill_logits"], candidate["prefill_logits"]),
-            "hidden": _metrics(
-                legacy["prefill_hidden"], candidate["prefill_hidden"]),
+            "oracle_top1": oracle_predictions[0],
+            "common_candidate_top1": common_predictions[0],
+            "attention_candidate_top1": attention_predictions[0],
+            "common_vs_oracle_logits": _metrics(
+                oracle["prefill_logits"], common_candidate["prefill_logits"]),
+            "common_vs_oracle_hidden": _metrics(
+                oracle["prefill_hidden"], common_candidate["prefill_hidden"]),
+            "attention_vs_common_logits": _metrics(
+                common_candidate["prefill_logits"],
+                attention_candidate["prefill_logits"]),
+            "attention_vs_common_hidden": _metrics(
+                common_candidate["prefill_hidden"],
+                attention_candidate["prefill_hidden"]),
         }
-        report["ascendc_prefill_repeat_bitwise_equal"] = prefill_repeat_equal
-        for index, (legacy_logits, legacy_hidden, candidate_logits,
-                    candidate_hidden, repeat_logits, repeat_hidden) in enumerate(zip(
-                        legacy["decode_logits"], legacy["decode_hidden"],
-                        candidate["decode_logits"], candidate["decode_hidden"],
-                        candidate_repeat["decode_logits"],
-                        candidate_repeat["decode_hidden"])):
-            legacy_ids, legacy_values = _top2(legacy_logits)
-            candidate_ids, candidate_values = _top2(candidate_logits)
-            repeat_equal = bool(
-                torch.equal(candidate_logits, repeat_logits) and
-                torch.equal(candidate_hidden, repeat_hidden))
-            repeat_all = repeat_all and repeat_equal
-            argmax_equal = legacy_ids[0] == candidate_ids[0]
-            if not argmax_equal and first_divergence is None:
-                first_divergence = index + 1
+
+        for index in range(len(reference_tokens) - 1):
+            oracle_logits = oracle["decode_logits"][index]
+            common_logits = common_candidate["decode_logits"][index]
+            attention_logits = attention_candidate["decode_logits"][index]
+            oracle_hidden = oracle["decode_hidden"][index]
+            common_hidden = common_candidate["decode_hidden"][index]
+            attention_hidden = attention_candidate["decode_hidden"][index]
+            oracle_ids, oracle_values = _top2(oracle_logits)
+            common_ids, common_values = _top2(common_logits)
+            attention_ids, attention_values = _top2(attention_logits)
             report["steps"].append({
                 "generated_token_index_zero_based": index + 1,
                 "generated_token_ordinal_one_based": index + 2,
                 "kv_length": prompt_tokens + index + 1,
                 "input_reference_token": reference_tokens[index],
-                "expected_next_token": (
-                    reference_tokens[index + 1]
-                    if index + 1 < len(reference_tokens) else None),
-                "legacy_top2_ids": legacy_ids,
-                "legacy_top2_logits": legacy_values,
-                "legacy_top1_margin": legacy_values[0] - legacy_values[1],
-                "ascendc_top2_ids": candidate_ids,
-                "ascendc_top2_logits": candidate_values,
-                "ascendc_logit_at_legacy_top1": float(
-                    candidate_logits.float().flatten()[legacy_ids[0]]),
-                "argmax_equal": argmax_equal,
-                "logits": _metrics(legacy_logits, candidate_logits),
-                "hidden": _metrics(legacy_hidden, candidate_hidden),
-                "ascendc_repeat_bitwise_equal": repeat_equal,
+                "expected_next_token": reference_tokens[index + 1],
+                "oracle_top2_ids": oracle_ids,
+                "oracle_top2_logits": oracle_values,
+                "oracle_top1_margin": oracle_values[0] - oracle_values[1],
+                "common_candidate_top2_ids": common_ids,
+                "common_candidate_top2_logits": common_values,
+                "attention_candidate_top2_ids": attention_ids,
+                "attention_candidate_top2_logits": attention_values,
+                "common_argmax_equal": oracle_ids[0] == common_ids[0],
+                "attention_argmax_equal": common_ids[0] == attention_ids[0],
+                "common_vs_oracle_logits": _metrics(
+                    oracle_logits, common_logits),
+                "common_vs_oracle_hidden": _metrics(
+                    oracle_hidden, common_hidden),
+                "attention_vs_common_logits": _metrics(
+                    common_logits, attention_logits),
+                "attention_vs_common_hidden": _metrics(
+                    common_hidden, attention_hidden),
             })
-        report["ascendc_repeat_bitwise_equal"] = repeat_all
-        report[
-            "first_argmax_divergence_generated_index_zero_based"
-        ] = first_divergence
-        report["first_argmax_divergence_generated_ordinal_one_based"] = (
-            first_divergence + 1 if first_divergence is not None else None)
 
     report["passed"] = bool(
         oracle_valid and report["ascendc_repeat_bitwise_equal"])
@@ -185,8 +235,9 @@ def main() -> int:
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
     if not oracle_valid:
-        print("Legacy oracle self-check FAILED; backend comparison was skipped.",
-              file=sys.stderr)
+        print(
+            "ACLNN + legacy oracle self-check FAILED; candidate comparisons "
+            "were not interpreted.", file=sys.stderr)
     return 0 if report["passed"] else 1
 
 
