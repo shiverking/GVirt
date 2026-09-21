@@ -551,9 +551,14 @@ class Llama(nn.Module):
         use_weight_nz = os.getenv("XLITE_WEIGHT_NZ", "1").strip().lower() not in {
             "0", "false", "no", "off"
         }
-        self.xlite_weight_nz = (
-            forward_backend == "xlite" and not self.args.tie_word_embeddings and use_weight_nz
-        )
+        # ``lm_head.weight`` and ``embed_tokens.weight`` are distinct Parameter
+        # objects even when their initial storage is tied below.  Converting the
+        # LM Head with npu_format_cast installs new FRACTAL_NZ storage on the
+        # LM Head Parameter while the embedding keeps its original ND storage.
+        # Disabling NZ for the whole decoder when embeddings are tied therefore
+        # incorrectly leaves every QKV/O/MLP projection in ND and makes the
+        # strict ascendc_asr_nz backend reject its first Prefill MatMul.
+        self.xlite_weight_nz = forward_backend == "xlite" and use_weight_nz
 
         q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
