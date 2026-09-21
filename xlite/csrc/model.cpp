@@ -2244,15 +2244,36 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             }
         }
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
-        XTensor &kCache = kvCache[0][0];
-        XTensor &vCache = kvCache[0][1];
+        const XTensor &kCache = kvCache[0][0];
+        const XTensor &vCache = kvCache[0][1];
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (kCache.shape[1] != _c.blockSizes[0] || vCache.shape[1] != _c.blockSizes[0] ||
-            kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
-            kCache.shape[3] != _c.headDim || vCache.shape[3] != _c.headDim) {
-            throw std::runtime_error(
-                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                ": kv cache's shape not match [block_num, block_size, kv_head_num, head_size]");
+        const bool rank4 = kCache.shape.size() == 4 && vCache.shape.size() == 4;
+#ifdef XLITE_ARCH_310P
+        const bool nativeNz = rt.UseAscendCAsrNzDecodeAttention310P();
+#else
+        const bool nativeNz = false;
+#endif
+        // The strict 310P ASR NZ backend shares the native format-29 cache:
+        // [block_num, 64, 128, 16].  Other MHA backends retain the logical
+        // BSHD cache contract.  Keep this validation aligned with the actual
+        // attention/cache-write entry points so the model does not reject a
+        // valid backend-selected layout before launching any kernel.
+        const bool validNativeNz =
+            rank4 && kCache.shape == vCache.shape && kCache.shape[1] == 64 &&
+            kCache.shape[2] == 128 && kCache.shape[3] == 16;
+        const bool validBshd =
+            rank4 && kCache.shape[0] == vCache.shape[0] &&
+            kCache.shape[1] == _c.blockSizes[0] && vCache.shape[1] == _c.blockSizes[0] &&
+            kCache.shape[2] == expectedKvHeads && vCache.shape[2] == expectedKvHeads &&
+            kCache.shape[3] == _c.headDim && vCache.shape[3] == _c.headDim;
+        if ((nativeNz && !validNativeNz) || (!nativeNz && !validBshd)) {
+            const char *expectedLayout =
+                nativeNz ? "[block_num, 64, 128, 16] FRACTAL_NZ"
+                         : "[block_num, block_size, kv_head_num, head_size] BSHD";
+            throw std::runtime_error(std::string(__FILE__) + ":" +
+                                     std::to_string(__LINE__) +
+                                     ": kv cache shape does not match selected backend; expected " +
+                                     expectedLayout);
         }
     } else if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
         XTensor &kCache = kvCache[0][0];
