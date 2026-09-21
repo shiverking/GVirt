@@ -2031,6 +2031,19 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
 }
 
 #ifdef XLITE_ARCH_310P
+void RawDeviceCopy310P(XRuntime &rt, at::Tensor &source, at::Tensor &destination)
+{
+    XTensor src, dst;
+    InitXTensor(src, source);
+    InitXTensor(dst, destination);
+    if (src.bytes != dst.bytes) {
+        throw std::invalid_argument("raw 310P device copy requires equal byte sizes");
+    }
+    CHECK_ACL(aclrtMemcpyAsync(dst.ptr, dst.bytes, src.ptr, src.bytes,
+                               ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    rt.Synchronize();
+}
+
 py::dict ProbeDecodeGraph310P(XRuntime &rt, const std::string &stage,
                               std::vector<at::Tensor> &tensors, uint32_t iterations)
 {
@@ -3967,6 +3980,9 @@ PYBIND11_MODULE(_C, m)
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
 #ifdef XLITE_ARCH_310P
+    m.def("raw_device_copy_310p", &RawDeviceCopy310P,
+          "Copy physical device bytes without interpreting tensor format",
+          py::arg("rt"), py::arg("source"), py::arg("destination"));
     m.def("probe_decode_graph_310p", &ProbeDecodeGraph310P,
           "Capture and repeatedly replay one isolated 310P decoder stage",
           py::arg("rt"), py::arg("stage"), py::arg("tensors"),

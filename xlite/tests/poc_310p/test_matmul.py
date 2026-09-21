@@ -101,7 +101,12 @@ def run_shape(m: int, n: int, k: int) -> None:
     backend_stats = dict(get_310p_matmul_stats(runtime))
 
     warmup_x = x.clone()
-    warmup_weight = candidate_weight.clone()
+    warmup_weight = (
+        torch_npu.npu_format_cast(weight_nd.clone(), 29)
+        if use_nz_backend else weight_nd.clone()
+    )
+    if use_nz_backend and _npu_format(torch_npu, warmup_weight) != 29:
+        raise AssertionError("NZ warmup weight lost FRACTAL_NZ storage")
     warmup_output = torch.empty_like(output)
     candidate_iterations = 20
     while True:

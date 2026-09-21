@@ -4,6 +4,8 @@ set -euo pipefail
 report_dir=${1:-ascendc_asr_nz_matmul_report}
 
 python3 tests/poc_310p/check_ascendc_asr_gates.py --require-resources
+python3 tests/poc_310p/probe_nz_physical_layout.py \
+  | tee "${report_dir}.nz-layout.log"
 
 args=()
 for projection in qkv o gate-up down lm-head; do

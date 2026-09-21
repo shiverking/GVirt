@@ -56,7 +56,20 @@ void XRuntime::Init(size_t sizeMB)
     } else {
         CHECK_ACL(initRet);
     }
-    CHECK_ACL(aclrtSetDevice(_devid));
+    if (!_initOutside) {
+        CHECK_ACL(aclrtSetDevice(_devid));
+    } else {
+        // torch_npu (or another embedding runtime) owns logical-to-physical
+        // device mapping and has already selected the current context.
+        // Re-selecting device 0 here is both unnecessary and incorrect when
+        // visible devices are remapped by the caller.
+        aclrtContext current = nullptr;
+        CHECK_ACL(aclrtGetCurrentContext(&current));
+        if (current == nullptr) {
+            throw std::runtime_error(
+                "XRuntime requires the embedding runtime to provide a current ACL context");
+        }
+    }
     CHECK_ACL(aclrtCreateStream(&stream));
     CHECK_ACL(aclrtGetDeviceCount(&count));
     _nDevPerNode = count;

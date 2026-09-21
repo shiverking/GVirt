@@ -215,9 +215,11 @@
       "tile": {"m": 32, "n": 128, "k": 128},
       "input_layout": "ND",
       "weight_layout": "FRACTAL_NZ_29",
+      "weight_physical_order": "k1_n1_n0_k0",
       "output_layout": "ND",
       "shapes": ["qkv", "o", "gate_up", "down", "lm_head"],
       "runtime_eligible": false,
+      "layout_probe": "tests/poc_310p/probe_nz_physical_layout.py",
       "promotion_gate": "physical_tile_correctness_and_same_process_native_nz_performance"
     }
   }

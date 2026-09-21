@@ -2,7 +2,7 @@
  * Qwen3-ASR FP16 ND x FRACTAL_NZ -> ND MatMul for Ascend310P3.
  *
  * The format-29 weight physical order is
- *   [N/16][K/16][16][16]
+ *   [K/16][N/16][16][16]
  * and is copied to L1 without an ND2NZ conversion.  Activations remain ND
  * and are staged once per launch.  Supported M is deliberately limited to
  * 1..20 until the independent prefill tiling is validated.
@@ -38,16 +38,16 @@ __aicore__ inline void NdActivationToL1(
 __aicore__ inline void NzWeightTileToL1(
     const LocalTensor<half> &dst, const GlobalTensor<half> &src,
     uint32_t nBlockStart, uint32_t kBlockStart,
-    uint32_t nBlocks, uint32_t totalKBlocks)
+    uint32_t nBlocks, uint32_t totalNBlocks)
 {
     constexpr uint32_t tileKBlocks = kTileK / kBlock;
     const uint32_t sourceOffset =
-        (nBlockStart * totalKBlocks + kBlockStart) * kFractalElements;
+        (kBlockStart * totalNBlocks + nBlockStart) * kFractalElements;
     DataCopyParams copy;
-    copy.blockCount = nBlocks;
-    copy.blockLen = tileKBlocks * kFractalElements * sizeof(half) / 32;
+    copy.blockCount = tileKBlocks;
+    copy.blockLen = nBlocks * kFractalElements * sizeof(half) / 32;
     copy.srcStride =
-        (totalKBlocks - tileKBlocks) * kFractalElements * sizeof(half) / 32;
+        (totalNBlocks - nBlocks) * kFractalElements * sizeof(half) / 32;
     copy.dstStride = 0;
     DataCopy(dst, src[sourceOffset], copy);
 }
@@ -145,13 +145,13 @@ private:
         constexpr uint32_t kBlocks = kTileK / kBlock;
         const uint32_t nOffset = nTile * kTileN;
         const uint32_t mBlocks = mPadded_ / kBlock;
-        const uint32_t totalKBlocks = k_ / kBlock;
+        const uint32_t totalNBlocks = n_ / kBlock;
 
         SetFlag<HardEvent::MTE1_MTE2>(l1Free_);
         for (uint32_t kt = 0; kt < kTiles; ++kt) {
             WaitFlag<HardEvent::MTE1_MTE2>(l1Free_);
             NzWeightTileToL1(l1B_, weight_, nOffset / kBlock,
-                             kt * kBlocks, nBlocks, totalKBlocks);
+                             kt * kBlocks, nBlocks, totalNBlocks);
             SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
             WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
             L1ToL0A(l0A_, l1A_[kt * kTileM * kTileK], mBlocks);
