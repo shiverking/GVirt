@@ -224,6 +224,11 @@
       "input_layout": "ND",
       "weight_layout": "FRACTAL_NZ_29",
       "weight_physical_order": "k1_n1_n0_k0",
+      "weight_dma": {
+        "projection": "2d_burst_when_src_stride_blocks_le_65535",
+        "lm_head": "eight_contiguous_k_fractal_row_dmas",
+        "reason": "CANN_9_1_DataCopyParams_srcStride_is_16_bit"
+      },
       "output_layout": "ND",
       "max_m": 4096,
       "shapes": ["qkv", "o", "gate_up", "down", "lm_head"],

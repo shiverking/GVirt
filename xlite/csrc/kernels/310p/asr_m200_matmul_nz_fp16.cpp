@@ -20,6 +20,7 @@ constexpr uint32_t kTileM = 32;
 constexpr uint32_t kTileN = 128;
 constexpr uint32_t kTileK = 128;
 constexpr uint32_t kFractalElements = 256;
+constexpr uint32_t kMaxDmaStrideBlocks = 65535;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
@@ -43,13 +44,33 @@ __aicore__ inline void NzWeightTileToL1(
     constexpr uint32_t tileKBlocks = kTileK / kBlock;
     const uint32_t sourceOffset =
         (kBlockStart * totalNBlocks + nBlockStart) * kFractalElements;
-    DataCopyParams copy;
-    copy.blockCount = tileKBlocks;
-    copy.blockLen = nBlocks * kFractalElements * sizeof(half) / 32;
-    copy.srcStride =
+    const uint32_t rowBlocks = nBlocks * kFractalElements * sizeof(half) / 32;
+    const uint32_t sourceStrideBlocks =
         (totalNBlocks - nBlocks) * kFractalElements * sizeof(half) / 32;
+    DataCopyParams copy;
+    copy.blockLen = rowBlocks;
     copy.dstStride = 0;
-    DataCopy(dst, src[sourceOffset], copy);
+    if (sourceStrideBlocks <= kMaxDmaStrideBlocks) {
+        copy.blockCount = tileKBlocks;
+        copy.srcStride = sourceStrideBlocks;
+        DataCopy(dst, src[sourceOffset], copy);
+        return;
+    }
+
+    // DataCopyParams strides are 16-bit on CANN 9.1 beta1.  LM Head has
+    // totalNBlocks=9496, hence a 151808-block stride between adjacent K
+    // fractal rows.  Issuing that as one 2-D DMA truncates the stride and
+    // silently reads unrelated vocabulary tiles.  Eight contiguous row DMAs
+    // retain the verified [K/16][N/16][N0][K0] physical order without a
+    // staging transpose or any extra workspace.
+    copy.blockCount = 1;
+    copy.srcStride = 0;
+    for (uint32_t kb = 0; kb < tileKBlocks; ++kb) {
+        const uint32_t rowSource =
+            ((kBlockStart + kb) * totalNBlocks + nBlockStart) *
+            kFractalElements;
+        DataCopy(dst[kb * nBlocks * kFractalElements], src[rowSource], copy);
+    }
 }
 
 __aicore__ inline void L1ToL0A(const LocalTensor<half> &dst,
