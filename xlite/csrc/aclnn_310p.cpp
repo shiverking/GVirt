@@ -239,8 +239,10 @@ static bool RunAscendCAsrDecodeAttention(
     uint32_t blockSize, uint32_t batch, bool allowMixed)
 {
     const bool nativeNz = rt.UseAscendCAsrNzDecodeAttention310P();
-    uint32_t decodeRequests = rt._linearDecodeStep ? batch : 0;
-    if (!rt._linearDecodeStep) {
+    uint32_t decodeRequests = rt._linearDecodeStep ? batch :
+        static_cast<uint32_t>(rt._decodeRequestIndicesHost.size());
+    if (!nativeNz && !rt._linearDecodeStep) {
+        decodeRequests = 0;
         for (uint32_t request = 0; request < batch; ++request) {
             decodeRequests += (rt._lensHost[request] == 1 &&
                                rt._cachedLensHost[request] > 0) ? 1 : 0;
@@ -270,7 +272,9 @@ static bool RunAscendCAsrDecodeAttention(
         throw std::runtime_error(
             "ascendc_asr Decode Attention tensors do not satisfy the fixed ASR contract");
     }
-    if (!nativeNz || !rt._linearDecodeStep) {
+    // The strict NZ path consumes the fixed device metadata prepared once per
+    // forward.  Do not rescan retained Host vectors in every Decoder layer.
+    if (!nativeNz) {
       for (uint32_t request = 0; request < batch; ++request) {
         if (rt._lensHost[request] != 1 || rt._cachedLensHost[request] == 0) {
             continue;

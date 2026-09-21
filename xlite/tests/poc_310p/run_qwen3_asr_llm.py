@@ -139,6 +139,12 @@ def main() -> int:
     if os.environ.get("WORLD_SIZE", "1") != "1":
         parser.error("310P POC requires WORLD_SIZE=1")
 
+    # The strict NZ backend shares the model's format-29 weights with the
+    # Native oracle.  Set this before Llama construction/loading so no ND
+    # weight copy is retained or selected accidentally.
+    if args.matmul_backend == "ascendc_asr_nz":
+        os.environ["XLITE_WEIGHT_NZ"] = "1"
+
     device_name = _device_name()
     if "310P" not in device_name.upper() and not args.allow_non_310p:
         parser.error(f"expected an Ascend 310P device, detected {device_name!r}")
@@ -445,9 +451,9 @@ def main() -> int:
             "ascendc_asr_decode_attention_hit": (
                 runtime_stats["ascendc_asr_decode_attention_requests"] > 0
             ),
-            "ascendc_asr_decode_attention_launches_match": (
-                runtime_stats["ascendc_asr_decode_attention_launches"] ==
-                runtime_stats["ascendc_asr_decode_attention_requests"]
+            "ascendc_asr_decode_attention_launches_cover_requests": (
+                runtime_stats["ascendc_asr_decode_attention_requests"] >=
+                runtime_stats["ascendc_asr_decode_attention_launches"] > 0
             ),
             "ascendc_asr_zero_legacy_decode": (
                 runtime_stats["legacy_decode_attention_requests"] == 0

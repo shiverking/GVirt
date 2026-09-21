@@ -7,7 +7,7 @@
  * Decode uses one M tile; Prefill walks independent 32-row M tiles without
  * changing the verified cube/readout schedule.
  *
- * Max resources per AIC (Down): UB=24576, L1=425984, L0A=8192,
+ * Max resources per AIC (Down): UB=24576, L1=458752, L0A=8192,
  * L0B=32768, L0C=16384 bytes.  All cross-pipe events come from TPipe.
  */
 #include "kernel_operator.h"
@@ -108,8 +108,12 @@ public:
         k_ = k;
         l1A_.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         l1A_.address_.bufferAddr = 0;
-        l1B_.address_.logicPos = static_cast<uint8_t>(TPosition::B1);
-        l1B_.address_.bufferAddr = kTileM * k * sizeof(half);
+        for (uint32_t ping = 0; ping < 2; ++ping) {
+            l1B_[ping].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
+            l1B_[ping].address_.bufferAddr =
+                kTileM * k * sizeof(half) +
+                ping * kTileN * kTileK * sizeof(half);
+        }
         l0A_.address_.logicPos = static_cast<uint8_t>(TPosition::A2);
         l0A_.address_.bufferAddr = 0;
         l0B_.address_.logicPos = static_cast<uint8_t>(TPosition::B2);
@@ -121,10 +125,14 @@ public:
         outFp16_.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC);
         outFp16_.address_.bufferAddr = kTileM * kTileN * sizeof(float);
 
-        l1Free_ = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(HardEvent::MTE1_MTE2));
-        l1Ready_ = static_cast<event_t>(
+        activationReady_ = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE2_MTE1));
+        for (uint32_t ping = 0; ping < 2; ++ping) {
+            l1Free_[ping] = static_cast<event_t>(
+                GetTPipePtr()->FetchEventID(HardEvent::MTE1_MTE2));
+            l1Ready_[ping] = static_cast<event_t>(
+                GetTPipePtr()->FetchEventID(HardEvent::MTE2_MTE1));
+        }
         cubeReady_ = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE1_M));
         cubeDone_ = static_cast<event_t>(
@@ -156,8 +164,8 @@ public:
                                  input_[mOffset * k_ + kt * kTileK],
                                  mActual, k_, mPadded);
             }
-            SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
-            WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
+            SetFlag<HardEvent::MTE2_MTE1>(activationReady_);
+            WaitFlag<HardEvent::MTE2_MTE1>(activationReady_);
             for (uint32_t nt = core; nt < nTiles; nt += cores) {
                 ProcessNTile(mt, nt, mActual, mPadded, kTiles);
             }
@@ -176,16 +184,26 @@ private:
         const uint32_t mBlocks = mPadded / kBlock;
         const uint32_t totalNBlocks = n_ / kBlock;
 
-        SetFlag<HardEvent::MTE1_MTE2>(l1Free_);
+        SetFlag<HardEvent::MTE1_MTE2>(l1Free_[0]);
+        SetFlag<HardEvent::MTE1_MTE2>(l1Free_[1]);
+        WaitFlag<HardEvent::MTE1_MTE2>(l1Free_[0]);
+        NzWeightTileToL1(l1B_[0], weight_, nOffset / kBlock,
+                         0, nBlocks, totalNBlocks);
+        SetFlag<HardEvent::MTE2_MTE1>(l1Ready_[0]);
         for (uint32_t kt = 0; kt < kTiles; ++kt) {
-            WaitFlag<HardEvent::MTE1_MTE2>(l1Free_);
-            NzWeightTileToL1(l1B_, weight_, nOffset / kBlock,
-                             kt * kBlocks, nBlocks, totalNBlocks);
-            SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
-            WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
+            const uint32_t current = kt & 1;
+            WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_[current]);
             L1ToL0A(l0A_, l1A_[kt * kTileM * kTileK], mBlocks);
-            L1ToL0B(l0B_, l1B_);
-            SetFlag<HardEvent::MTE1_MTE2>(l1Free_);
+            L1ToL0B(l0B_, l1B_[current]);
+            SetFlag<HardEvent::MTE1_MTE2>(l1Free_[current]);
+            if (kt + 1 < kTiles) {
+                const uint32_t next = current ^ 1;
+                WaitFlag<HardEvent::MTE1_MTE2>(l1Free_[next]);
+                NzWeightTileToL1(l1B_[next], weight_, nOffset / kBlock,
+                                 (kt + 1) * kBlocks, nBlocks,
+                                 totalNBlocks);
+                SetFlag<HardEvent::MTE2_MTE1>(l1Ready_[next]);
+            }
             SetFlag<HardEvent::MTE1_M>(cubeReady_);
             WaitFlag<HardEvent::MTE1_M>(cubeReady_);
 
@@ -199,7 +217,8 @@ private:
             SetFlag<HardEvent::M_MTE1>(cubeDone_);
             WaitFlag<HardEvent::M_MTE1>(cubeDone_);
         }
-        WaitFlag<HardEvent::MTE1_MTE2>(l1Free_);
+        WaitFlag<HardEvent::MTE1_MTE2>(l1Free_[0]);
+        WaitFlag<HardEvent::MTE1_MTE2>(l1Free_[1]);
 
         DataCopyParams drain;
         drain.blockCount = 1;
@@ -234,9 +253,9 @@ private:
 
     TPipe pipe_;
     GlobalTensor<half> input_, weight_, output_;
-    LocalTensor<half> l1A_, l1B_, l0A_, l0B_, outFp16_;
+    LocalTensor<half> l1A_, l1B_[2], l0A_, l0B_, outFp16_;
     LocalTensor<float> l0C_, outFp32_;
-    event_t l1Free_, l1Ready_, cubeReady_, cubeDone_;
+    event_t l1Free_[2], l1Ready_[2], activationReady_, cubeReady_, cubeDone_;
     event_t vectorReady_, l0Reusable_, storeReady_, storeDone_;
     uint32_t m_ = 0, n_ = 0, k_ = 0;
 };
