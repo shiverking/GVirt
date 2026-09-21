@@ -3316,14 +3316,16 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_nz_fallback"] = false;
         info["ascendc_asr_nz_cache_layout"] = "[block,64,128,16]_format29";
         info["ascendc_asr_nz_decode_attention"] = true;
+        info["ascendc_asr_native_nz_cache"] = true;
+        info["ascendc_asr_nz_mixed_attention"] = true;
         info["ascendc_asr_paged_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
         info["ascendc_asr_paged_decode_attention_work"] =
             "request_kv_head_gqa_pair";
         info["ascendc_asr_mixed_batch_decode"] = true;
         info["ascendc_asr_mixed_batch_policy"] =
-            "legacy_prefill_packed_ascendc_decode";
-        info["ascendc_asr_prefill"] = false;
+            "single_packed_ascendc_splitfuse";
+        info["ascendc_asr_prefill"] = true;
         info["ascendc_asr_lm_head"] = true;
         info["m200_asr_prefill"] = true;
         info["m200_asr_prefill_max_m"] = 4096;

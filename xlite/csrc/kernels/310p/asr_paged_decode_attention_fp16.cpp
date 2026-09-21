@@ -1,10 +1,10 @@
 /*
- * Ascend310P3 Qwen3-ASR scratch-free paged Decode Attention.
- * One M200 AI Core owns one (request, KV-head), processes both GQA query
- * heads and at most four 512-token partitions, then merges their independent
- * FP32 online-softmax states on chip.
- * K/V are read directly from the 4D BSHD paged cache.  The production entry
- * writes one FP16 output row and has no GM intermediate workspace.
+ * Ascend310P3 Qwen3-ASR scratch-free paged Attention/SplitFuse.
+ * One M200 AI Core owns one packed (query-row, KV-head), processes both GQA
+ * query heads and at most four 512-token partitions, then merges independent
+ * FP32 online-softmax states on chip.  The packed entry handles Prefill and
+ * Decode rows in one launch; K/V are consumed directly from BSHD or native
+ * format-29 storage.  There is no gathered cache or GM partition workspace.
  */
 #include "kernel_operator.h"
 
