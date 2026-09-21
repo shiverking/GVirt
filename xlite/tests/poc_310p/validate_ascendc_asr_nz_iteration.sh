@@ -55,6 +55,10 @@ else
         --case down-m20 --case down-m129 \
         --case lm-head-m1 --case lm-head-m20
 fi
+run_stage summarize-nz-matmul \
+    python3 tests/poc_310p/summarize_ascendc_asr_nz_matmul.py \
+    "${report_dir}/matmul" \
+    --report "${report_dir}/matmul-summary.json"
 
 common_args=(
     --checkpoint "${checkpoint}"
