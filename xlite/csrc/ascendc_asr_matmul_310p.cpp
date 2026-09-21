@@ -48,7 +48,7 @@ bool IsNzContract(const XTensor &in, const XTensor &weight,
     const uint64_t m = in.shape[0];
     const uint64_t k = in.shape[1];
     const uint64_t n = weight.shape[0];
-    return m >= 1 && m <= kMaxDecodeBatch && weight.shape[1] == k &&
+    return m >= 1 && m <= 4096 && weight.shape[1] == k &&
            out.shape[0] == m && out.shape[1] == n &&
            (IsProjectionShape(static_cast<uint32_t>(n), static_cast<uint32_t>(k)) ||
             (n == kLmHeadN && k == 2048));

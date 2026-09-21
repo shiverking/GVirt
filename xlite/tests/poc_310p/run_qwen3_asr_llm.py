@@ -103,10 +103,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--matmul-backend",
-        choices=("ascendc_asr_perf", "ascendc_asr", "m200_asr_prefill",
+        choices=("ascendc_asr_nz", "ascendc_asr_perf", "ascendc_asr", "m200_asr_prefill",
                  "m200_asr", "aclnn"),
         default="m200_asr",
-        help=("310P MatMul backend; ascendc_asr_perf selects performance-gated "
+        help=("310P MatMul backend; ascendc_asr_nz selects strict FP16 "
+              "ND x FRACTAL_NZ Prefill/Decode kernels with no fallback; "
+              "ascendc_asr_perf selects performance-gated "
               "Decode projection/SiLU/LM Head candidates while ascendc_asr "
               "keeps the production baselines"),
     )
@@ -155,7 +157,7 @@ def main() -> int:
     if not hasattr(model.xlite_rt, "set_decode_attention_backend"):
         raise RuntimeError("installed Xlite does not expose selectable Decode Attention")
     model.xlite_rt.set_decode_attention_backend(args.decode_attention_backend)
-    if args.matmul_backend in ("ascendc_asr", "ascendc_asr_perf"):
+    if args.matmul_backend in ("ascendc_asr_nz", "ascendc_asr", "ascendc_asr_perf"):
         required_stats = {
             "ascendc_asr_requests",
             "ascendc_asr_kernel_launches",
@@ -186,6 +188,19 @@ def main() -> int:
                     "loaded Xlite extension is stale for ascendc_asr_perf: "
                     f"extension={Path(xlite_c.__file__).resolve()}, "
                     f"missing runtime stats={missing_perf_stats}; rebuild with "
+                    "'pip install -v -e . --no-build-isolation'"
+                )
+        if args.matmul_backend == "ascendc_asr_nz":
+            required_nz_stats = {
+                "ascendc_asr_nz_projection_requests",
+                "ascendc_asr_nz_lm_head_requests",
+            }
+            missing_nz_stats = sorted(required_nz_stats - available_stats)
+            if missing_nz_stats:
+                raise RuntimeError(
+                    "loaded Xlite extension is stale for ascendc_asr_nz: "
+                    f"extension={Path(xlite_c.__file__).resolve()}, "
+                    f"missing runtime stats={missing_nz_stats}; rebuild with "
                     "'pip install -v -e . --no-build-isolation'"
                 )
     if args.decode_attention_backend == "ascendc_asr":
@@ -364,7 +379,7 @@ def main() -> int:
     runtime_stats = dict(model.xlite_rt.get_stats())
     peak_memory_bytes = int(torch.npu.max_memory_allocated())
     backend_acceptance = {}
-    if args.matmul_backend in ("ascendc_asr", "ascendc_asr_perf"):
+    if args.matmul_backend in ("ascendc_asr_nz", "ascendc_asr", "ascendc_asr_perf"):
         backend_acceptance = {
             "ascendc_asr_projection_hit": runtime_stats["ascendc_asr_requests"] > 0,
             "ascendc_asr_projection_launches_match": (

@@ -13,6 +13,11 @@ for projection in qkv o gate-up down lm-head; do
     args+=(--case "${projection}-m${batch}")
   done
 done
+for projection in qkv o gate-up down; do
+  for batch in 129 256; do
+    args+=(--case "${projection}-m${batch}")
+  done
+done
 
 python3 tests/poc_310p/test_matmul.py \
   --backend ascendc_asr_nz \

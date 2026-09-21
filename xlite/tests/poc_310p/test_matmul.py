@@ -164,7 +164,7 @@ def run_shape(m: int, n: int, k: int) -> None:
         backend == "m200_asr_prefill" and m <= 4096 and n != 151936)
     use_ascendc_asr = (
         backend in ("ascendc_asr_nz", "ascendc_asr", "ascendc_asr_perf") and
-        m <= 20 and
+        m <= (4096 if backend == "ascendc_asr_nz" else 20) and
         (n != 151936 or backend in ("ascendc_asr_nz", "ascendc_asr_perf"))
     )
     if use_ascendc_asr:

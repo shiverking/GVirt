@@ -799,8 +799,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             if (!XliteAscendCAsrNzMatmul310PSupported(
                     in, weight, out, weightNZ, bias, deqScale, transpose)) {
                 throw std::runtime_error(
-                    "ascendc_asr_nz requires a verified Qwen3-ASR Decode "
-                    "projection or LM Head with FRACTAL_NZ weight; fallback is disabled");
+                    "ascendc_asr_nz requires a verified Qwen3-ASR Prefill/Decode "
+                    "projection or LM Head with FRACTAL_NZ weight, M in [1,4096], "
+                    "FP16 ND input/output, and no bias/transpose; fallback is disabled");
             }
             XliteAscendCAsrNzMatmul310P(rt, in, weight, out);
             return;

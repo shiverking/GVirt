@@ -3295,8 +3295,9 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_perf_silu_mul"] = "whole_row";
         info["ascendc_asr_perf_lm_head"] = "l1_cached_activation_full_logits";
         info["ascendc_asr_nz_backend"] = true;
-        info["ascendc_asr_nz_status"] = "experimental_decode_matmul_microprobe";
+        info["ascendc_asr_nz_status"] = "experimental_prefill_decode_matmul";
         info["ascendc_asr_nz_weight_format"] = 29;
+        info["ascendc_asr_nz_max_m"] = 4096;
         info["ascendc_asr_nz_fallback"] = false;
         info["ascendc_asr_paged_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;

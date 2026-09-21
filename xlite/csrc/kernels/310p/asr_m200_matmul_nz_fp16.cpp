@@ -3,9 +3,9 @@
  *
  * The format-29 weight physical order is
  *   [K/16][N/16][16][16]
- * and is copied to L1 without an ND2NZ conversion.  Activations remain ND
- * and are staged once per launch.  Supported M is deliberately limited to
- * 1..20 until the independent prefill tiling is validated.
+ * and is copied to L1 without an ND2NZ conversion. Activations remain ND.
+ * Decode uses one M tile; Prefill walks independent 32-row M tiles without
+ * changing the verified cube/readout schedule.
  *
  * Max resources per AIC (Down): UB=24576, L1=425984, L0A=8192,
  * L0B=32768, L0C=16384 bytes.  All cross-pipe events come from TPipe.
@@ -85,8 +85,6 @@ public:
         m_ = m;
         n_ = n;
         k_ = k;
-        mPadded_ = AlignUp(m, kBlock);
-
         l1A_.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         l1A_.address_.bufferAddr = 0;
         l1B_.address_.logicPos = static_cast<uint8_t>(TPosition::B1);
@@ -123,28 +121,38 @@ public:
     __aicore__ inline void Process()
     {
         const uint32_t kTiles = k_ / kTileK;
-        for (uint32_t kt = 0; kt < kTiles; ++kt) {
-            NdActivationToL1(l1A_[kt * kTileM * kTileK],
-                             input_[kt * kTileK], m_, k_, mPadded_);
-        }
-        SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
-        WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
-
         const uint32_t core = GetBlockIdx();
         const uint32_t cores = GetBlockNum();
         const uint32_t nTiles = n_ / kTileN;
-        for (uint32_t nt = core; nt < nTiles; nt += cores) {
-            ProcessNTile(nt, kTiles);
+        const uint32_t mTiles = (m_ + kTileM - 1) / kTileM;
+        for (uint32_t mt = 0; mt < mTiles; ++mt) {
+            const uint32_t mOffset = mt * kTileM;
+            const uint32_t mActual =
+                m_ - mOffset < kTileM ? m_ - mOffset : kTileM;
+            const uint32_t mPadded = AlignUp(mActual, kBlock);
+            for (uint32_t kt = 0; kt < kTiles; ++kt) {
+                NdActivationToL1(l1A_[kt * kTileM * kTileK],
+                                 input_[mOffset * k_ + kt * kTileK],
+                                 mActual, k_, mPadded);
+            }
+            SetFlag<HardEvent::MTE2_MTE1>(l1Ready_);
+            WaitFlag<HardEvent::MTE2_MTE1>(l1Ready_);
+            for (uint32_t nt = core; nt < nTiles; nt += cores) {
+                ProcessNTile(mt, nt, mActual, mPadded, kTiles);
+            }
         }
     }
 
 private:
-    __aicore__ inline void ProcessNTile(uint32_t nTile, uint32_t kTiles)
+    __aicore__ inline void ProcessNTile(uint32_t mTile, uint32_t nTile,
+                                        uint32_t mActual,
+                                        uint32_t mPadded,
+                                        uint32_t kTiles)
     {
         constexpr uint32_t nBlocks = kTileN / kBlock;
         constexpr uint32_t kBlocks = kTileK / kBlock;
         const uint32_t nOffset = nTile * kTileN;
-        const uint32_t mBlocks = mPadded_ / kBlock;
+        const uint32_t mBlocks = mPadded / kBlock;
         const uint32_t totalNBlocks = n_ / kBlock;
 
         SetFlag<HardEvent::MTE1_MTE2>(l1Free_);
@@ -161,7 +169,7 @@ private:
             WaitFlag<HardEvent::MTE1_M>(cubeReady_);
 
             MmadParams params;
-            params.m = mPadded_;
+            params.m = mPadded;
             params.n = kTileN;
             params.k = kTileK;
             params.cmatrixSource = false;
@@ -174,7 +182,7 @@ private:
 
         DataCopyParams drain;
         drain.blockCount = 1;
-        drain.blockLen = mPadded_ * kTileN * sizeof(float) / 1024;
+        drain.blockLen = mPadded * kTileN * sizeof(float) / 1024;
         drain.srcStride = 0;
         drain.dstStride = 0;
         DataCopyEnhancedParams enhanced;
@@ -184,18 +192,18 @@ private:
         WaitFlag<HardEvent::M_V>(vectorReady_);
         DataCopy(outFp32_, l0C_, drain, enhanced);
         PipeBarrier<PIPE_V>();
-        Cast(outFp16_, outFp32_, RoundMode::CAST_NONE, mPadded_ * kTileN);
+        Cast(outFp16_, outFp32_, RoundMode::CAST_NONE, mPadded * kTileN);
         SetFlag<HardEvent::V_MTE3>(storeReady_);
         WaitFlag<HardEvent::V_MTE3>(storeReady_);
 
         DataCopyParams write;
-        write.blockCount = m_;
+        write.blockCount = mActual;
         write.blockLen = kBlock * sizeof(half) / 32;
         write.srcStride = 0;
         write.dstStride = n_ * sizeof(half) / 32 - write.blockLen;
         for (uint32_t nb = 0; nb < nBlocks; ++nb) {
-            DataCopy(output_[nOffset + nb * kBlock],
-                     outFp16_[nb * mPadded_ * kBlock], write);
+            DataCopy(output_[mTile * kTileM * n_ + nOffset + nb * kBlock],
+                     outFp16_[nb * mPadded * kBlock], write);
         }
         SetFlag<HardEvent::MTE3_V>(storeDone_);
         WaitFlag<HardEvent::MTE3_V>(storeDone_);
@@ -209,7 +217,7 @@ private:
     LocalTensor<float> l0C_, outFp32_;
     event_t l1Free_, l1Ready_, cubeReady_, cubeDone_;
     event_t vectorReady_, l0Reusable_, storeReady_, storeDone_;
-    uint32_t m_ = 0, n_ = 0, k_ = 0, mPadded_ = 0;
+    uint32_t m_ = 0, n_ = 0, k_ = 0;
 };
 
 __aicore__ inline bool IsSupported(uint32_t m, uint32_t n, uint32_t k)
@@ -218,7 +226,7 @@ __aicore__ inline bool IsSupported(uint32_t m, uint32_t n, uint32_t k)
         (k == 2048 && (n == 2048 || n == 4096 || n == 12288)) ||
         (k == 6144 && n == 2048);
     const bool lmHead = k == 2048 && n == 151936;
-    return m >= 1 && m <= 20 && (projection || lmHead);
+    return m >= 1 && m <= 4096 && (projection || lmHead);
 }
 }  // namespace
 

@@ -203,7 +203,7 @@
       "remaining_gate": "model_weight_and_whole_model_validation"
     },
     "asr_m200_matmul_nz_fp16": {
-      "status": "experimental_native_layout_microprobe",
+      "status": "experimental_native_layout_prefill_decode_candidate",
       "ub_bytes": 24576,
       "l1_bytes_max": 425984,
       "l1_activation_bytes_max": 393216,
@@ -217,6 +217,7 @@
       "weight_layout": "FRACTAL_NZ_29",
       "weight_physical_order": "k1_n1_n0_k0",
       "output_layout": "ND",
+      "max_m": 4096,
       "shapes": ["qkv", "o", "gate_up", "down", "lm_head"],
       "runtime_eligible": false,
       "layout_probe": "tests/poc_310p/probe_nz_physical_layout.py",
