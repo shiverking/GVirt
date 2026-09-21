@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "target": {
+    "soc": "Ascend310P3",
+    "cann": "9.1.0-beta.1",
+    "dtype": "float16",
+    "tensor_parallel": 1
+  },
+  "linear": {
+    "activation_format": 2,
+    "weight_format": 29,
+    "output_format": 2,
+    "weight_format_name": "ACL_FORMAT_FRACTAL_NZ",
+    "production_baseline": "torch.nn.functional.linear with format-29 weight",
+    "nd_baseline_role": "format-difference diagnostic only"
+  },
+  "kv_cache": {
+    "logical_shape": [2, "num_blocks", 64, 128, 16],
+    "format": 29,
+    "layout": "native_5d_nz"
+  },
+  "decode_attention": {
+    "pure_decode": "one _npu_paged_attention call per layer for the whole batch",
+    "mixed_batch": "one _npu_paged_attention_splitfuse_v2 call per layer"
+  },
+  "vector_ops": {
+    "rmsnorm": "torch_npu.npu_rms_norm",
+    "add_rmsnorm": "torch_npu.npu_add_rms_norm",
+    "silu_mul": "torch_npu.npu_swiglu",
+    "mrope": "cos/sin prepared once per forward and reused by every layer"
+  },
+  "audit": {
+    "script": "tests/poc_310p/audit_native_eager_contract.py",
+    "required_m": [1, 2, 4, 6, 8, 12, 16, 20],
+    "minimum_synchronized_window_ms": 200,
+    "isolated_process_per_shape": true,
+    "device_selection_owned_by_caller": true
+  },
+  "source_evidence": {
+    "vllm_ascend_branch": "xlite-test",
+    "native_runner": "vllm_ascend/_310p/model_runner_310p.py",
+    "linear_weight_conversion": "vllm_ascend/ops/linear.py: AscendUnquantizedLinearMethod.process_weights_after_loading",
+    "attention_backend": "vllm_ascend/attention/attention_v1.py",
+    "note": "Source paths identify the audited local Native eager implementation; runtime measurements are authoritative."
+  }
+}

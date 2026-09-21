@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""310P FP16/ND MatMul gate; isolate each shape and report every failure."""
+"""310P FP16 MatMul gate with explicit ND and Native FRACTAL_NZ oracles."""
 
 from __future__ import annotations
 
@@ -22,35 +22,79 @@ PROJECTIONS = (
 M_VALUES = (1, 8, 20, 26, 52, 78, 127, 128, 129, 256, 384, 512)
 
 
+def _npu_format(torch_npu, tensor) -> int:
+    getter = getattr(torch_npu, "get_npu_format", None)
+    if getter is None:
+        raise RuntimeError("torch_npu.get_npu_format is required for the format gate")
+    return int(getter(tensor))
+
+
+def _timed_linear(torch, F, x, weight, minimum_ms: float = 200.0) -> dict:
+    # Use NPU events for device time.  A synchronized wall-clock window is
+    # retained separately so TaskQueue/host submission overhead is visible.
+    for _ in range(3):
+        F.linear(x, weight)
+    torch.npu.synchronize()
+    iterations = 1
+    while True:
+        start = torch.npu.Event(enable_timing=True)
+        end = torch.npu.Event(enable_timing=True)
+        wall_started = time.perf_counter_ns()
+        start.record()
+        for _ in range(iterations):
+            F.linear(x, weight)
+        end.record()
+        end.synchronize()
+        wall_ms = (time.perf_counter_ns() - wall_started) / 1_000_000
+        device_ms = float(start.elapsed_time(end))
+        if wall_ms >= minimum_ms:
+            return {
+                "iterations": iterations,
+                "device_ms": device_ms / iterations,
+                "wall_ms": wall_ms / iterations,
+                "host_gap_ms": max(0.0, wall_ms - device_ms) / iterations,
+            }
+        iterations = min(iterations * 2, 1 << 20)
+
+
 def run_shape(m: int, n: int, k: int) -> None:
     import torch
-    import torch_npu  # noqa: F401: register the NPU backend
+    import torch_npu
     import torch.nn.functional as F
     from xlite._C import Runtime, get_310p_matmul_stats, matmul
 
-    torch.npu.set_device(0)
-    # The native ACL descriptors assume ND storage, not Torch internal NZ.
-    torch.npu.config.allow_internal_format = False
     torch.manual_seed(310)
     runtime = Runtime(0, 768)  # ACLNN workspace budget is at most 512 MiB.
     backend = os.environ.get("XLITE_TEST_MATMUL_BACKEND", "m200_asr")
     runtime.set_matmul_backend_310p(backend)
     x = torch.randn(m, k, dtype=torch.float16, device="npu:0")
-    weight = torch.randn(n, k, dtype=torch.float16, device="npu:0")
+    weight_nd = torch.randn(n, k, dtype=torch.float16, device="npu:0")
+    weight_nz = torch_npu.npu_format_cast(weight_nd, 29)
     output = torch.full((m, n), torch.nan, dtype=torch.float16, device="npu:0")
-    reference = F.linear(x, weight)
+    if _npu_format(torch_npu, weight_nd) != 2:
+        raise AssertionError("ND oracle weight did not retain ACL_FORMAT_ND (2)")
+    if _npu_format(torch_npu, weight_nz) != 29:
+        raise AssertionError("Native oracle weight is not ACL_FORMAT_FRACTAL_NZ (29)")
+    reference_nd = F.linear(x, weight_nd)
+    reference_nz = F.linear(x, weight_nz)
+    torch.testing.assert_close(reference_nz.cpu().float(), reference_nd.cpu().float(),
+                               rtol=1e-2, atol=1e-2)
+    native_nd_timing = _timed_linear(torch, F, x, weight_nd)
+    native_nz_timing = _timed_linear(torch, F, x, weight_nz)
 
     # Xlite owns a separate ACL stream: complete producers, including the
     # sentinel fill, before calling the native binding.
     torch.npu.synchronize()
     started = time.perf_counter()
-    matmul(runtime, x, weight, output, False, False)
+    # Current production Xlite backends consume ND.  The explicit NZ backend
+    # is promoted only after its physical-tile microprobe passes.
+    matmul(runtime, x, weight_nd, output, False, False)
     torch.npu.synchronize()
     elapsed_ms = (time.perf_counter() - started) * 1000
     backend_stats = dict(get_310p_matmul_stats(runtime))
 
     actual = output.cpu().float()
-    expected = reference.cpu().float()
+    expected = reference_nz.cpu().float()
     if not torch.isfinite(actual).all():
         raise AssertionError(
             f"MatMul non-finite output: {int((~torch.isfinite(actual)).sum())}/{actual.numel()}")
@@ -62,11 +106,21 @@ def run_shape(m: int, n: int, k: int) -> None:
         "max_abs_error": (actual - expected).abs().max().item(),
         "cosine": cosine,
         "cold_call_ms": elapsed_ms,
+        "formats": {
+            "input": _npu_format(torch_npu, x),
+            "weight_nd": _npu_format(torch_npu, weight_nd),
+            "weight_nz": _npu_format(torch_npu, weight_nz),
+            "output": _npu_format(torch_npu, output),
+        },
+        "native_nd": native_nd_timing,
+        "native_nz": native_nz_timing,
+        "production_baseline": "native_nz",
         "torch_peak_allocated_bytes": torch.npu.max_memory_allocated(),
         "memory_note": "Torch allocator only; excludes native Xlite TensorPool",
         "backend_stats": backend_stats,
     }), flush=True)
-    # Compare on CPU to avoid the device-side isclose double-tolerance warning.
+    # Compare against the Native eager NZ contract, not an ND-only ACLNN
+    # convenience baseline.  ND timing remains diagnostic only.
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
     use_m200 = (backend == "m200_asr" and m <= 20 and n != 151936) or (
         backend == "m200_asr_prefill" and m <= 4096 and n != 151936)
