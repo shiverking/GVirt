@@ -138,7 +138,8 @@ def main() -> int:
     if "310P" not in device_name.upper() and not args.allow_non_310p:
         parser.error(f"expected an Ascend 310P device, detected {device_name!r}")
 
-    torch.npu.set_device(0)
+    # The caller owns logical-to-physical device mapping and the current NPU
+    # context.  Do not re-select logical device 0 from a validation worker.
     torch.set_default_dtype(torch.float16)
     torch.manual_seed(20260907)
     model_config = load_qwen3_asr_llm_args(
