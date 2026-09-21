@@ -428,6 +428,10 @@ void XRuntime::RetireAclnnMatmulResources310P(std::vector<XTensor *> tensors,
 
 void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
 {
+    if (backend == "ascendc_asr_nz") {
+        _decodeAttentionBackend310P = XDecodeAttentionBackend310P::ASCENDC_ASR_NZ;
+        return;
+    }
     if (backend == "ascendc_asr") {
         _decodeAttentionBackend310P = XDecodeAttentionBackend310P::ASCENDC_ASR;
         return;
@@ -449,13 +453,15 @@ void XRuntime::SetDecodeAttentionBackend310P(const std::string &backend)
         return;
     }
     throw std::invalid_argument(
-        "Ascend310P decode attention backend must be one of: ascendc_asr, direct_atb, "
+        "Ascend310P decode attention backend must be one of: ascendc_asr_nz, ascendc_asr, direct_atb, "
         "native_atb, batched_aclnn, legacy");
 }
 
 const char *XRuntime::DecodeAttentionBackend310PName(void) const
 {
     switch (_decodeAttentionBackend310P) {
+        case XDecodeAttentionBackend310P::ASCENDC_ASR_NZ:
+            return "ascendc_asr_nz";
         case XDecodeAttentionBackend310P::ASCENDC_ASR:
             return "ascendc_asr";
         case XDecodeAttentionBackend310P::DIRECT_ATB:

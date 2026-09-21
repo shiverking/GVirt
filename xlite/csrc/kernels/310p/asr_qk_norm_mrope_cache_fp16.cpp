@@ -45,7 +45,7 @@ public:
     __aicore__ inline void Init(GM_ADDR qkv, GM_ADDR qWeight, GM_ADDR kWeight,
                                 GM_ADDR positions, GM_ADDR cossin, GM_ADDR slots,
                                 GM_ADDR kCache, GM_ADDR vCache, uint32_t tokens,
-                                float eps, float qScale)
+                                float eps, float qScale, bool nativeNz)
     {
         qkv_ = reinterpret_cast<__gm__ half *>(qkv);
         qWeight_ = reinterpret_cast<__gm__ half *>(qWeight);
@@ -58,6 +58,7 @@ public:
         tokens_ = tokens;
         eps_ = eps;
         qScale_ = qScale;
+        nativeNz_ = nativeNz;
         Bind(inputH_, 0); Bind(weightH_, 256); Bind(normH_, 512); Bind(outputH_, 768);
         Bind(freqTH_, 1024); Bind(freqHH_, 1280); Bind(freqWH_, 1536);
         Bind(cosH_, 1792); Bind(sinH_, 2048);
@@ -170,9 +171,7 @@ public:
             copy_ubuf_to_gm(qkv_ + qkvOffset, H(normH_), 0, 1, 8, 0, 0);
             if (!isQ) {
                 const uint32_t slot = static_cast<uint32_t>(slots_[token]);
-                const uint64_t cacheOffset =
-                    (static_cast<uint64_t>(slot) * kKvHeads + head) * kHeadDim;
-                copy_ubuf_to_gm(kCache_ + cacheOffset, H(normH_), 0, 1, 8, 0, 0);
+                StoreCacheHead(kCache_, slot, head, H(normH_));
             }
             SetFlag<HardEvent::MTE3_V>(storeFree);
 
@@ -183,9 +182,7 @@ public:
                 WaitFlag<HardEvent::MTE2_MTE3>(valueReady);
                 WaitFlag<HardEvent::MTE3_V>(storeFree);
                 const uint32_t slot = static_cast<uint32_t>(slots_[token]);
-                const uint64_t cacheOffset =
-                    (static_cast<uint64_t>(slot) * kKvHeads + head) * kHeadDim;
-                copy_ubuf_to_gm(vCache_ + cacheOffset, H(valueH_), 0, 1, 8, 0, 0);
+                StoreCacheHead(vCache_, slot, head, H(valueH_));
                 SetFlag<HardEvent::MTE3_V>(storeFree);
             }
         }
@@ -195,6 +192,28 @@ public:
     }
 
 private:
+    __aicore__ inline void StoreCacheHead(__gm__ half *cache, uint32_t slot,
+                                          uint32_t head, __ubuf__ half *source)
+    {
+        if (!nativeNz_) {
+            const uint64_t offset =
+                (static_cast<uint64_t>(slot) * kKvHeads + head) * kHeadDim;
+            copy_ubuf_to_gm(cache + offset, source, 0, 1, 8, 0, 0);
+            return;
+        }
+        // Native 310P cache physical layout for logical [block,64,128,16]:
+        // [block][kv_head * 8 + dim_block][token_in_block][dim_in_block].
+        const uint64_t block = slot / 128;
+        const uint64_t token = slot % 128;
+        const uint64_t blockBase = block * 64 * 128 * 16;
+        for (uint32_t dimBlock = 0; dimBlock < 8; ++dimBlock) {
+            const uint64_t offset = blockBase +
+                static_cast<uint64_t>(head * 8 + dimBlock) * 128 * 16 +
+                token * 16;
+            copy_ubuf_to_gm(cache + offset, source + dimBlock * 16,
+                            0, 1, 1, 0, 0);
+        }
+    }
     template <typename T> __aicore__ inline void Bind(LocalTensor<T> &tensor, uint32_t offset)
     { tensor.address_.logicPos = static_cast<uint8_t>(TPosition::VECCALC); tensor.address_.bufferAddr = offset; }
     __aicore__ inline __ubuf__ half *H(LocalTensor<half> &x) { return reinterpret_cast<__ubuf__ half *>(x.GetPhyAddr()); }
@@ -206,6 +225,7 @@ private:
     LocalTensor<half> inputH_, weightH_, normH_, outputH_, freqTH_, freqHH_, freqWH_, cosH_, sinH_, valueH_;
     LocalTensor<float> inputF_, squareAF_, squareBF_, weightF_;
     uint32_t tokens_ = 0; float eps_ = 0.0F; float qScale_ = 0.0F;
+    bool nativeNz_ = false;
 };
 }  // namespace
 
@@ -221,6 +241,22 @@ extern "C" __global__ __aicore__ void asr_qk_norm_mrope_cache_fp16(
     if (tokens == 0 || tokens > 20) return;
     AsrQkNormMropeCacheKernel kernel;
     kernel.Init(qkv, qWeight, kWeight, positions, cossin, slots, kCache,
-                vCache, tokens, eps, qScale);
+                vCache, tokens, eps, qScale, false);
+    kernel.Process();
+}
+
+extern "C" __global__ __aicore__ void asr_qk_norm_mrope_cache_nz_fp16(
+    GM_ADDR qkv, GM_ADDR qWeight, GM_ADDR kWeight, GM_ADDR positions,
+    GM_ADDR cossin, GM_ADDR slots, GM_ADDR kCache, GM_ADDR vCache,
+    uint32_t tokens, float eps, float qScale)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_qk_norm_mrope_cache_nz_fp16 requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if (tokens == 0 || tokens > 4096) return;
+    AsrQkNormMropeCacheKernel kernel;
+    kernel.Init(qkv, qWeight, kWeight, positions, cossin, slots, kCache,
+                vCache, tokens, eps, qScale, true);
     kernel.Process();
 }

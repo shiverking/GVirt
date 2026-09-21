@@ -27,6 +27,7 @@ os.environ.setdefault("XLITE_WEIGHT_NZ", "0")
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from transformers import AutoTokenizer
 
 from tests.models.llama import Llama
@@ -61,6 +62,9 @@ def _clear_caches(model: Llama) -> None:
         layer.self_attn.k_cache.zero_()
         layer.self_attn.v_cache.zero_()
     for key_cache, value_cache in model.xlite_kv_cache:
+        key_cache.zero_()
+        value_cache.zero_()
+    for key_cache, value_cache in getattr(model, "xlite_native_kv_cache", ()):
         key_cache.zero_()
         value_cache.zero_()
 
@@ -114,7 +118,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--decode-attention-backend",
-        choices=("ascendc_asr", "direct_atb", "native_atb", "batched_aclnn", "legacy"),
+        choices=("ascendc_asr_nz", "ascendc_asr", "direct_atb", "native_atb",
+                 "batched_aclnn", "legacy"),
         default="legacy",
         help="310P Decode Attention backend; Prefill remains on its validated path",
     )
@@ -158,6 +163,18 @@ def main() -> int:
     if not hasattr(model.xlite_rt, "set_decode_attention_backend"):
         raise RuntimeError("installed Xlite does not expose selectable Decode Attention")
     model.xlite_rt.set_decode_attention_backend(args.decode_attention_backend)
+    if args.decode_attention_backend == "ascendc_asr_nz":
+        native_cache = []
+        for key_cache, _ in model.xlite_kv_cache:
+            cache_shape = (key_cache.shape[0], 64, 128, 16)
+            native_cache.append([
+                torch_npu.empty_with_format(
+                    size=cache_shape, dtype=torch.float16, device="npu", acl_format=29),
+                torch_npu.empty_with_format(
+                    size=cache_shape, dtype=torch.float16, device="npu", acl_format=29),
+            ])
+        model.xlite_native_kv_cache = native_cache
+        model.xlite_model.set_native_kv_cache_310p(native_cache)
     if args.matmul_backend in ("ascendc_asr_nz", "ascendc_asr", "ascendc_asr_perf"):
         required_stats = {
             "ascendc_asr_requests",
@@ -177,6 +194,21 @@ def main() -> int:
                 f"missing runtime stats={missing_stats}; rebuild with "
                 "'pip install -v -e . --no-build-isolation'"
             )
+        if args.decode_attention_backend == "ascendc_asr_nz":
+            required_nz_attention_stats = {
+                "ascendc_asr_nz_cache_write_requests",
+                "ascendc_asr_nz_decode_attention_requests",
+                "ascendc_asr_nz_decode_attention_launches",
+            }
+            missing_nz_attention_stats = sorted(
+                required_nz_attention_stats - available_stats
+            )
+            if missing_nz_attention_stats:
+                raise RuntimeError(
+                    "loaded Xlite extension is stale for ascendc_asr_nz attention: "
+                    f"extension={Path(xlite_c.__file__).resolve()}, "
+                    f"missing runtime stats={missing_nz_attention_stats}"
+                )
         if args.matmul_backend == "ascendc_asr_perf":
             required_perf_stats = {
                 "ascendc_asr_perf_projection_requests",
@@ -204,7 +236,7 @@ def main() -> int:
                     f"missing runtime stats={missing_nz_stats}; rebuild with "
                     "'pip install -v -e . --no-build-isolation'"
                 )
-    if args.decode_attention_backend == "ascendc_asr":
+    if args.decode_attention_backend in ("ascendc_asr", "ascendc_asr_nz"):
         required_attention_stats = {
             "ascendc_asr_decode_attention_requests",
             "ascendc_asr_decode_attention_launches",
@@ -408,7 +440,7 @@ def main() -> int:
                 runtime_stats["ascendc_asr_perf_silu_mul_requests"] > 0
             ),
         })
-    if args.decode_attention_backend == "ascendc_asr":
+    if args.decode_attention_backend in ("ascendc_asr", "ascendc_asr_nz"):
         backend_acceptance.update({
             "ascendc_asr_decode_attention_hit": (
                 runtime_stats["ascendc_asr_decode_attention_requests"] > 0
@@ -424,6 +456,15 @@ def main() -> int:
                 runtime_stats["decode_kv_gather_bytes"] == 0
             ),
         })
+        if args.decode_attention_backend == "ascendc_asr_nz":
+            backend_acceptance.update({
+                "ascendc_asr_nz_cache_write_hit": (
+                    runtime_stats["ascendc_asr_nz_cache_write_requests"] > 0
+                ),
+                "ascendc_asr_nz_attention_hit": (
+                    runtime_stats["ascendc_asr_nz_decode_attention_requests"] > 0
+                ),
+            })
 
     report = {
         "device": device_name,

@@ -1110,28 +1110,45 @@ void XliteOpAsrQkNormMropeCache310P(XRuntime &rt, XTensor &qkv, XTensor &qNorm,
     }
 #ifdef XLITE_ARCH_310P
     const size_t tokens = qkv.shape.empty() ? 0 : qkv.shape[0];
-    const bool cacheShape = kCache.shape.size() == 4 && vCache.shape.size() == 4 &&
-                            kCache.shape == vCache.shape && kCache.shape[1] == 128 &&
-                            kCache.shape[2] == 8 && kCache.shape[3] == 128;
+    const bool nativeNz = rt.UseAscendCAsrNzDecodeAttention310P();
+    const bool bshdCache = kCache.shape.size() == 4 && vCache.shape.size() == 4 &&
+                           kCache.shape == vCache.shape && kCache.shape[1] == 128 &&
+                           kCache.shape[2] == 8 && kCache.shape[3] == 128;
+    const bool nzCache = kCache.shape.size() == 4 && vCache.shape.size() == 4 &&
+                         kCache.shape == vCache.shape && kCache.shape[1] == 64 &&
+                         kCache.shape[2] == 128 && kCache.shape[3] == 16;
+    const bool cacheShape = nativeNz ? nzCache : bshdCache;
     const bool positionShape = position.shape.size() == 2 && position.shape[0] == 3 &&
                                position.shape[1] == tokens;
-    if (!rt.UseAscendCAsrMatmul310P() || !rt._linearDecodeStep ||
+    const size_t maxTokens = nativeNz ? 4096 : 20;
+    if (!rt.UseAscendCAsrMatmul310P() || (!nativeNz && !rt._linearDecodeStep) ||
         !EachXDtype(FP16, qkv, qNorm, kNorm, kCache, vCache, cossin) ||
         position.dtype != INT64 || slotMapping.dtype != INT32 ||
-        qkv.shape.size() != 2 || tokens == 0 || tokens > 20 || qkv.shape[1] != 4096 ||
+        qkv.shape.size() != 2 || tokens == 0 || tokens > maxTokens || qkv.shape[1] != 4096 ||
         qNorm.numel != 128 || kNorm.numel != 128 || !cacheShape || !positionShape ||
         slotMapping.numel < tokens) {
         throw std::runtime_error(
-            "ascendc_asr fused QK Norm/MRoPE/Cache requires a pure Decode step, FP16 "
+            "ascendc_asr fused QK Norm/MRoPE/Cache requires FP16 "
             "Q16/KV8/head_dim=128 tensors, positions=[3,batch], INT32 slots and "
-            "BSHD cache=[blocks,128,8,128]");
+            "a cache matching the selected backend (BSHD=[blocks,128,8,128] or "
+            "NZ=[blocks,64,128,16])");
     }
     const float qScale = 1.0F / sqrtf(128.0F);
-    ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_fp16)
-    (8, rt.stream, qkv.ptr, qNorm.ptr, kNorm.ptr, position.ptr, cossin.ptr,
-     slotMapping.ptr, kCache.ptr, vCache.ptr, static_cast<uint32_t>(tokens),
-     normEps, qScale);
+    if (nativeNz) {
+        ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_nz_fp16)
+        (8, rt.stream, qkv.ptr, qNorm.ptr, kNorm.ptr, position.ptr, cossin.ptr,
+         slotMapping.ptr, kCache.ptr, vCache.ptr, static_cast<uint32_t>(tokens),
+         normEps, qScale);
+    } else {
+        ACLRT_LAUNCH_KERNEL(asr_qk_norm_mrope_cache_fp16)
+        (8, rt.stream, qkv.ptr, qNorm.ptr, kNorm.ptr, position.ptr, cossin.ptr,
+         slotMapping.ptr, kCache.ptr, vCache.ptr, static_cast<uint32_t>(tokens),
+         normEps, qScale);
+    }
     ++rt.ascendcAsrQkNormMropeCacheRequests;
+    if (nativeNz) {
+        ++rt.ascendcAsrNzCacheWriteRequests;
+    }
 #else
     (void)qkv;
     (void)qNorm;

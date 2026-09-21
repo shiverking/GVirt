@@ -1298,35 +1298,42 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
 
+    bool nativeAtb = false;
+    bool directAtb = false;
+    bool ascendcNz = false;
+#ifdef XLITE_ARCH_310P
+    nativeAtb = rt.UseNativeKvDecodeAttention310P();
+    directAtb = rt.UseDirectAtbDecodeAttention310P();
+    ascendcNz = rt.UseAscendCAsrNzDecodeAttention310P();
+    if (nativeAtb || ascendcNz) {
+        if (currStream == 0) {
+            throw std::runtime_error(
+                "native-layout attention requires the current PyTorch NPU stream");
+        }
+        if (_nativeKv310P.size() != _kv.size()) {
+            throw std::runtime_error(
+                "native-layout attention requires one registered 5D/NZ K/V cache pair per decoder layer");
+        }
+        if (nativeAtb && rt.multiTaskParallel) {
+            throw std::runtime_error("native_atb does not support Xlite multi-task parallelism");
+        }
+    }
+#endif
     for (uint64_t i = 0; i < _kv.size(); i++) {
         if (kvCache[i].size() != _kv[i].size()) {
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
+#ifdef XLITE_ARCH_310P
+            if (ascendcNz) {
+                InitXTensor(_kv[i][j], _nativeKv310P[i][j]);
+                continue;
+            }
+#endif
             InitXTensor(_kv[i][j], kvCache[i][j]);
         }
     }
-
-    bool nativeAtb = false;
-    bool directAtb = false;
-#ifdef XLITE_ARCH_310P
-    nativeAtb = rt.UseNativeKvDecodeAttention310P();
-    directAtb = rt.UseDirectAtbDecodeAttention310P();
-    if (nativeAtb) {
-        if (currStream == 0) {
-            throw std::runtime_error(
-                "native_atb requires the current PyTorch NPU stream from the online runner");
-        }
-        if (_nativeKv310P.size() != _kv.size()) {
-            throw std::runtime_error(
-                "native_atb requires one registered 5D/NZ K/V cache pair per decoder layer");
-        }
-        if (rt.multiTaskParallel) {
-            throw std::runtime_error("native_atb does not support Xlite multi-task parallelism");
-        }
-    }
-#endif
     if (currStream != 0 && rt.taskId == 0 && (!nativeAtb || directAtb)) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
@@ -1628,39 +1635,46 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         throw std::runtime_error(std::string(__func__) + ": check deepstack input failed");
     }
 
-    for (uint64_t i = 0; i < _kv.size(); i++) {
-        if (kvCache[i].size() != _kv[i].size()) {
-            throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
-                                     std::to_string(i));
-        }
-        for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j]);
-        }
-    }
-
     for (uint32_t i = 0; i < deepstackInput.size(); i++) {
         InitXTensor(_deepstackInputEmbeds[i], deepstackInput[i]);
     }
 
     bool nativeAtb = false;
     bool directAtb = false;
+    bool ascendcNz = false;
 #ifdef XLITE_ARCH_310P
     nativeAtb = rt.UseNativeKvDecodeAttention310P();
     directAtb = rt.UseDirectAtbDecodeAttention310P();
-    if (nativeAtb) {
+    ascendcNz = rt.UseAscendCAsrNzDecodeAttention310P();
+    if (nativeAtb || ascendcNz) {
         if (currStream == 0) {
             throw std::runtime_error(
-                "native_atb requires the current PyTorch NPU stream from the ASR runner");
+                "native-layout attention requires the current PyTorch NPU stream from the ASR runner");
         }
         if (_nativeKv310P.size() != _kv.size()) {
             throw std::runtime_error(
-                "native_atb requires one registered 5D/NZ K/V cache pair per decoder layer");
+                "native-layout attention requires one registered 5D/NZ K/V cache pair per decoder layer");
         }
-        if (rt.multiTaskParallel) {
+        if (nativeAtb && rt.multiTaskParallel) {
             throw std::runtime_error("native_atb does not support Xlite multi-task parallelism");
         }
     }
 #endif
+    for (uint64_t i = 0; i < _kv.size(); i++) {
+        if (kvCache[i].size() != _kv[i].size()) {
+            throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
+                                     std::to_string(i));
+        }
+        for (uint64_t j = 0; j < _kv[i].size(); j++) {
+#ifdef XLITE_ARCH_310P
+            if (ascendcNz) {
+                InitXTensor(_kv[i][j], _nativeKv310P[i][j]);
+                continue;
+            }
+#endif
+            InitXTensor(_kv[i][j], kvCache[i][j]);
+        }
+    }
     if (currStream != 0 && rt.taskId == 0 && (!nativeAtb || directAtb)) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
@@ -3226,12 +3240,12 @@ PYBIND11_MODULE(_C, m)
         info["kernel_set"] = XLITE_BUILD_KERNEL_SET;
 #ifdef XLITE_310P_LLM_FP16_POC
         info["abi"] = 1;
-        info["cache_layout"] = "BSHD";
+        info["cache_layout"] = "runtime_selectable";
         info["max_batch"] = 20;
         info["max_seq_len"] = 2048;
         info["attention_backend"] = "runtime_selectable";
         info["decode_attention_backends"] =
-            py::make_tuple("ascendc_asr", "direct_atb", "native_atb",
+            py::make_tuple("ascendc_asr_nz", "ascendc_asr", "direct_atb", "native_atb",
                            "batched_aclnn", "legacy");
         // PromptFlashAttentionV2 needs a dense, max-length-padded KV gather for
         // decode on 310P.  Keep it available as a diagnostic backend, but do
@@ -3295,10 +3309,13 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_perf_silu_mul"] = "whole_row";
         info["ascendc_asr_perf_lm_head"] = "l1_cached_activation_full_logits";
         info["ascendc_asr_nz_backend"] = true;
-        info["ascendc_asr_nz_status"] = "experimental_prefill_decode_matmul";
+        info["ascendc_asr_nz_status"] =
+            "strict_nz_matmul_native_cache_and_batched_decode";
         info["ascendc_asr_nz_weight_format"] = 29;
         info["ascendc_asr_nz_max_m"] = 4096;
         info["ascendc_asr_nz_fallback"] = false;
+        info["ascendc_asr_nz_cache_layout"] = "[block,64,128,16]_format29";
+        info["ascendc_asr_nz_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
         info["ascendc_asr_paged_decode_attention_work"] =
@@ -3341,6 +3358,8 @@ PYBIND11_MODULE(_C, m)
             rt.ascendcAsrAddRmsNormRequests;
         stats["ascendc_asr_qk_norm_mrope_cache_requests"] =
             rt.ascendcAsrQkNormMropeCacheRequests;
+        stats["ascendc_asr_nz_cache_write_requests"] =
+            rt.ascendcAsrNzCacheWriteRequests;
         stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
         stats["ascendc_asr_perf_projection_requests"] =
             rt.ascendcAsrPerfProjectionRequests;
@@ -3385,6 +3404,10 @@ PYBIND11_MODULE(_C, m)
             rt.AscendCAsrDecodeAttentionRequests();
         stats["ascendc_asr_decode_attention_launches"] =
             rt.AscendCAsrDecodeAttentionLaunches();
+        stats["ascendc_asr_nz_decode_attention_requests"] =
+            rt.AscendCAsrNzDecodeAttentionRequests();
+        stats["ascendc_asr_nz_decode_attention_launches"] =
+            rt.AscendCAsrNzDecodeAttentionLaunches();
         stats["ascendc_asr_mixed_decode_requests"] =
             rt.AscendCAsrMixedDecodeRequests();
         stats["ascendc_asr_mixed_prefill_requests"] =
@@ -3534,6 +3557,8 @@ PYBIND11_MODULE(_C, m)
                 rt.ascendcAsrAddRmsNormRequests;
             stats["ascendc_asr_qk_norm_mrope_cache_requests"] =
                 rt.ascendcAsrQkNormMropeCacheRequests;
+            stats["ascendc_asr_nz_cache_write_requests"] =
+                rt.ascendcAsrNzCacheWriteRequests;
             stats["ascendc_asr_silu_mul_requests"] = rt.ascendcAsrSiluMulRequests;
             stats["ascendc_asr_perf_projection_requests"] =
                 rt.ascendcAsrPerfProjectionRequests;
@@ -3585,6 +3610,10 @@ PYBIND11_MODULE(_C, m)
                 rt.AscendCAsrDecodeAttentionRequests();
             stats["ascendc_asr_decode_attention_launches"] =
                 rt.AscendCAsrDecodeAttentionLaunches();
+            stats["ascendc_asr_nz_decode_attention_requests"] =
+                rt.AscendCAsrNzDecodeAttentionRequests();
+            stats["ascendc_asr_nz_decode_attention_launches"] =
+                rt.AscendCAsrNzDecodeAttentionLaunches();
             stats["ascendc_asr_mixed_decode_requests"] =
                 rt.AscendCAsrMixedDecodeRequests();
             stats["ascendc_asr_mixed_prefill_requests"] =

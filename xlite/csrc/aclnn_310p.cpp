@@ -238,15 +238,18 @@ static bool RunAscendCAsrDecodeAttention(
     uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
     uint32_t blockSize, uint32_t batch, bool allowMixed)
 {
-    uint32_t decodeRequests = 0;
-    for (uint32_t request = 0; request < batch; ++request) {
-        decodeRequests += (rt._lensHost[request] == 1 &&
-                           rt._cachedLensHost[request] > 0) ? 1 : 0;
+    const bool nativeNz = rt.UseAscendCAsrNzDecodeAttention310P();
+    uint32_t decodeRequests = rt._linearDecodeStep ? batch : 0;
+    if (!rt._linearDecodeStep) {
+        for (uint32_t request = 0; request < batch; ++request) {
+            decodeRequests += (rt._lensHost[request] == 1 &&
+                               rt._cachedLensHost[request] > 0) ? 1 : 0;
+        }
     }
-    if (decodeRequests == 0) {
+    if (decodeRequests == 0 && !nativeNz) {
         return false;
     }
-    const bool mixed = decodeRequests != batch;
+    const bool mixed = !rt._linearDecodeStep;
     if (mixed && !allowMixed) {
         return false;
     }
@@ -267,7 +270,8 @@ static bool RunAscendCAsrDecodeAttention(
         throw std::runtime_error(
             "ascendc_asr Decode Attention tensors do not satisfy the fixed ASR contract");
     }
-    for (uint32_t request = 0; request < batch; ++request) {
+    if (!nativeNz || !rt._linearDecodeStep) {
+      for (uint32_t request = 0; request < batch; ++request) {
         if (rt._lensHost[request] != 1 || rt._cachedLensHost[request] == 0) {
             continue;
         }
@@ -287,23 +291,43 @@ static bool RunAscendCAsrDecodeAttention(
                     "ascendc_asr Decode Attention block table points outside KV cache");
             }
         }
+      }
     }
     // The fused AscendC kernel owns one GQA pair per KV head.
-    const uint32_t blocks = std::min(rt.aicNum, decodeRequests * nKvHeads);
+    const uint32_t workRequests = mixed && nativeNz ?
+        static_cast<uint32_t>(qkv.shape[0]) : decodeRequests;
+    const uint32_t blocks = std::min(rt.aicNum, workRequests * nKvHeads);
     if (mixed) {
-        ACLRT_LAUNCH_KERNEL(asr_paged_mixed_decode_attention_fp16)(
-            blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-            blockTables.ptr, cachedLens.ptr, queryStartLoc.ptr, lens.ptr,
-            output.ptr, batch, maxNumBlock);
+        if (nativeNz) {
+            ACLRT_LAUNCH_KERNEL(asr_paged_mixed_decode_attention_nz_fp16)(
+                blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
+                blockTables.ptr, cachedLens.ptr, queryStartLoc.ptr, lens.ptr,
+                output.ptr, batch, maxNumBlock,
+                static_cast<uint32_t>(qkv.shape[0]));
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_paged_mixed_decode_attention_fp16)(
+                blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
+                blockTables.ptr, cachedLens.ptr, queryStartLoc.ptr, lens.ptr,
+                output.ptr, batch, maxNumBlock,
+                static_cast<uint32_t>(qkv.shape[0]));
+        }
         rt.RecordAscendCAsrMixedAttention(decodeRequests,
-                                           batch - decodeRequests);
+                                          batch - decodeRequests);
     } else {
-        ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_fp16)(
-            blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-            blockTables.ptr, cachedLens.ptr, output.ptr, batch,
-            maxNumBlock);
+        if (nativeNz) {
+            ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_nz_fp16)(
+                blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
+                blockTables.ptr, cachedLens.ptr, output.ptr, batch,
+                maxNumBlock);
+        } else {
+            ACLRT_LAUNCH_KERNEL(asr_paged_decode_attention_fp16)(
+                blocks, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
+                blockTables.ptr, cachedLens.ptr, output.ptr, batch,
+                maxNumBlock);
+        }
     }
-    rt.RecordAscendCAsrDecodeAttention(decodeRequests);
+    rt.RecordAscendCAsrDecodeAttention(
+        nativeNz ? static_cast<uint32_t>(qkv.shape[0]) : decodeRequests);
     return true;
 }
 
@@ -744,11 +768,16 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
             "Ascend310P attention POC is fixed to head_dim=128, Q16/KV8 and block_size=128");
     }
     (void)decode;
-    if (kCache.shape.size() != 4 || vCache.shape != kCache.shape ||
-        kCache.shape[1] != blockSize || kCache.shape[2] != nKvHeads ||
-        kCache.shape[3] != headDim) {
+    const bool nativeNz = rt.UseAscendCAsrNzDecodeAttention310P();
+    const bool validBshd = kCache.shape.size() == 4 && vCache.shape == kCache.shape &&
+                           kCache.shape[1] == blockSize &&
+                           kCache.shape[2] == nKvHeads && kCache.shape[3] == headDim;
+    const bool validNz = kCache.shape.size() == 4 && vCache.shape == kCache.shape &&
+                         kCache.shape[1] == 64 && kCache.shape[2] == 128 &&
+                         kCache.shape[3] == 16;
+    if ((nativeNz && !validNz) || (!nativeNz && !validBshd)) {
         throw std::runtime_error(
-            "Ascend310P attention requires identical 4D BSHD K/V caches");
+            "Ascend310P attention cache layout does not match the selected backend");
     }
     const size_t qElements = static_cast<size_t>(nHeads) * headDim;
     const size_t rowElements = static_cast<size_t>(nHeads + 2 * nKvHeads) * headDim;
@@ -770,7 +799,7 @@ void XliteAclnn310PAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
         RunAscendCAsrDecodeAttention(
             rt, qkv, kCache, vCache, output, queryStartLoc, lens, cachedLens,
             blockTables, maxNumBlock, nHeads, nKvHeads, headDim, blockSize,
-            batch, false)) {
+            batch, nativeNz)) {
         return;
     }
 

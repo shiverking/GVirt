@@ -93,6 +93,7 @@ enum class XDecodeAttentionBackend310P {
     NATIVE_ATB,
     DIRECT_ATB,
     ASCENDC_ASR,
+    ASCENDC_ASR_NZ,
 };
 
 struct XAsrAttentionDiagnosticRecord310P {
@@ -262,7 +263,12 @@ public:
     }
     [[nodiscard]] bool UseAscendCAsrDecodeAttention310P(void) const
     {
-        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::ASCENDC_ASR;
+        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::ASCENDC_ASR ||
+               _decodeAttentionBackend310P == XDecodeAttentionBackend310P::ASCENDC_ASR_NZ;
+    }
+    [[nodiscard]] bool UseAscendCAsrNzDecodeAttention310P(void) const
+    {
+        return _decodeAttentionBackend310P == XDecodeAttentionBackend310P::ASCENDC_ASR_NZ;
     }
     [[nodiscard]] bool UseDirectAtbSetupReuse310P(void) const
     {
@@ -275,6 +281,10 @@ public:
     [[nodiscard]] bool UseNativeKvDecodeAttention310P(void) const
     {
         return UseNativeAtbDecodeAttention310P() || UseDirectAtbDecodeAttention310P();
+    }
+    [[nodiscard]] bool UseNativeLayoutKvDecodeAttention310P(void) const
+    {
+        return UseNativeKvDecodeAttention310P() || UseAscendCAsrNzDecodeAttention310P();
     }
     using NativeAtbAttentionCallback = std::function<bool(
         XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor &,
@@ -346,6 +356,10 @@ public:
     {
         _ascendcAsrDecodeAttentionRequests += requests;
         ++_ascendcAsrDecodeAttentionLaunches;
+        if (UseAscendCAsrNzDecodeAttention310P()) {
+            _ascendcAsrNzDecodeAttentionRequests += requests;
+            ++_ascendcAsrNzDecodeAttentionLaunches;
+        }
     }
     void RecordAscendCAsrMixedAttention(uint32_t decodeRequests,
                                          uint32_t prefillRequests)
@@ -547,6 +561,14 @@ public:
     {
         return _ascendcAsrDecodeAttentionLaunches;
     }
+    [[nodiscard]] uint64_t AscendCAsrNzDecodeAttentionRequests(void) const
+    {
+        return _ascendcAsrNzDecodeAttentionRequests;
+    }
+    [[nodiscard]] uint64_t AscendCAsrNzDecodeAttentionLaunches(void) const
+    {
+        return _ascendcAsrNzDecodeAttentionLaunches;
+    }
     [[nodiscard]] uint64_t AscendCAsrMixedDecodeRequests(void) const
     {
         return _ascendcAsrMixedDecodeRequests;
@@ -728,6 +750,7 @@ public:
     uint64_t ascendcAsrRmsNormRequests = 0;
     uint64_t ascendcAsrAddRmsNormRequests = 0;
     uint64_t ascendcAsrQkNormMropeCacheRequests = 0;
+    uint64_t ascendcAsrNzCacheWriteRequests = 0;
     uint64_t ascendcAsrSiluMulRequests = 0;
     uint64_t ascendcAsrPerfProjectionRequests = 0;
     uint64_t ascendcAsrPerfLmHeadRequests = 0;
@@ -906,6 +929,8 @@ protected:
     uint64_t _batchedDecodeAttentionLaunches = 0;
     uint64_t _ascendcAsrDecodeAttentionRequests = 0;
     uint64_t _ascendcAsrDecodeAttentionLaunches = 0;
+    uint64_t _ascendcAsrNzDecodeAttentionRequests = 0;
+    uint64_t _ascendcAsrNzDecodeAttentionLaunches = 0;
     uint64_t _ascendcAsrMixedDecodeRequests = 0;
     uint64_t _ascendcAsrMixedPrefillRequests = 0;
     uint64_t _ascendcAsrMixedAttentionLaunches = 0;

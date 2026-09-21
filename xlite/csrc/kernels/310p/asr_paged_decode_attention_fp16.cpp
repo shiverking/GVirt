@@ -48,6 +48,21 @@ __aicore__ inline void GmCacheRowsToL1Nz(const LocalTensor<half> &dst,
     DataCopy(dst[dstRow * 16], src, params);
 }
 
+__aicore__ inline void NativeNzCacheRowsToL1(
+    const LocalTensor<half> &dst, const GlobalTensor<half> &src,
+    uint32_t rows, uint32_t dstRow)
+{
+    // Native logical [block,64,128,16] is already laid out as the eight
+    // 16-dimension NZ blocks consumed by the cube.  Each 32-byte DMA block
+    // is one token row; stride over the unused tokens in every dim block.
+    DataCopyParams params;
+    params.blockCount = 8;
+    params.blockLen = rows;
+    params.srcStride = 128 - rows;
+    params.dstStride = kTileTokens - rows;
+    DataCopy(dst[dstRow * 16], src, params);
+}
+
 __aicore__ inline void L1ToL0A(const LocalTensor<half> &dst,
                                 const LocalTensor<half> &src,
                                 uint32_t kBlocks)
@@ -90,10 +105,12 @@ public:
     __aicore__ inline void InitFused(GM_ADDR qkv, GM_ADDR kCache,
                                      GM_ADDR vCache, GM_ADDR blockTable,
                                      GM_ADDR cachedLengths, GM_ADDR output,
-                                     uint32_t batch, uint32_t tableStride)
+                                     uint32_t batch, uint32_t tableStride,
+                                     bool nativeNz = false)
     {
         InitCommon(qkv, kCache, vCache, blockTable, cachedLengths,
                    batch, tableStride);
+        nativeNz_ = nativeNz;
         output_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(output));
         Bind(globalAccF_, TPosition::VECCALC, 16960);
         Bind(scaledPartitionF_, TPosition::VECCALC, 17472);
@@ -108,13 +125,16 @@ public:
     __aicore__ inline void InitFusedPacked(
         GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
         GM_ADDR cachedLengths, GM_ADDR queryStartLoc, GM_ADDR queryLens,
-        GM_ADDR output, uint32_t batch, uint32_t tableStride)
+        GM_ADDR output, uint32_t batch, uint32_t tableStride,
+        uint32_t totalTokens,
+        bool nativeNz = false)
     {
         InitFused(qkv, kCache, vCache, blockTable, cachedLengths, output,
-                  batch, tableStride);
+                  batch, tableStride, nativeNz);
         queryStartLoc_ = reinterpret_cast<__gm__ int32_t *>(queryStartLoc);
         queryLens_ = reinterpret_cast<__gm__ int32_t *>(queryLens);
         packed_ = true;
+        totalTokens_ = totalTokens;
     }
 
     __aicore__ inline void InitCommon(GM_ADDR qkv, GM_ADDR kCache,
@@ -130,6 +150,7 @@ public:
         queryStartLoc_ = nullptr;
         queryLens_ = nullptr;
         packed_ = false;
+        nativeNz_ = false;
         batch_ = batch;
         tableStride_ = tableStride;
         Bind(l1Q_, TPosition::A1, 0);
@@ -183,22 +204,33 @@ public:
         set_mask_norm();
         FetchEvents();
         SetFlag<HardEvent::MTE3_V>(mte3ToV_);
-        const uint32_t work = batch_ * kKvHeads;
+        const uint32_t work = (packed_ ? totalTokens_ : batch_) * kKvHeads;
         for (uint32_t item = GetBlockIdx(); item < work;
              item += GetBlockNum()) {
-            const uint32_t request = item / kKvHeads;
+            const uint32_t queryRow = item / kKvHeads;
             const uint32_t kvHead = item % kKvHeads;
-            if (packed_ &&
-                (queryLens_[request] != 1 || lengths_[request] <= 0)) {
-                continue;
+            uint32_t request = queryRow;
+            uint32_t localQuery = 0;
+            if (packed_) {
+                bool found = false;
+                for (uint32_t candidate = 0; candidate < batch_; ++candidate) {
+                    const uint32_t start = static_cast<uint32_t>(queryStartLoc_[candidate]);
+                    const uint32_t count = static_cast<uint32_t>(queryLens_[candidate]);
+                    if (queryRow >= start && queryRow < start + count) {
+                        request = candidate;
+                        localQuery = queryRow - start;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) continue;
             }
-            const int32_t lengthSigned = lengths_[request] + 1;
+            const int32_t lengthSigned = lengths_[request] +
+                                         static_cast<int32_t>(localQuery) + 1;
             if (lengthSigned <= 0 ||
                 lengthSigned > static_cast<int32_t>(kMaxKv)) {
                 continue;
             }
-            const uint32_t queryRow = packed_ ?
-                static_cast<uint32_t>(queryStartLoc_[request]) : request;
             RunFusedGroup(request, queryRow, kvHead,
                           static_cast<uint32_t>(lengthSigned));
         }
@@ -268,6 +300,18 @@ private:
                  tokenInBlock) * kKvHeads + kvHead) * kHeadDim;
     }
 
+    __aicore__ inline uint64_t NativeNzCacheOffset(
+        uint32_t request, uint32_t logicalToken, uint32_t kvHead) const
+    {
+        const uint32_t logicalBlock = logicalToken / kBlockSize;
+        const uint32_t tokenInBlock = logicalToken % kBlockSize;
+        const uint32_t physicalBlock = static_cast<uint32_t>(
+            blockTable_[request * tableStride_ + logicalBlock]);
+        return static_cast<uint64_t>(physicalBlock) * 64 * 128 * 16 +
+               static_cast<uint64_t>(kvHead) * 8 * 128 * 16 +
+               static_cast<uint64_t>(tokenInBlock) * 16;
+    }
+
     __aicore__ inline void StageQuery(LocalTensor<half> &destination,
                                       uint32_t queryRow,
                                       uint32_t queryHead)
@@ -302,9 +346,15 @@ private:
             const uint32_t remaining = validTokens - staged;
             const uint32_t rows = remaining < beforeBoundary ?
                 remaining : beforeBoundary;
-            GmCacheRowsToL1Nz(
-                l1B_, cache[CacheOffset(request, logicalToken, kvHead)],
-                rows, staged);
+            if (nativeNz_) {
+                NativeNzCacheRowsToL1(
+                    l1B_, cache[NativeNzCacheOffset(
+                        request, logicalToken, kvHead)], rows, staged);
+            } else {
+                GmCacheRowsToL1Nz(
+                    l1B_, cache[CacheOffset(request, logicalToken, kvHead)],
+                    rows, staged);
+            }
             staged += rows;
         }
         SetFlag<HardEvent::MTE2_MTE1>(mte2ToMte1_);
@@ -710,6 +760,7 @@ private:
     __gm__ int32_t *queryStartLoc_ = nullptr;
     __gm__ int32_t *queryLens_ = nullptr;
     bool packed_ = false;
+    bool nativeNz_ = false;
     LocalTensor<half> l1Q_, l1B_, l1P_, l1QPair_, l0A_, l0B_;
     LocalTensor<float> l0C_;
     LocalTensor<half> zeroH_, probabilityH_;
@@ -722,6 +773,7 @@ private:
     LocalTensor<half> outputH_;
     uint32_t batch_ = 0;
     uint32_t tableStride_ = 0;
+    uint32_t totalTokens_ = 0;
     event_t vToMte3_, mte3ToMte2_, mte3ToMte1_, mte2ToMte1_;
     event_t mte1ToM_, mToMte1_, mToV_, vToM_, vToS_, sToV_, mte3ToV_;
 };
@@ -768,19 +820,54 @@ extern "C" __global__ __aicore__ void asr_paged_decode_attention_fp16(
 extern "C" __global__ __aicore__ void asr_paged_mixed_decode_attention_fp16(
     GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
     GM_ADDR cachedLengths, GM_ADDR queryStartLoc, GM_ADDR queryLens,
-    GM_ADDR output, uint32_t batch, uint32_t tableStride)
+    GM_ADDR output, uint32_t batch, uint32_t tableStride,
+    uint32_t totalTokens)
 {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
 #error "asr_paged_mixed_decode_attention_fp16 requires Ascend310P3 M200"
 #endif
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
     if (batch == 0 || batch > kMaxBatch || tableStride == 0 ||
-        tableStride > 16) {
+        tableStride > 16 || totalTokens == 0) {
         return;
     }
     AsrPagedDecodeAttentionKernel kernel;
     kernel.InitFusedPacked(qkv, kCache, vCache, blockTable, cachedLengths,
                            queryStartLoc, queryLens, output, batch,
-                           tableStride);
+                           tableStride, totalTokens);
+    kernel.ProcessFused();
+}
+
+extern "C" __global__ __aicore__ void asr_paged_decode_attention_nz_fp16(
+    GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
+    GM_ADDR cachedLengths, GM_ADDR output, uint32_t batch, uint32_t tableStride)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_paged_decode_attention_nz_fp16 requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch || tableStride == 0 || tableStride > 16) return;
+    AsrPagedDecodeAttentionKernel kernel;
+    kernel.InitFused(qkv, kCache, vCache, blockTable, cachedLengths, output,
+                     batch, tableStride, true);
+    kernel.ProcessFused();
+}
+
+extern "C" __global__ __aicore__ void asr_paged_mixed_decode_attention_nz_fp16(
+    GM_ADDR qkv, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR blockTable,
+    GM_ADDR cachedLengths, GM_ADDR queryStartLoc, GM_ADDR queryLens,
+    GM_ADDR output, uint32_t batch, uint32_t tableStride,
+    uint32_t totalTokens)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 2002)
+#error "asr_paged_mixed_decode_attention_nz_fp16 requires Ascend310P3 M200"
+#endif
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    if (batch == 0 || batch > kMaxBatch || tableStride == 0 ||
+        tableStride > 16 || totalTokens == 0) return;
+    AsrPagedDecodeAttentionKernel kernel;
+    kernel.InitFusedPacked(qkv, kCache, vCache, blockTable, cachedLengths,
+                           queryStartLoc, queryLens, output, batch,
+                           tableStride, totalTokens, true);
     kernel.ProcessFused();
 }

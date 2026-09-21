@@ -582,7 +582,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 #ifdef XLITE_ARCH_310P
 static bool UseAscendCAsrQkNormMropeCache(const XRuntime &rt)
 {
-    return rt.UseAscendCAsrMatmul310P() && rt._linearDecodeStep;
+    return rt.UseAscendCAsrMatmul310P() &&
+           (rt._linearDecodeStep || rt.UseAscendCAsrNzDecodeAttention310P());
 }
 
 static void CheckAscendCAsrQkNormMropeCacheContract(
@@ -593,6 +594,7 @@ static void CheckAscendCAsrQkNormMropeCacheContract(
     constexpr uint64_t expectedMaskH = 0x0492492492492492ULL;
     constexpr uint64_t expectedMaskW = 0x0924924924924924ULL;
     const std::vector<uint32_t> expectedSections = {24, 20, 20};
+    const bool nativeNz = rt.UseAscendCAsrNzDecodeAttention310P();
     const bool allSingleToken = rt._hostLens.size() == qkv.shape[0] &&
         std::all_of(rt._hostLens.begin(), rt._hostLens.end(),
                     [](uint32_t length) { return length == 1; });
@@ -603,12 +605,13 @@ static void CheckAscendCAsrQkNormMropeCacheContract(
         !config.mropeInterleaved || config.mropeSection != expectedSections ||
         mropeMaskH != expectedMaskH || mropeMaskW != expectedMaskW ||
         qNormBias.ptr != nullptr || kNormBias.ptr != nullptr ||
-        qkv.shape.size() != 2 || qkv.shape[0] == 0 || qkv.shape[0] > 20 ||
-        qkv.shape[1] != 4096 || !allSingleToken) {
+        qkv.shape.size() != 2 || qkv.shape[0] == 0 ||
+        qkv.shape[0] > (nativeNz ? 4096 : 20) || qkv.shape[1] != 4096 ||
+        (!nativeNz && !allSingleToken)) {
         throw std::runtime_error(
             "ascendc_asr fused QK Norm/MRoPE/Cache contract mismatch: expected TP1, "
             "bias-free Q16/KV8/head_dim=128, block_size=128, NeoX three-axis "
-            "interleaved MRoPE [24,20,20] and a pure Decode batch <=20");
+            "interleaved MRoPE [24,20,20] and at most 4096 packed tokens");
     }
 }
 
