@@ -19,7 +19,8 @@ PROJECTIONS = (
     ("down", 2048, 6144),
     ("lm-head", 151936, 2048),
 )
-M_VALUES = (1, 8, 20, 26, 52, 78, 127, 128, 129, 256, 384, 512)
+M_VALUES = (1, 2, 4, 6, 8, 12, 16, 20, 26, 52, 78, 127, 128, 129,
+            256, 384, 512)
 
 
 def _npu_format(torch_npu, tensor) -> int:
@@ -61,7 +62,7 @@ def run_shape(m: int, n: int, k: int) -> None:
     import torch
     import torch_npu
     import torch.nn.functional as F
-    from xlite._C import Runtime, get_310p_matmul_stats, matmul
+    from xlite._C import Runtime, get_310p_matmul_stats, matmul, matmul_bench
 
     torch.manual_seed(310)
     runtime = Runtime(0, 768)  # ACLNN workspace budget is at most 512 MiB.
@@ -70,7 +71,13 @@ def run_shape(m: int, n: int, k: int) -> None:
     x = torch.randn(m, k, dtype=torch.float16, device="npu:0")
     weight_nd = torch.randn(n, k, dtype=torch.float16, device="npu:0")
     weight_nz = torch_npu.npu_format_cast(weight_nd, 29)
-    output = torch.full((m, n), torch.nan, dtype=torch.float16, device="npu:0")
+    guard_elements = 64
+    guard_value = 123.0
+    output_storage = torch.full(
+        (m * n + 2 * guard_elements,), guard_value,
+        dtype=torch.float16, device="npu:0")
+    output = output_storage[guard_elements:guard_elements + m * n].view(m, n)
+    output.fill_(torch.nan)
     if _npu_format(torch_npu, weight_nd) != 2:
         raise AssertionError("ND oracle weight did not retain ACL_FORMAT_ND (2)")
     if _npu_format(torch_npu, weight_nz) != 29:
@@ -86,15 +93,39 @@ def run_shape(m: int, n: int, k: int) -> None:
     # sentinel fill, before calling the native binding.
     torch.npu.synchronize()
     started = time.perf_counter()
-    # Current production Xlite backends consume ND.  The explicit NZ backend
-    # is promoted only after its physical-tile microprobe passes.
-    matmul(runtime, x, weight_nd, output, False, False)
+    use_nz_backend = backend == "ascendc_asr_nz"
+    candidate_weight = weight_nz if use_nz_backend else weight_nd
+    matmul(runtime, x, candidate_weight, output, use_nz_backend, False)
     torch.npu.synchronize()
     elapsed_ms = (time.perf_counter() - started) * 1000
     backend_stats = dict(get_310p_matmul_stats(runtime))
 
+    warmup_x = x.clone()
+    warmup_weight = candidate_weight.clone()
+    warmup_output = torch.empty_like(output)
+    candidate_iterations = 20
+    while True:
+        candidate_ns = int(matmul_bench(
+            runtime, x, candidate_weight, output,
+            warmup_x, warmup_weight, warmup_output,
+            candidate_iterations, 3, use_nz_backend, False))
+        if candidate_ns * candidate_iterations >= 200_000_000:
+            break
+        candidate_iterations = min(candidate_iterations * 2, 1 << 20)
+    candidate_timing = {
+        "iterations": candidate_iterations,
+        "device_and_submit_ms": candidate_ns / 1_000_000,
+        "synchronized_window_ms":
+            candidate_ns * candidate_iterations / 1_000_000,
+    }
+
     actual = output.cpu().float()
     expected = reference_nz.cpu().float()
+    prefix_guard = output_storage[:guard_elements].cpu().float()
+    suffix_guard = output_storage[-guard_elements:].cpu().float()
+    if not bool((prefix_guard == guard_value).all()) or not bool(
+            (suffix_guard == guard_value).all()):
+        raise AssertionError("MatMul wrote outside the output tensor guards")
     if not torch.isfinite(actual).all():
         raise AssertionError(
             f"MatMul non-finite output: {int((~torch.isfinite(actual)).sum())}/{actual.numel()}")
@@ -114,7 +145,9 @@ def run_shape(m: int, n: int, k: int) -> None:
         },
         "native_nd": native_nd_timing,
         "native_nz": native_nz_timing,
+        "xlite_candidate": candidate_timing,
         "production_baseline": "native_nz",
+        "guards_intact": True,
         "torch_peak_allocated_bytes": torch.npu.max_memory_allocated(),
         "memory_note": "Torch allocator only; excludes native Xlite TensorPool",
         "backend_stats": backend_stats,
@@ -125,8 +158,9 @@ def run_shape(m: int, n: int, k: int) -> None:
     use_m200 = (backend == "m200_asr" and m <= 20 and n != 151936) or (
         backend == "m200_asr_prefill" and m <= 4096 and n != 151936)
     use_ascendc_asr = (
-        backend in ("ascendc_asr", "ascendc_asr_perf") and m <= 20 and
-        (n != 151936 or backend == "ascendc_asr_perf")
+        backend in ("ascendc_asr_nz", "ascendc_asr", "ascendc_asr_perf") and
+        m <= 20 and
+        (n != 151936 or backend in ("ascendc_asr_nz", "ascendc_asr_perf"))
     )
     if use_ascendc_asr:
         if (backend_stats["ascendc_asr_requests"] != 1 or
@@ -147,6 +181,16 @@ def run_shape(m: int, n: int, k: int) -> None:
                 raise AssertionError(
                     "performance candidate telemetry does not match shape: "
                     f"{backend_stats}")
+        if backend == "ascendc_asr_nz":
+            expected_projection = 0 if n == 151936 else 1
+            expected_lm_head = 1 if n == 151936 else 0
+            if (backend_stats["ascendc_asr_nz_projection_requests"] !=
+                    expected_projection or
+                    backend_stats["ascendc_asr_nz_lm_head_requests"] !=
+                    expected_lm_head):
+                raise AssertionError(
+                    "NZ candidate telemetry does not match shape: "
+                    f"{backend_stats}")
     elif use_m200:
         expected_launches = 13 if n == 151936 else 1
         if (backend_stats["m200_requests"] != 1 or
@@ -159,7 +203,7 @@ def run_shape(m: int, n: int, k: int) -> None:
           backend_stats["aclnn_requests"] != 1):
         raise AssertionError(
             f"shape outside the verified M200 range did not use ACLNN fallback: {backend_stats}")
-    if backend in ("ascendc_asr", "ascendc_asr_perf") and not use_ascendc_asr:
+    if backend in ("ascendc_asr_nz", "ascendc_asr", "ascendc_asr_perf") and not use_ascendc_asr:
         if backend_stats["ascendc_asr_bypass_requests"] != 1:
             raise AssertionError(
                 "staged AscendC ASR prefill/LM-head boundary was not counted: "
@@ -176,7 +220,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-dir", type=Path, default=Path("matmul_310p_report"))
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per shape")
-    parser.add_argument("--backend", choices=("ascendc_asr_perf", "ascendc_asr",
+    parser.add_argument("--backend", choices=("ascendc_asr_nz", "ascendc_asr_perf", "ascendc_asr",
                                                "m200_asr_prefill", "m200_asr", "aclnn"),
                         default="m200_asr",
                         help="Force one 310P MatMul backend in every selected case")

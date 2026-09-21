@@ -27,5 +27,13 @@ bool XliteAscendCAsrLmHead310PSupported(const XTensor &in,
                                         bool transpose);
 void XliteAscendCAsrLmHead310P(XRuntime &rt, XTensor &in,
                                XTensor &weight, XTensor &out);
+bool XliteAscendCAsrNzMatmul310PSupported(const XTensor &in,
+                                          const XTensor &weight,
+                                          const XTensor &out, bool weightNZ,
+                                          const XTensor &bias,
+                                          const XTensor &deqScale,
+                                          bool transpose);
+void XliteAscendCAsrNzMatmul310P(XRuntime &rt, XTensor &in,
+                                 XTensor &weight, XTensor &out);
 
 #endif

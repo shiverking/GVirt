@@ -201,6 +201,24 @@
       "runtime_eligible": true,
       "runtime_backend": "ascendc_asr_perf",
       "remaining_gate": "model_weight_and_whole_model_validation"
+    },
+    "asr_m200_matmul_nz_fp16": {
+      "status": "experimental_native_layout_microprobe",
+      "ub_bytes": 24576,
+      "l1_bytes_max": 425984,
+      "l1_activation_bytes_max": 393216,
+      "l1_weight_bytes": 32768,
+      "l0a_bytes": 8192,
+      "l0b_bytes": 32768,
+      "l0c_bytes": 16384,
+      "event_pairs": 8,
+      "tile": {"m": 32, "n": 128, "k": 128},
+      "input_layout": "ND",
+      "weight_layout": "FRACTAL_NZ_29",
+      "output_layout": "ND",
+      "shapes": ["qkv", "o", "gate_up", "down", "lm_head"],
+      "runtime_eligible": false,
+      "promotion_gate": "physical_tile_correctness_and_same_process_native_nz_performance"
     }
   }
 }

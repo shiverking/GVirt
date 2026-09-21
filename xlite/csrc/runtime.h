@@ -85,6 +85,7 @@ enum class XMatmulBackend310P {
     M200_ASR_PREFILL,
     ASCENDC_ASR,
     ASCENDC_ASR_PERF,
+    ASCENDC_ASR_NZ,
 };
 enum class XDecodeAttentionBackend310P {
     LEGACY,
@@ -236,11 +237,16 @@ public:
     [[nodiscard]] bool UseAscendCAsrMatmul310P(void) const
     {
         return _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR ||
-               _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_PERF;
+               _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_PERF ||
+               _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_NZ;
     }
     [[nodiscard]] bool UseAscendCAsrPerf310P(void) const
     {
         return _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_PERF;
+    }
+    [[nodiscard]] bool UseAscendCAsrNz310P(void) const
+    {
+        return _matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_NZ;
     }
     [[nodiscard]] bool UseBatchedDecodeAttention310P(void) const
     {
@@ -726,6 +732,8 @@ public:
     uint64_t ascendcAsrPerfProjectionRequests = 0;
     uint64_t ascendcAsrPerfLmHeadRequests = 0;
     uint64_t ascendcAsrPerfSiluMulRequests = 0;
+    uint64_t ascendcAsrNzProjectionRequests = 0;
+    uint64_t ascendcAsrNzLmHeadRequests = 0;
     // Keep exact M telemetry through the configured 310P batched-token limit.
     // This is intentionally fixed-size: recording a request must not allocate.
     std::array<uint64_t, 4097> m200MatmulRequestsByM{};

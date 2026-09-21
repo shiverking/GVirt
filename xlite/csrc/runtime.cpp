@@ -335,8 +335,13 @@ void XRuntime::SetMatmulBackend310P(const std::string &backend)
         _matmulBackend310P = XMatmulBackend310P::ASCENDC_ASR_PERF;
         return;
     }
+    if (backend == "ascendc_asr_nz") {
+        _matmulBackend310P = XMatmulBackend310P::ASCENDC_ASR_NZ;
+        return;
+    }
     throw std::invalid_argument(
-        "Ascend310P matmul backend must be one of: ascendc_asr_perf, ascendc_asr, "
+        "Ascend310P matmul backend must be one of: ascendc_asr_nz, "
+        "ascendc_asr_perf, ascendc_asr, "
         "m200_asr_prefill, m200_asr, aclnn");
 }
 
@@ -350,6 +355,9 @@ const char *XRuntime::MatmulBackend310PName(void) const
     }
     if (_matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_PERF) {
         return "ascendc_asr_perf";
+    }
+    if (_matmulBackend310P == XMatmulBackend310P::ASCENDC_ASR_NZ) {
+        return "ascendc_asr_nz";
     }
     return _matmulBackend310P == XMatmulBackend310P::M200_ASR ? "m200_asr" : "aclnn";
 }

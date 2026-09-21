@@ -3257,8 +3257,8 @@ PYBIND11_MODULE(_C, m)
         info["cross_stream_handoff"] = "split_acl_event_sync";
         info["matmul_backend"] = "runtime_selectable";
         info["matmul_backends"] =
-            py::make_tuple("ascendc_asr_perf", "ascendc_asr", "m200_asr_prefill",
-                           "m200_asr", "aclnn");
+            py::make_tuple("ascendc_asr_nz", "ascendc_asr_perf", "ascendc_asr",
+                           "m200_asr_prefill", "m200_asr", "aclnn");
         info["default_matmul_backend"] = "m200_asr";
         // Fixed decode projections, RMSNorm, fused residual AddRMSNorm,
         // QK-Norm/MRoPE/cache, SiLU-Mul and scratch-free paged Decode
@@ -3281,6 +3281,10 @@ PYBIND11_MODULE(_C, m)
         info["ascendc_asr_perf_projection"] = "l1_cached_activation";
         info["ascendc_asr_perf_silu_mul"] = "whole_row";
         info["ascendc_asr_perf_lm_head"] = "l1_cached_activation_full_logits";
+        info["ascendc_asr_nz_backend"] = true;
+        info["ascendc_asr_nz_status"] = "experimental_decode_matmul_microprobe";
+        info["ascendc_asr_nz_weight_format"] = 29;
+        info["ascendc_asr_nz_fallback"] = false;
         info["ascendc_asr_paged_decode_attention"] = true;
         info["ascendc_asr_paged_decode_attention_scratch_bytes"] = 0;
         info["ascendc_asr_paged_decode_attention_work"] =
@@ -3329,6 +3333,10 @@ PYBIND11_MODULE(_C, m)
         stats["ascendc_asr_perf_lm_head_requests"] = rt.ascendcAsrPerfLmHeadRequests;
         stats["ascendc_asr_perf_silu_mul_requests"] =
             rt.ascendcAsrPerfSiluMulRequests;
+        stats["ascendc_asr_nz_projection_requests"] =
+            rt.ascendcAsrNzProjectionRequests;
+        stats["ascendc_asr_nz_lm_head_requests"] =
+            rt.ascendcAsrNzLmHeadRequests;
         stats["matmul_backend"] = rt.MatmulBackend310PName();
         py::dict m200ByM;
         py::dict aclnnByM;
@@ -3519,6 +3527,10 @@ PYBIND11_MODULE(_C, m)
                 rt.ascendcAsrPerfLmHeadRequests;
             stats["ascendc_asr_perf_silu_mul_requests"] =
                 rt.ascendcAsrPerfSiluMulRequests;
+            stats["ascendc_asr_nz_projection_requests"] =
+                rt.ascendcAsrNzProjectionRequests;
+            stats["ascendc_asr_nz_lm_head_requests"] =
+                rt.ascendcAsrNzLmHeadRequests;
             stats["matmul_backend"] = rt.MatmulBackend310PName();
             py::dict m200ByM;
             py::dict aclnnByM;

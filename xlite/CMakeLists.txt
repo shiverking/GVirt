@@ -232,6 +232,7 @@ if(XLITE_KERNEL_SET STREQUAL "llm_fp16")
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_projection_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_projection_cached_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_lm_head_fp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_m200_matmul_nz_fp16.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/310p/asr_paged_decode_attention_fp16.cpp
     )
     # Keep AIV-only ASR vector kernels separate from the AIC-only projection
