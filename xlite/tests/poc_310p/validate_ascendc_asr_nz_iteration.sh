@@ -21,9 +21,10 @@ run_stage() {
     shift
     local log="${report_dir}/${name}.log"
     echo "[ RUN      ] ${name}"
-    if "$@" >"${log}" 2>&1; then
+    "$@" 2>&1 | tee "${log}"
+    local status=${PIPESTATUS[0]}
+    if [[ ${status} -eq 0 ]]; then
         echo "[       OK ] ${name}"
-        tail -20 "${log}"
     else
         echo "[  FAILED  ] ${name} (recorded; continuing)"
         failures=$((failures + 1))
@@ -43,9 +44,23 @@ if [[ "${mode}" == "full" ]]; then
     run_stage native-kv-physical-layout \
         python3 tests/poc_310p/probe_native_kv_physical_layout.py \
         --report "${report_dir}/native-kv-physical-layout.json"
+    matmul_args=(
+        --backend ascendc_asr_nz
+        --report-dir "${report_dir}/matmul"
+        --resume
+    )
+    for projection in qkv o gate-up down lm-head; do
+        for batch in 1 2 4 6 8 12 16 20; do
+            matmul_args+=(--case "${projection}-m${batch}")
+        done
+    done
+    for projection in qkv o gate-up down; do
+        for batch in 129 256; do
+            matmul_args+=(--case "${projection}-m${batch}")
+        done
+    done
     run_stage nz-matmul-full \
-        bash tests/poc_310p/validate_ascendc_asr_nz_matmul.sh \
-        "${report_dir}/matmul"
+        python3 tests/poc_310p/test_matmul.py "${matmul_args[@]}"
 else
     run_stage nz-matmul-smoke \
         python3 tests/poc_310p/test_matmul.py \

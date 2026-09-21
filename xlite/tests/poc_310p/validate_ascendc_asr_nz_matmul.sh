@@ -22,6 +22,7 @@ done
 python3 tests/poc_310p/test_matmul.py \
   --backend ascendc_asr_nz \
   --report-dir "${report_dir}" \
+  --resume \
   "${args[@]}"
 
 python3 - "${report_dir}" <<'PY'

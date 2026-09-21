@@ -236,6 +236,9 @@ def main() -> int:
     parser.add_argument(
         "--rerun-failed", action="store_true",
         help="Run only failures recorded in REPORT_DIR/summary.json")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Skip previously passed cases whose logs still exist")
     parser.add_argument("--shape", type=int, nargs=3, metavar=("M", "N", "K"),
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -261,6 +264,8 @@ def main() -> int:
         if not args.case:
             print(f"No failed cases recorded in {summary_path}")
             return 0
+    if args.resume and args.rerun_failed:
+        parser.error("--resume and --rerun-failed are mutually exclusive")
     if args.case:
         known = {name for name, _m, _n, _k in cases}
         unknown = [name for name in args.case if name not in known]
@@ -271,10 +276,25 @@ def main() -> int:
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     args.report_dir.mkdir(parents=True, exist_ok=True)
-    results = []
+    previous_results = {}
+    summary_path = args.report_dir / "summary.json"
+    if args.resume and summary_path.is_file():
+        try:
+            previous = json.loads(summary_path.read_text(encoding="utf-8"))
+            previous_results = {
+                item["name"]: item for item in previous
+                if int(item["exit_code"]) == 0 and
+                Path(item["log"]).is_file()
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            parser.error(f"cannot resume from {summary_path}: {error}")
+    result_by_name = dict(previous_results)
     env = dict(os.environ, XLITE_TEST_FP16_ONLY="1",
                XLITE_TEST_MATMUL_BACKEND=args.backend)
     for name, m, n, k in cases:
+        if name in previous_results:
+            print(f"[  CACHED  ] {name} M={m} N={n} K={k}", flush=True)
+            continue
         print(f"[ RUN      ] {name} M={m} N={n} K={k}", flush=True)
         log_path = args.report_dir / f"{name}.log"
         # A failed ACLNN call can leave device state or pool allocations behind.
@@ -289,11 +309,22 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 log.write(f"\nTimeout after {args.timeout} seconds\n")
                 status = 124
-        results.append({"name": name, "m": m, "n": n, "k": k,
-                        "exit_code": status, "log": str(log_path.resolve())})
+        result_by_name[name] = {
+            "name": name, "m": m, "n": n, "k": k,
+            "exit_code": status, "log": str(log_path.resolve()),
+        }
         print(f"[ {'      OK' if status == 0 else ' FAILED '} ] {name}", flush=True)
-        (args.report_dir / "summary.json").write_text(
-            json.dumps(results, indent=2), encoding="utf-8")
+        ordered_results = [
+            result_by_name[case_name]
+            for case_name, _m, _n, _k in cases
+            if case_name in result_by_name
+        ]
+        summary_path.write_text(
+            json.dumps(ordered_results, indent=2), encoding="utf-8")
+    results = [
+        result_by_name[name] for name, _m, _n, _k in cases
+        if name in result_by_name
+    ]
     failures = [item for item in results if item["exit_code"] != 0]
     print(f"\nMatMul summary: {len(results) - len(failures)} passed, {len(failures)} failed")
     if failures:
