@@ -808,6 +808,14 @@ public:
     std::vector<uint32_t> _lensHost;
     std::vector<uint32_t> _blockTablesHost;
 #ifdef XLITE_ARCH_310P
+    // Persistent PrepareAttn scratch.  Capacity is fixed in InitAttn so the
+    // 310P eager hot path never allocates transient metadata containers.
+    std::vector<uint32_t> _prepareQueryStartLoc;
+    std::vector<uint32_t> _prepareNumBlocks;
+    std::vector<uint32_t> _prepareTotalLens;
+    std::vector<uint32_t> _prepareSlotMapping;
+    std::vector<uint32_t> _prepareBlockTables;
+    std::vector<uint64_t> _preparePosition;
     // Computed once in PrepareAttn and shared by all decoder layers. Direct
     // ATB uses these indices to compact only the decode rows of a mixed batch.
     std::vector<uint32_t> _queryOffsetsHost;

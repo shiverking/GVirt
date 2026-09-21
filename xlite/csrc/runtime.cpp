@@ -645,6 +645,22 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
     void *ptr;
 
 #ifdef XLITE_310P_LLM_FP16_POC
+    const size_t tableCapacity = static_cast<size_t>(maxBatch) *
+                                 DIV_ROUND_UP(maxSeqLen, blockSizes[0]);
+    _lensHost.reserve(maxBatch);
+    _cachedLensHost.reserve(maxBatch);
+    _hostLens.reserve(maxBatch);
+    _prepareQueryStartLoc.reserve(maxBatch);
+    _prepareNumBlocks.reserve(maxBatch);
+    _prepareTotalLens.reserve(maxBatch);
+    _prepareSlotMapping.reserve(maxBatchedTokens);
+    _prepareBlockTables.reserve(tableCapacity);
+    _preparePosition.reserve(maxBatchedTokens);
+    _queryOffsetsHost.reserve(maxBatch);
+    _decodeRequestIndicesHost.reserve(maxBatch);
+    _directAtbProcessedRequests.reserve(maxBatch);
+    _blockTablesHost.reserve(tableCapacity);
+
     // Native paged attention needs cached+query lengths for both metadata versions.
     size = maxBatch * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
@@ -968,6 +984,24 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         _attnInitialized = true;
     }
     uint32_t batch = attnMeta.lensCpu.size();
+#ifdef XLITE_ARCH_310P
+    auto &lens = _lensHost;
+    auto &cachedLens = _cachedLensHost;
+    auto &queryStartLoc = _prepareQueryStartLoc;
+    auto &numBlocks = _prepareNumBlocks;
+    auto &totalLens = _prepareTotalLens;
+    auto &slotMapping = _prepareSlotMapping;
+    auto &blockTables = _prepareBlockTables;
+    auto &position = _preparePosition;
+    lens.resize(batch);
+    cachedLens.resize(batch);
+    queryStartLoc.resize(batch);
+    numBlocks.resize(batch);
+    totalLens.resize(batch);
+    slotMapping.clear();
+    blockTables.clear();
+    position.clear();
+#else
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
     std::vector<uint32_t> queryStartLoc(batch);
@@ -975,6 +1009,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint32_t> totalLens(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
+#endif
     uint32_t queryStart, blockId, id, k;
     size_t size;
 
@@ -1015,8 +1050,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     _decodeStep = !anyMultiToken;
     // Decode only when every request has cache and this step is a single token.
     _linearDecodeStep = allCached && !anyMultiToken && batch > 0;
+#ifndef XLITE_ARCH_310P
     _lensHost = lens;
     _cachedLensHost = cachedLens;
+#endif
 
 #ifdef XLITE_ARCH_310P
     _queryOffsetsHost = queryStartLoc;
@@ -1033,43 +1070,45 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     // Record scheduler shapes once per forward, before the 28 decoder layers
     // consume the same metadata.  A request is prefill when it has more than
     // one query token or no cached KV; ordinary one-token decode is excluded.
-    std::map<std::string, uint32_t> exactShapeCounts;
-    std::string batchShape = "b" + std::to_string(batch) + "-q";
-    for (uint32_t i = 0; i < batch; ++i) {
-        if (i != 0) {
-            batchShape += "_";
+    if (!UseAscendCAsrNzDecodeAttention310P()) {
+        std::map<std::string, uint32_t> exactShapeCounts;
+        std::string batchShape = "b" + std::to_string(batch) + "-q";
+        for (uint32_t i = 0; i < batch; ++i) {
+            if (i != 0) {
+                batchShape += "_";
+            }
+            batchShape += std::to_string(lens[i]);
         }
-        batchShape += std::to_string(lens[i]);
-    }
-    batchShape += "-c";
-    for (uint32_t i = 0; i < batch; ++i) {
-        if (i != 0) {
-            batchShape += "_";
+        batchShape += "-c";
+        for (uint32_t i = 0; i < batch; ++i) {
+            if (i != 0) {
+                batchShape += "_";
+            }
+            batchShape += std::to_string(cachedLens[i]);
         }
-        batchShape += std::to_string(cachedLens[i]);
-    }
-    uint32_t prefillRequests = 0;
-    for (uint32_t i = 0; i < batch; ++i) {
-        if (lens[i] == 1 && cachedLens[i] != 0) {
-            continue;
+        uint32_t prefillRequests = 0;
+        for (uint32_t i = 0; i < batch; ++i) {
+            if (lens[i] == 1 && cachedLens[i] != 0) {
+                continue;
+            }
+            ++prefillRequests;
+            ++_prefillShapeRequests;
+            _prefillActualQueryTokens += lens[i];
+            _prefillPaddedQueryTokens += DIV_ROUND_UP(lens[i], 128U) * 128U;
+            const std::string shape = "q" + std::to_string(lens[i]) + "-c" +
+                                      std::to_string(cachedLens[i]) + "-kv" +
+                                      std::to_string(totalLens[i]);
+            ++_prefillShapeHistogram[shape];
+            ++exactShapeCounts[shape];
         }
-        ++prefillRequests;
-        ++_prefillShapeRequests;
-        _prefillActualQueryTokens += lens[i];
-        _prefillPaddedQueryTokens += DIV_ROUND_UP(lens[i], 128U) * 128U;
-        const std::string shape = "q" + std::to_string(lens[i]) + "-c" +
-                                  std::to_string(cachedLens[i]) + "-kv" +
-                                  std::to_string(totalLens[i]);
-        ++_prefillShapeHistogram[shape];
-        ++exactShapeCounts[shape];
-    }
-    if (prefillRequests != 0) {
-        ++_prefillShapeForwardCalls;
-        ++_prefillBatchShapeHistogram[batchShape];
-        for (const auto &[shape, count] : exactShapeCounts) {
-            (void)shape;
-            if (count > 1) {
-                _prefillExactGroupableRequests += count;
+        if (prefillRequests != 0) {
+            ++_prefillShapeForwardCalls;
+            ++_prefillBatchShapeHistogram[batchShape];
+            for (const auto &[shape, count] : exactShapeCounts) {
+                (void)shape;
+                if (count > 1) {
+                    _prefillExactGroupableRequests += count;
+                }
             }
         }
     }
