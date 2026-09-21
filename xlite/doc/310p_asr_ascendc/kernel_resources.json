@@ -80,6 +80,14 @@
       "arithmetic": "gqa_pair_low_level_mmad_fp32_partition_softmax_and_merge",
       "runtime_eligible": true,
       "gm_intermediate_scratch_bytes": 0,
+      "native_nz_layout_oracle": {
+        "status": "runtime_capture_required",
+        "writer": "torch_npu._npu_reshape_and_cache",
+        "cache_shape": ["num_blocks", 64, 128, 16],
+        "cache_format": 29,
+        "layout_probe": "tests/poc_310p/probe_native_kv_physical_layout.py",
+        "policy": "landmark_raw_indices_must_be_captured_before_nz_cache_kernel_design"
+      },
       "mixed_batch": {
         "entry": "asr_paged_mixed_decode_attention_fp16",
         "selection": "query_len == 1 && cached_len > 0",

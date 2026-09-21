@@ -40,6 +40,9 @@ run_stage nz-physical-layout \
     python3 tests/poc_310p/probe_nz_physical_layout.py
 
 if [[ "${mode}" == "full" ]]; then
+    run_stage native-kv-physical-layout \
+        python3 tests/poc_310p/probe_native_kv_physical_layout.py \
+        --report "${report_dir}/native-kv-physical-layout.json"
     run_stage nz-matmul-full \
         bash tests/poc_310p/validate_ascendc_asr_nz_matmul.sh \
         "${report_dir}/matmul"
